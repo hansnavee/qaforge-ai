@@ -7,6 +7,7 @@ import { Badge } from '@/components/Badge';
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
 import { api, ApiError } from '@/lib/api';
+import { getDefaultOrgId } from '@/lib/org';
 
 type Project = {
   id: string;
@@ -27,7 +28,10 @@ export default function ProjectDetailPage() {
     queryKey: ['project', projectId],
     queryFn: async () => {
       try {
-        return await api<Project>(`/api/v1/projects/${projectId}`);
+        const orgId = await getDefaultOrgId();
+        return await api<Project>(
+          `/api/v1/orgs/${orgId}/projects/${projectId}`,
+        );
       } catch (e) {
         if (e instanceof ApiError) return null;
         throw e;
@@ -37,10 +41,11 @@ export default function ProjectDetailPage() {
 
   const run = useMutation({
     mutationFn: async () => {
-      return api<{ id: string }>('/api/v1/executions', {
-        method: 'POST',
-        body: JSON.stringify({ projectId }),
-      });
+      const orgId = await getDefaultOrgId();
+      return api<{ id: string }>(
+        `/api/v1/orgs/${orgId}/projects/${projectId}/executions`,
+        { method: 'POST', body: '{}' },
+      );
     },
     onSuccess: (exec) => {
       router.push(`/app/executions/${exec.id}`);

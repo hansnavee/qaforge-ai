@@ -6,6 +6,7 @@ import { Badge } from '@/components/Badge';
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
 import { api, ApiError } from '@/lib/api';
+import { getDefaultOrgId } from '@/lib/org';
 
 type Project = {
   id: string;
@@ -21,7 +22,10 @@ export default function ProjectsPage() {
     queryKey: ['projects'],
     queryFn: async () => {
       try {
-        return await api<Project[] | { items: Project[] }>('/api/v1/projects');
+        const orgId = await getDefaultOrgId();
+        return await api<Project[] | { items: Project[] }>(
+          `/api/v1/orgs/${orgId}/projects`,
+        );
       } catch (e) {
         if (e instanceof ApiError && (e.status === 0 || e.status === 404)) {
           return [] as Project[];

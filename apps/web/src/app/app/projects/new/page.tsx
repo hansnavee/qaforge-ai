@@ -6,7 +6,8 @@ import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
 import { Input } from '@/components/Input';
 import { Progress } from '@/components/Progress';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
+import { getDefaultOrgId } from '@/lib/org';
 
 const STEPS = ['Details', 'Requirements', 'Framework', 'Review'] as const;
 
@@ -33,14 +34,31 @@ export default function NewProjectPage() {
     setSaving(true);
     setError(null);
     try {
-      const project = await api<{ id: string }>('/api/v1/projects', {
-        method: 'POST',
-        body: JSON.stringify(form),
-      });
+      const orgId = await getDefaultOrgId();
+      const payload = {
+        ...form,
+        loginUrl: form.loginUrl.trim() || undefined,
+        requirementText: form.requirementText.trim() || undefined,
+      };
+      const project = await api<{ id: string }>(
+        `/api/v1/orgs/${orgId}/projects`,
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        },
+      );
       router.push(`/app/projects/${project.id}`);
-    } catch {
+    } catch (e) {
+      const detail =
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : null;
       setError(
-        'Could not create project. The API may be offline — your draft is kept locally.',
+        detail
+          ? `Could not create project: ${detail}`
+          : 'Could not create project. The API may be offline — your draft is kept locally.',
       );
     } finally {
       setSaving(false);

@@ -9,6 +9,7 @@ import { Card } from '@/components/Card';
 import { PhaseTimeline } from '@/components/PhaseTimeline';
 import { ScoreRing } from '@/components/ScoreRing';
 import { api, ApiError, API_URL } from '@/lib/api';
+import { getDefaultOrgId } from '@/lib/org';
 import { useExecutionStore, type LiveEvent } from '@/store/execution';
 
 type Execution = {
@@ -42,7 +43,10 @@ export default function ExecutionLivePage() {
     queryKey: ['execution', executionId],
     queryFn: async () => {
       try {
-        return await api<Execution>(`/api/v1/executions/${executionId}`);
+        const orgId = await getDefaultOrgId();
+        return await api<Execution>(
+          `/api/v1/orgs/${orgId}/executions/${executionId}`,
+        );
       } catch (e) {
         if (e instanceof ApiError) return null;
         throw e;
@@ -66,8 +70,9 @@ export default function ExecutionLivePage() {
     queryKey: ['execution-events', executionId],
     queryFn: async () => {
       try {
+        const orgId = await getDefaultOrgId();
         const res = await api<LiveEvent[] | { items: LiveEvent[] }>(
-          `/api/v1/executions/${executionId}/events`,
+          `/api/v1/orgs/${orgId}/executions/${executionId}/events`,
         );
         const list = Array.isArray(res)
           ? res
@@ -85,11 +90,20 @@ export default function ExecutionLivePage() {
 
   const cont = useMutation({
     mutationFn: async () => {
-      await api(`/api/v1/executions/${executionId}/continue-after-login`, {
-        method: 'POST',
-        body: JSON.stringify({ executionId }),
-      });
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/continue-after-login`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ executionId }),
+        },
+      );
     },
+  });
+
+  const { data: orgId } = useQuery({
+    queryKey: ['default-org-id'],
+    queryFn: () => getDefaultOrgId(),
   });
 
   const liveStatus = execution?.status ?? status;
@@ -129,10 +143,17 @@ export default function ExecutionLivePage() {
             </div>
           </div>
           <a
-            href={`${API_URL}/api/v1/executions/${executionId}/download-zip`}
+            href={
+              orgId
+                ? `${API_URL}/api/v1/orgs/${orgId}/executions/${executionId}/download-zip`
+                : undefined
+            }
             className="inline-flex"
+            aria-disabled={!orgId}
           >
-            <Button variant="secondary">Download ZIP</Button>
+            <Button variant="secondary" disabled={!orgId}>
+              Download ZIP
+            </Button>
           </a>
         </div>
 

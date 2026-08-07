@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Badge } from '@/components/Badge';
 import { Card } from '@/components/Card';
 import { api, ApiError } from '@/lib/api';
+import { getDefaultOrgId } from '@/lib/org';
 
 type Execution = {
   id: string;
@@ -14,6 +15,8 @@ type Execution = {
   createdAt?: string;
   project?: { name?: string };
 };
+
+type Project = { id: string; name: string };
 
 function toneFor(status: string) {
   if (status === 'COMPLETED') return 'success' as const;
@@ -28,9 +31,24 @@ export default function ExecutionsPage() {
     queryKey: ['executions'],
     queryFn: async () => {
       try {
-        return await api<Execution[] | { items: Execution[] }>(
-          '/api/v1/executions',
+        const orgId = await getDefaultOrgId();
+        const projects = await api<Project[]>(`/api/v1/orgs/${orgId}/projects`);
+        const lists = await Promise.all(
+          (projects ?? []).map(async (p) => {
+            const runs = await api<Execution[]>(
+              `/api/v1/orgs/${orgId}/projects/${p.id}/executions`,
+            );
+            return (runs ?? []).map((ex) => ({
+              ...ex,
+              project: ex.project ?? { name: p.name },
+            }));
+          }),
         );
+        return lists
+          .flat()
+          .sort((a, b) =>
+            (b.createdAt ?? '').localeCompare(a.createdAt ?? ''),
+          );
       } catch (e) {
         if (e instanceof ApiError) return [] as Execution[];
         throw e;
