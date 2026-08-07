@@ -1,0 +1,31 @@
+{
+  "name": "@qaforge/worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node -e \"process.exit(0)\""
+  },
+  "dependencies": {
+    "@qaforge/agent-sdk": "workspace:*",
+    "@qaforge/browser-session": "workspace:*",
+    "@qaforge/database": "workspace:*",
+    "@qaforge/report-engine": "workspace:*",
+    "@qaforge/shared": "workspace:*",
+    "bullmq": "^5.41.0",
+    "ioredis": "^5.5.0",
+    "pdf-parse": "^1.1.1",
+    "playwright": "^1.51.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/pdf-parse": "^1.1.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

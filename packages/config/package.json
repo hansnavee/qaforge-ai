@@ -1,0 +1,9 @@
+{
+  "name": "@qaforge/config",
+  "version": "0.0.1",
+  "private": true,
+  "files": ["tsconfig.base.json", "tailwind.preset.js"],
+  "scripts": {
+    "test": "node -e \"process.exit(0)\""
+  }
+}

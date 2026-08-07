@@ -1,0 +1,263 @@
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { prisma } from '@qaforge/database';
+import { Role } from '@qaforge/shared';
+import { AuditService } from '../common/audit.service';
+import { decrypt, encrypt, hasEncryptionKey } from '../common/encryption';
+import type { SessionUser } from '../auth/auth';
+import { OrgsService } from '../orgs/orgs.service';
+
+@Injectable()
+export class GithubService {
+  private readonly logger = new Logger(GithubService.name);
+
+  constructor(
+    private readonly orgs: OrgsService,
+    private readonly audit: AuditService,
+  ) {}
+
+  async status(userId: string, orgId: string) {
+    await this.orgs.requireMembership(userId, orgId, Role.VIEWER);
+    const conn = await prisma.gitHubConnection.findUnique({
+      where: { organizationId: orgId },
+    });
+    return {
+      connected: Boolean(conn),
+      githubLogin: conn?.githubLogin ?? null,
+      githubUserId: conn?.githubUserId ?? null,
+      connectedAt: conn?.createdAt ?? null,
+    };
+  }
+
+  async connect(
+    user: SessionUser,
+    orgId: string,
+    body: { accessToken: string; login: string },
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.ADMIN);
+
+    if (!hasEncryptionKey()) {
+      throw new ServiceUnavailableException(
+        'ENCRYPTION_KEY is required to store GitHub tokens',
+      );
+    }
+
+    const encryptedAccessToken = encrypt(body.accessToken);
+    const conn = await prisma.gitHubConnection.upsert({
+      where: { organizationId: orgId },
+      create: {
+        organizationId: orgId,
+        encryptedAccessToken,
+        githubLogin: body.login,
+      },
+      update: {
+        encryptedAccessToken,
+        githubLogin: body.login,
+      },
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'github.connect',
+      resource: 'github_connection',
+      resourceId: conn.id,
+      metadata: { login: body.login },
+    });
+
+    return {
+      connected: true,
+      githubLogin: conn.githubLogin,
+    };
+  }
+
+  async push(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+    body: { repoFullName: string; createRepo?: boolean; branch?: string },
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+
+    const execution = await prisma.execution.findFirst({
+      where: {
+        id: executionId,
+        project: { organizationId: orgId },
+      },
+    });
+    if (!execution) throw new NotFoundException('Execution not found');
+
+    const branch = body.branch || 'qaforge/generated-tests';
+    let commitSha: string | null = null;
+    let prUrl: string | null = null;
+    let pushAttempted = false;
+    let pushError: string | null = null;
+
+    const conn = await prisma.gitHubConnection.findUnique({
+      where: { organizationId: orgId },
+    });
+
+    if (conn && hasEncryptionKey()) {
+      pushAttempted = true;
+      try {
+        const token = decrypt(conn.encryptedAccessToken);
+        const result = await this.pushReadmeStub({
+          token,
+          repoFullName: body.repoFullName,
+          createRepo: body.createRepo ?? false,
+          branch,
+          login: conn.githubLogin ?? undefined,
+          executionId,
+        });
+        commitSha = result.commitSha;
+        prUrl = result.prUrl;
+      } catch (err) {
+        pushError = (err as Error).message;
+        this.logger.warn(`GitHub push failed: ${pushError}`);
+      }
+    }
+
+    const record = await prisma.gitHubPush.create({
+      data: {
+        executionId,
+        repoFullName: body.repoFullName,
+        branch,
+        commitSha,
+        prUrl,
+      },
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'github.push',
+      resource: 'github_push',
+      resourceId: record.id,
+      metadata: {
+        repoFullName: body.repoFullName,
+        branch,
+        pushAttempted,
+        pushError,
+      },
+    });
+
+    return {
+      ...record,
+      pushAttempted,
+      pushError,
+      deferred: !pushAttempted,
+    };
+  }
+
+  private async pushReadmeStub(opts: {
+    token: string;
+    repoFullName: string;
+    createRepo: boolean;
+    branch: string;
+    login?: string;
+    executionId: string;
+  }) {
+    const headers = {
+      Authorization: `Bearer ${opts.token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'QAForge-AI',
+      'Content-Type': 'application/json',
+    };
+
+    const [owner, repo] = opts.repoFullName.split('/');
+    if (!owner || !repo) {
+      throw new Error('repoFullName must be owner/repo');
+    }
+
+    if (opts.createRepo) {
+      const createRes = await fetch('https://api.github.com/user/repos', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: repo,
+          private: true,
+          auto_init: true,
+          description: 'Generated by QAForge AI',
+        }),
+      });
+      if (!createRes.ok && createRes.status !== 422) {
+        const text = await createRes.text();
+        throw new Error(`Create repo failed: ${createRes.status} ${text}`);
+      }
+    }
+
+    const readmeContent = Buffer.from(
+      `# QAForge Generated Tests\n\nExecution: \`${opts.executionId}\`\n\nGenerated by QAForge AI.\n`,
+    ).toString('base64');
+
+    // Ensure branch exists from default branch tip when possible
+    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+      headers,
+    });
+    if (!repoRes.ok) {
+      throw new Error(`Repo not found or inaccessible: ${opts.repoFullName}`);
+    }
+    const repoJson = (await repoRes.json()) as { default_branch: string };
+    const defaultBranch = repoJson.default_branch || 'main';
+
+    const refRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${defaultBranch}`,
+      { headers },
+    );
+    if (!refRes.ok) {
+      throw new Error(`Could not read default branch ${defaultBranch}`);
+    }
+    const refJson = (await refRes.json()) as { object: { sha: string } };
+    const baseSha = refJson.object.sha;
+
+    // Create branch if needed
+    const branchRefRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/git/refs`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          ref: `refs/heads/${opts.branch}`,
+          sha: baseSha,
+        }),
+      },
+    );
+    if (!branchRefRes.ok && branchRefRes.status !== 422) {
+      const text = await branchRefRes.text();
+      this.logger.debug(`Branch create: ${branchRefRes.status} ${text}`);
+    }
+
+    const putRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/contents/README.md`,
+      {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          message: `chore: QAForge stub for execution ${opts.executionId}`,
+          content: readmeContent,
+          branch: opts.branch,
+        }),
+      },
+    );
+
+    if (!putRes.ok) {
+      const text = await putRes.text();
+      throw new Error(`README push failed: ${putRes.status} ${text}`);
+    }
+
+    const putJson = (await putRes.json()) as {
+      commit?: { sha?: string };
+      content?: { sha?: string };
+    };
+
+    return {
+      commitSha: putJson.commit?.sha ?? putJson.content?.sha ?? null,
+      prUrl: null as string | null,
+    };
+  }
+}

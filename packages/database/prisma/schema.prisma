@@ -1,0 +1,251 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Better Auth compatible
+model User {
+  id            String       @id @default(cuid())
+  name          String
+  email         String       @unique
+  emailVerified Boolean      @default(false)
+  image         String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+  memberships   Membership[]
+  auditLogs     AuditLog[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model Organization {
+  id               String            @id @default(cuid())
+  name             String
+  slug             String            @unique
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  memberships      Membership[]
+  projects         Project[]
+  subscription     Subscription?
+  githubConnection GitHubConnection?
+  usageEvents      UsageEvent[]
+  auditLogs        AuditLog[]
+}
+
+model Membership {
+  id             String       @id @default(cuid())
+  organizationId String
+  userId         String
+  role           String // OWNER ADMIN MEMBER VIEWER
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+model Project {
+  id              String                 @id @default(cuid())
+  organizationId  String
+  name            String
+  appUrl          String
+  loginUrl        String?
+  framework       String                 @default("PLAYWRIGHT")
+  language        String                 @default("TYPESCRIPT")
+  environment     String                 @default("QA")
+  encryptedConfig String?
+  requirementText String?                @db.Text
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  deletedAt       DateTime?
+  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  requirements    RequirementDocument[]
+  executions      Execution[]
+
+  @@index([organizationId])
+}
+
+model RequirementDocument {
+  id         String   @id @default(cuid())
+  projectId  String
+  storageKey String
+  mime       String
+  filename   String
+  parsedText String?  @db.Text
+  createdAt  DateTime @default(now())
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model Execution {
+  id             String          @id @default(cuid())
+  projectId      String
+  status         String          @default("PENDING")
+  phase          String          @default("INIT")
+  scores         Json?
+  errorSummary   String?         @db.Text
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  agentRuns      AgentRun[]
+  artifacts      Artifact[]
+  browserSession BrowserSession?
+  githubPushes   GitHubPush[]
+
+  @@index([projectId, createdAt])
+  @@index([status])
+}
+
+model AgentRun {
+  id          String    @id @default(cuid())
+  executionId String
+  agentId     String
+  status      String    @default("PENDING")
+  inputRef    String?
+  outputRef   String?
+  tokensUsed  Int       @default(0)
+  durationMs  Int?
+  error       String?   @db.Text
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([executionId])
+}
+
+model Artifact {
+  id          String    @id @default(cuid())
+  executionId String
+  type        String
+  storageKey  String
+  mime        String
+  size        Int       @default(0)
+  checksum    String?
+  createdAt   DateTime  @default(now())
+  execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([executionId, type])
+}
+
+model BrowserSession {
+  id          String    @id @default(cuid())
+  executionId String    @unique
+  status      String    @default("PENDING")
+  containerId String?
+  viewerUrl   String?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+}
+
+model GitHubConnection {
+  id                   String       @id @default(cuid())
+  organizationId       String       @unique
+  encryptedAccessToken String
+  githubUserId         String?
+  githubLogin          String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+  organization         Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+model GitHubPush {
+  id           String    @id @default(cuid())
+  executionId  String
+  repoFullName String
+  branch       String
+  prUrl        String?
+  commitSha    String?
+  createdAt    DateTime  @default(now())
+  execution    Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([executionId])
+}
+
+model Subscription {
+  id               String       @id @default(cuid())
+  organizationId   String       @unique
+  stripeCustomerId String?      @unique
+  stripeSubId      String?      @unique
+  plan             String       @default("FREE")
+  status           String       @default("active")
+  currentPeriodEnd DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+model UsageEvent {
+  id             String       @id @default(cuid())
+  organizationId String
+  type           String
+  quantity       Int          @default(1)
+  meta           Json?
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+}
+
+model AuditLog {
+  id             String        @id @default(cuid())
+  organizationId String?
+  userId         String?
+  action         String
+  resource       String
+  resourceId     String?
+  metadata       Json?
+  createdAt      DateTime      @default(now())
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+}

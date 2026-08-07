@@ -1,0 +1,23 @@
+{
+  "name": "@qaforge/database",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "generate": "prisma generate",
+    "migrate:dev": "prisma migrate dev",
+    "db:push": "prisma db push",
+    "build": "prisma generate && tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node -e \"console.log('no database unit tests')\""
+  },
+  "dependencies": {
+    "@prisma/client": "^6.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "prisma": "^6.5.0",
+    "typescript": "^5.8.2"
+  }
+}

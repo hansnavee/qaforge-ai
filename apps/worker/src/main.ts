@@ -1,0 +1,62 @@
+import { Worker, type Job } from 'bullmq';
+import { getRedis } from './redis.js';
+import { runExecution, type ExecutionJobData } from './orchestrator.js';
+
+async function processJob(job: Job<ExecutionJobData>): Promise<void> {
+  if (job.name !== 'run-execution') {
+    console.warn(`[worker] Ignoring unknown job name: ${job.name}`);
+    return;
+  }
+
+  const executionId = job.data.executionId;
+  if (!executionId) {
+    throw new Error('Job missing executionId');
+  }
+
+  console.log(`[worker] Processing execution ${executionId}`);
+  await runExecution(executionId);
+  console.log(`[worker] Finished execution ${executionId}`);
+}
+
+async function main() {
+  const connection = getRedis();
+
+  const worker = new Worker<ExecutionJobData>(
+    'executions',
+    async (job) => processJob(job),
+    {
+      connection,
+      concurrency: Number(process.env.WORKER_CONCURRENCY ?? 1),
+    },
+  );
+
+  worker.on('ready', () => {
+    console.log('[worker] BullMQ worker ready on queue "executions"');
+  });
+
+  worker.on('failed', (job, err) => {
+    console.error(
+      `[worker] Job ${job?.id} failed:`,
+      err?.message ?? err,
+    );
+  });
+
+  worker.on('completed', (job) => {
+    console.log(`[worker] Job ${job.id} completed`);
+  });
+
+  const shutdown = async () => {
+    console.log('[worker] Shutting down...');
+    await worker.close();
+    connection.disconnect();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => void shutdown());
+  process.on('SIGTERM', () => void shutdown());
+}
+
+main().catch((err) => {
+  console.error('[worker] Fatal:', err);
+  process.exit(1);
+});

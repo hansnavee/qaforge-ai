@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: qaforge
+          POSTGRES_PASSWORD: qaforge
+          POSTGRES_DB: qaforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://qaforge:qaforge@localhost:5432/qaforge
+      REDIS_URL: redis://localhost:6379
+      BETTER_AUTH_SECRET: ci-secret-change-me-in-production-32
+      BETTER_AUTH_URL: http://localhost:4000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install
+      - run: pnpm --filter @qaforge/shared build
+      - run: pnpm --filter @qaforge/database generate
+      - run: pnpm --filter @qaforge/database build
+      - run: pnpm --filter @qaforge/agent-sdk build
+      - run: pnpm --filter @qaforge/browser-session build
+      - run: pnpm --filter @qaforge/report-engine build
+      - run: pnpm --filter @qaforge/database exec prisma db push --skip-generate
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm --filter @qaforge/api build
+      - run: pnpm --filter @qaforge/worker build
+      - run: pnpm --filter @qaforge/web build
