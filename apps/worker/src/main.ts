@@ -1,8 +1,12 @@
 import { Worker, type Job } from 'bullmq';
+import { prisma } from '@qaforge/database';
 import { getRedis } from './redis.js';
 import { runExecution, type ExecutionJobData } from './orchestrator.js';
+import { runPhase1Execution } from './phase1-orchestrator.js';
 
-async function processJob(job: Job<ExecutionJobData>): Promise<void> {
+export type JobData = ExecutionJobData & { runMode?: string };
+
+async function processJob(job: Job<JobData>): Promise<void> {
   if (job.name !== 'run-execution') {
     console.warn(`[worker] Ignoring unknown job name: ${job.name}`);
     return;
@@ -13,15 +17,25 @@ async function processJob(job: Job<ExecutionJobData>): Promise<void> {
     throw new Error('Job missing executionId');
   }
 
-  console.log(`[worker] Processing execution ${executionId}`);
-  await runExecution(executionId);
+  const row = await prisma.execution.findUnique({
+    where: { id: executionId },
+    select: { runMode: true },
+  });
+  const runMode = job.data.runMode ?? row?.runMode ?? 'FULL';
+
+  console.log(`[worker] Processing execution ${executionId} mode=${runMode}`);
+  if (runMode === 'PHASE1') {
+    await runPhase1Execution(executionId);
+  } else {
+    await runExecution(executionId);
+  }
   console.log(`[worker] Finished execution ${executionId}`);
 }
 
 async function main() {
   const connection = getRedis();
 
-  const worker = new Worker<ExecutionJobData>(
+  const worker = new Worker<JobData>(
     'executions',
     async (job) => processJob(job),
     {

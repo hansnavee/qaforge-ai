@@ -105,6 +105,11 @@ model Project {
   organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   requirements    RequirementDocument[]
   executions      Execution[]
+  requirementSnapshots ProjectRequirementSnapshot[]
+  clarificationRounds  ClarificationRound[]
+  testCases            TestCase[]
+  testResults          TestResult[]
+  bugs                 Bug[]
 
   @@index([organizationId])
 }
@@ -122,11 +127,40 @@ model RequirementDocument {
   @@index([projectId])
 }
 
+model ProjectRequirementSnapshot {
+  id           String   @id @default(cuid())
+  projectId    String
+  executionId  String?
+  payload      Json
+  clear        Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+}
+
+model ClarificationRound {
+  id          String   @id @default(cuid())
+  projectId   String
+  executionId String?
+  round       Int
+  questions   Json
+  answers     Json?
+  skipped     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  answeredAt  DateTime?
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, round])
+  @@index([executionId])
+}
+
 model Execution {
   id             String          @id @default(cuid())
   projectId      String
   status         String          @default("PENDING")
   phase          String          @default("INIT")
+  runMode        String          @default("FULL") // FULL | PHASE1
   scores         Json?
   errorSummary   String?         @db.Text
   startedAt      DateTime?
@@ -138,9 +172,80 @@ model Execution {
   artifacts      Artifact[]
   browserSession BrowserSession?
   githubPushes   GitHubPush[]
+  testCases      TestCase[]
+  testResults    TestResult[]
+  bugs           Bug[]
 
   @@index([projectId, createdAt])
   @@index([status])
+}
+
+model TestCase {
+  id            String       @id @default(cuid())
+  projectId     String
+  executionId   String?
+  externalId    String
+  module        String?
+  scenario      String
+  preconditions String?      @db.Text
+  steps         Json
+  expected      String       @db.Text
+  priority      String?
+  severity      String?
+  type          String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  project       Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  execution     Execution?   @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  results       TestResult[]
+  bugs          Bug[]
+
+  @@index([projectId])
+  @@index([executionId])
+  @@index([projectId, externalId])
+}
+
+model TestResult {
+  id           String    @id @default(cuid())
+  projectId    String
+  executionId  String?
+  testCaseId   String
+  status       String // PASSED FAILED SKIPPED ERROR
+  message      String?   @db.Text
+  durationMs   Int?
+  evidenceKeys Json?
+  createdAt    DateTime  @default(now())
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  execution    Execution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  testCase     TestCase  @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+  bugs         Bug[]
+
+  @@index([projectId])
+  @@index([executionId])
+  @@index([testCaseId])
+}
+
+model Bug {
+  id             String      @id @default(cuid())
+  projectId      String
+  executionId    String?
+  testCaseId     String?
+  testResultId   String?
+  title          String
+  severity       String      @default("medium")
+  status         String      @default("OPEN")
+  description    String      @db.Text
+  stepsToReproduce String?   @db.Text
+  evidenceKeys   Json?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  project        Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  execution      Execution?  @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  testCase       TestCase?   @relation(fields: [testCaseId], references: [id], onDelete: SetNull)
+  testResult     TestResult? @relation(fields: [testResultId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([executionId])
 }
 
 model AgentRun {

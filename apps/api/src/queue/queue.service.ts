@@ -39,7 +39,7 @@ export class QueueService implements OnModuleInit {
 
   async enqueueRunExecution(
     executionId: string,
-    options?: { jobId?: string },
+    options?: { jobId?: string; runMode?: string },
   ) {
     if (!this.queue) {
       this.logger.warn(`Queue unavailable; job for ${executionId} not enqueued`);
@@ -47,7 +47,7 @@ export class QueueService implements OnModuleInit {
     }
     return this.queue.add(
       RUN_EXECUTION_JOB,
-      { executionId },
+      { executionId, runMode: options?.runMode ?? 'FULL' },
       {
         jobId: options?.jobId ?? `run-${executionId}`,
         removeOnComplete: 100,

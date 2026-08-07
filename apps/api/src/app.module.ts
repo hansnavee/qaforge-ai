@@ -9,6 +9,7 @@ import { ExecutionsModule } from './executions/executions.module';
 import { ArtifactsModule } from './artifacts/artifacts.module';
 import { BillingModule } from './billing/billing.module';
 import { GithubModule } from './github/github.module';
+import { Phase1Module } from './phase1/phase1.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -23,6 +24,7 @@ import { HealthController } from './health.controller';
     ArtifactsModule,
     BillingModule,
     GithubModule,
+    Phase1Module,
   ],
   controllers: [HealthController],
 })

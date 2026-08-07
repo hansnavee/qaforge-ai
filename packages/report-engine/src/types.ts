@@ -21,3 +21,8 @@ export interface ReportManifest {
   testCases: Array<Record<string, unknown>>;
   recommendations: string[];
 }
+
+export type WorksheetRow = Record<
+  string,
+  string | number | boolean | null | undefined
+>;
