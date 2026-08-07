@@ -28,10 +28,7 @@ export default function ProjectDetailPage() {
     queryKey: ['project', projectId],
     queryFn: async () => {
       try {
-        const orgId = await getDefaultOrgId();
-        return await api<Project>(
-          `/api/v1/orgs/${orgId}/projects/${projectId}`,
-        );
+        return await api<Project>(`/api/v1/projects/${projectId}`);
       } catch (e) {
         if (e instanceof ApiError) return null;
         throw e;

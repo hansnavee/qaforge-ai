@@ -11,6 +11,14 @@ export class ApiError extends Error {
   }
 }
 
+function errorMessage(data: unknown, fallback: string): string {
+  if (!data || typeof data !== 'object') return fallback;
+  const msg = (data as { message?: unknown }).message;
+  if (typeof msg === 'string') return msg;
+  if (Array.isArray(msg)) return msg.map(String).join(', ');
+  return fallback;
+}
+
 export async function api<T = unknown>(
   path: string,
   init?: RequestInit,
@@ -48,11 +56,11 @@ export async function api<T = unknown>(
   }
 
   if (!res.ok) {
-    const msg =
-      data && typeof data === 'object' && 'message' in data
-        ? String((data as { message: unknown }).message)
-        : res.statusText || 'Request failed';
-    throw new ApiError(msg, res.status, data);
+    throw new ApiError(
+      errorMessage(data, res.statusText || 'Request failed'),
+      res.status,
+      data,
+    );
   }
 
   return data as T;

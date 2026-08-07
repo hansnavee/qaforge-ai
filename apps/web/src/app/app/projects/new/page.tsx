@@ -7,7 +7,7 @@ import { Card } from '@/components/Card';
 import { Input } from '@/components/Input';
 import { Progress } from '@/components/Progress';
 import { api, ApiError } from '@/lib/api';
-import { getDefaultOrgId } from '@/lib/org';
+import { clearOrgCache } from '@/lib/org';
 
 const STEPS = ['Details', 'Requirements', 'Framework', 'Review'] as const;
 
@@ -34,21 +34,25 @@ export default function NewProjectPage() {
     setSaving(true);
     setError(null);
     try {
-      const orgId = await getDefaultOrgId();
       const payload = {
         ...form,
         loginUrl: form.loginUrl.trim() || undefined,
         requirementText: form.requirementText.trim() || undefined,
       };
-      const project = await api<{ id: string }>(
-        `/api/v1/orgs/${orgId}/projects`,
-        {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        },
-      );
+      // Flat /projects uses the signed-in user's default org on the API.
+      const project = await api<{ id: string }>('/api/v1/projects', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      clearOrgCache();
       router.push(`/app/projects/${project.id}`);
     } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        clearOrgCache();
+        setError('Session expired or not signed in. Please log in again.');
+        router.push('/login');
+        return;
+      }
       const detail =
         e instanceof ApiError
           ? e.message
@@ -64,6 +68,8 @@ export default function NewProjectPage() {
       setSaving(false);
     }
   }
+
+  const canContinueDetails = Boolean(form.name.trim() && form.appUrl.trim());
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
@@ -97,8 +103,14 @@ export default function NewProjectPage() {
               type="url"
               value={form.loginUrl}
               onChange={(e) => update('loginUrl', e.target.value)}
-              hint="Credentials are never collected by QAForge."
+              hint="Credentials are never collected by QAForge. Use a full URL including https://."
             />
+            {!canContinueDetails ? (
+              <p className="text-sm text-muted">
+                Enter a project name and full app URL (including https://) to
+                continue.
+              </p>
+            ) : null}
           </>
         ) : null}
 
@@ -168,7 +180,11 @@ export default function NewProjectPage() {
           </dl>
         ) : null}
 
-        {error ? <p className="text-sm text-danger">{error}</p> : null}
+        {error ? (
+          <p className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+            {error}
+          </p>
+        ) : null}
 
         <div className="flex justify-between pt-2">
           <Button
@@ -181,7 +197,7 @@ export default function NewProjectPage() {
           {step < STEPS.length - 1 ? (
             <Button
               onClick={() => setStep((s) => Math.min(STEPS.length - 1, s + 1))}
-              disabled={step === 0 && (!form.name || !form.appUrl)}
+              disabled={step === 0 && !canContinueDetails}
             >
               Continue
             </Button>
