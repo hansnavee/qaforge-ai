@@ -1,0 +1,23 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "docker/api.Dockerfile"
+watchPatterns = [
+  "apps/api/**",
+  "packages/shared/**",
+  "packages/database/**",
+  "packages/agent-sdk/**",
+  "docker/api.Dockerfile",
+  "docker/api-entrypoint.sh",
+  "package.json",
+  "pnpm-lock.yaml"
+]
+
+[deploy]
+healthcheckPath = "/api/v1/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+
+[variables]
+PORT = "4000"
+NODE_ENV = "production"

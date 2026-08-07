@@ -2,16 +2,30 @@
 
 Enterprise multi-agent AI QA platform. Understand requirements, inspect live web apps (credential-safe login handoff), generate Playwright automation, execute tests, and deliver professional reports.
 
+## Host for free and test in the browser
+
+Follow the step-by-step guide: **[`docs/DEPLOY.md`](docs/DEPLOY.md)**
+
+| Piece | Free / trial |
+|-------|----------------|
+| Web | Vercel Hobby |
+| API + Worker | Railway trial |
+| Postgres | Neon free |
+| Redis | Upstash free |
+
+Config files ready in-repo:
+
+- [`vercel.json`](vercel.json) — Next.js web
+- [`railway.toml`](railway.toml) / [`deploy/railway.api.toml`](deploy/railway.api.toml) — API Docker
+- [`deploy/railway.worker.toml`](deploy/railway.worker.toml) — Worker Docker
+- [`deploy/.env.production.example`](deploy/.env.production.example) — env template
+
 ## Run without local Docker (GitHub Actions)
 
-Push to GitHub, then:
-
 1. **Actions** → **Docker Stack** → **Run workflow**
-2. GitHub builds and starts the full Compose stack on an Ubuntu runner and smoke-tests API + Web
+2. Or open a **GitHub Codespace** → `docker compose up --build`
 
 Details: [`docs/DOCKER.md`](docs/DOCKER.md)
-
-Or open a **GitHub Codespace** and run `docker compose up --build`.
 
 ## Full stack with Docker Compose
 
@@ -23,28 +37,16 @@ docker compose up --build
 |---------|-----|
 | Web | http://localhost:3000 |
 | API health | http://localhost:4000/api/v1/health |
-| API | http://localhost:4000 |
-| Postgres | localhost:5432 |
-| Redis | localhost:6379 |
 
 ## Architecture docs
 
 See [`docs/architecture/`](docs/architecture/README.md).
 
-## Monorepo layout
-
-| Path | Purpose |
-|------|---------|
-| `apps/web` | Next.js dashboard |
-| `apps/api` | NestJS API + Better Auth + WebSocket |
-| `apps/worker` | BullMQ agent orchestrator + Playwright |
-| `packages/*` | Shared libraries (database, agents, reports, …) |
-
 ## Local development (Node on host)
 
 ```bash
 pnpm install
-docker compose up -d postgres redis   # infra only
+docker compose up -d postgres redis
 cp .env.example .env
 pnpm db:generate && pnpm db:push
 pnpm --filter @qaforge/shared build
@@ -55,23 +57,11 @@ pnpm --filter @qaforge/worker exec playwright install chromium
 pnpm dev
 ```
 
-## Security highlights
-
-- Target app credentials are **never** requested or stored
-- AES-GCM encryption, audit redaction, Helmet, CORS, rate limiting, RBAC
-
 ## Scripts
 
 | Script | Description |
 |--------|-------------|
-| `pnpm docker:up` | `docker compose up --build` |
-| `pnpm docker:down` | `docker compose down` |
-| `pnpm dev` | Run web, api, worker on host |
+| `pnpm docker:up` | Full Compose stack |
+| `pnpm docker:infra` | Postgres + Redis only |
+| `pnpm dev` | Web + API + worker on host |
 | `pnpm test` | Unit tests |
-| `pnpm db:push` | Push Prisma schema |
-
-## Deploy
-
-- Docker Compose / Railway (see `docker/`)
-- Web can also target Vercel
-- CI: `.github/workflows/ci.yml` + `.github/workflows/docker-stack.yml`

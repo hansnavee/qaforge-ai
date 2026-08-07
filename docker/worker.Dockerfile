@@ -16,7 +16,9 @@ COPY packages ./packages
 COPY apps/worker ./apps/worker
 COPY apps/api/package.json ./apps/api/package.json
 COPY apps/web/package.json ./apps/web/package.json
-RUN pnpm install --frozen-lockfile || pnpm install
+RUN echo "shamefully-hoist=true" > .npmrc \
+ && echo "node-linker=hoisted" >> .npmrc \
+ && pnpm install --frozen-lockfile || pnpm install
 
 FROM deps AS build
 RUN pnpm --filter @qaforge/shared build \
@@ -32,7 +34,6 @@ FROM base AS runner
 ENV NODE_ENV=production
 ENV BROWSER_HEADLESS=true
 COPY --from=build /app /app
-# Playwright browsers from build stage
 COPY --from=build /root/.cache/ms-playwright /root/.cache/ms-playwright
 WORKDIR /app/apps/worker
 CMD ["node", "dist/main.js"]

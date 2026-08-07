@@ -10,13 +10,16 @@ COPY packages ./packages
 COPY apps/web ./apps/web
 COPY apps/api/package.json ./apps/api/package.json
 COPY apps/worker/package.json ./apps/worker/package.json
-RUN pnpm install --frozen-lockfile || pnpm install
+RUN echo "shamefully-hoist=true" > .npmrc \
+ && echo "node-linker=hoisted" >> .npmrc \
+ && pnpm install --frozen-lockfile || pnpm install
 
 FROM deps AS build
 ARG NEXT_PUBLIC_APP_URL=http://localhost:3000
 ARG NEXT_PUBLIC_API_URL=http://localhost:4000
 ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV DOCKER_BUILD=1
 RUN pnpm --filter @qaforge/shared build \
  && pnpm --filter @qaforge/web build
 
@@ -26,7 +29,6 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-# Next standalone output lives under apps/web/.next/standalone
 COPY --from=build /app/apps/web/public ./apps/web/public
 COPY --from=build /app/apps/web/.next/standalone ./
 COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static
