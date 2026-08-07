@@ -12,3 +12,11 @@ test-results
 apps/*/.env
 apps/*/.env.local
 
+.vercel
+.env*
+
+.env*.local
+.vercel
+apps/web/.vercel
+hosting/vars-tmp.json
+

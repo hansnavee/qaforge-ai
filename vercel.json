@@ -1,8 +1,5 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "nextjs",
-  "installCommand": "pnpm install",
-  "buildCommand": "pnpm --filter @qaforge/shared build && pnpm --filter @qaforge/web build",
-  "outputDirectory": "apps/web/.next",
-  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- apps/web packages/shared package.json pnpm-lock.yaml"
+  "installCommand": "cd ../.. && pnpm install",
+  "buildCommand": "cd ../.. && pnpm --filter @qaforge/shared build && pnpm --filter @qaforge/web build",
+  "framework": "nextjs"
 }
