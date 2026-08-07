@@ -34,8 +34,13 @@ async function bootstrap() {
 
   const expressApp = app.getHttpAdapter().getInstance();
 
-  // Mount Better Auth before JSON body parsing
-  expressApp.all('/api/auth/*', toNodeHandler(auth));
+  // Mount Better Auth before JSON body parsing.
+  // Use /api/auth (not /*) — Express 5 path-to-regexp rejects bare "*".
+  const authHandler = toNodeHandler(auth);
+  expressApp.use('/api/auth', (req, res) => {
+    // better-auth expects the full path; restore base when mounted via use()
+    return authHandler(req, res);
+  });
 
   // JSON / urlencoded for Nest routes; preserve rawBody for Stripe webhooks
   expressApp.use(
@@ -50,11 +55,11 @@ async function bootstrap() {
   app.setGlobalPrefix('api/v1');
   app.useWebSocketAdapter(new WsAdapter(app));
 
-  await app.listen(port);
-  logger.log(`QAForge API listening on http://localhost:${port}`);
-  logger.log(`Auth: http://localhost:${port}/api/auth`);
-  logger.log(`REST: http://localhost:${port}/api/v1`);
-  logger.log(`WS:   ws://localhost:${port}/executions`);
+  await app.listen(port, '0.0.0.0');
+  logger.log(`QAForge API listening on http://0.0.0.0:${port}`);
+  logger.log(`Auth: http://0.0.0.0:${port}/api/auth`);
+  logger.log(`REST: http://0.0.0.0:${port}/api/v1`);
+  logger.log(`WS:   ws://0.0.0.0:${port}/executions`);
 }
 
 bootstrap().catch((err) => {
