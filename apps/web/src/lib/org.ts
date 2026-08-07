@@ -16,10 +16,11 @@ export async function getDefaultOrgId(): Promise<string> {
 
   inflight = (async () => {
     const orgs = await api<OrgSummary[]>('/api/v1/orgs');
-    if (!Array.isArray(orgs) || orgs.length === 0) {
+    const first = Array.isArray(orgs) ? orgs[0] : undefined;
+    if (!first) {
       throw new Error('No organization found for this account');
     }
-    cachedOrgId = orgs[0].id;
+    cachedOrgId = first.id;
     return cachedOrgId;
   })().finally(() => {
     inflight = null;

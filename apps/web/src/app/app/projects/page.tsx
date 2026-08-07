@@ -23,9 +23,7 @@ export default function ProjectsPage() {
     queryFn: async () => {
       try {
         const orgId = await getDefaultOrgId();
-        return await api<Project[] | { items: Project[] }>(
-          `/api/v1/orgs/${orgId}/projects`,
-        );
+        return await api<Project[]>(`/api/v1/orgs/${orgId}/projects`);
       } catch (e) {
         if (e instanceof ApiError && (e.status === 0 || e.status === 404)) {
           return [] as Project[];
@@ -35,11 +33,7 @@ export default function ProjectsPage() {
     },
   });
 
-  const projects = Array.isArray(data)
-    ? data
-    : data && 'items' in data
-      ? data.items
-      : [];
+  const projects = data ?? [];
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">

@@ -56,11 +56,7 @@ export default function ExecutionsPage() {
     },
   });
 
-  const items = Array.isArray(data)
-    ? data
-    : data && 'items' in data
-      ? data.items
-      : [];
+  const items = data ?? [];
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
