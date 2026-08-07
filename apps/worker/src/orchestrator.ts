@@ -67,7 +67,10 @@ async function runAgent(
   });
 
   await setExecution(ctx.executionId, {
-    status: ExecutionStatus.RUNNING,
+    status:
+      step.phase === ExecutionPhase.AUTHENTICATION
+        ? ExecutionStatus.AWAITING_LOGIN
+        : ExecutionStatus.RUNNING,
     phase: step.phase,
   });
 
@@ -134,6 +137,8 @@ export async function runExecution(executionId: string): Promise<void> {
   }
 
   const project = execution.project;
+  // Populated as soon as Playwright launches (needed for Redis continue while auth waits).
+  const sessionRef: { id?: string } = {};
   let browserSessionId: string | undefined;
 
   await setExecution(executionId, {
@@ -159,8 +164,8 @@ export async function runExecution(executionId: string): Promise<void> {
   const contChannel = `execution:${executionId}:continue`;
   void sub.subscribe(contChannel);
   sub.on('message', (ch: string) => {
-    if (ch === contChannel && browserSessionId) {
-      browserManager.signalContinue(browserSessionId);
+    if (ch === contChannel && sessionRef.id) {
+      browserManager.signalContinue(sessionRef.id);
     }
   });
 
@@ -180,7 +185,7 @@ export async function runExecution(executionId: string): Promise<void> {
       },
     );
 
-    // 2. AUTHENTICATION
+    // 2. AUTHENTICATION — pauses for human login (or Continue in UI)
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_LOGIN,
       phase: ExecutionPhase.AUTHENTICATION,
@@ -199,10 +204,14 @@ export async function runExecution(executionId: string): Promise<void> {
         loginUrl: project.loginUrl ?? undefined,
         appUrl: project.appUrl,
         waitForContinueSignal: () => waitForContinueSignal(executionId),
+        onSessionLaunched: (sessionId: string) => {
+          sessionRef.id = sessionId;
+        },
       },
     )) as { sessionId: string };
 
     browserSessionId = authResult.sessionId;
+    sessionRef.id = browserSessionId;
     ctx.browserSessionId = browserSessionId;
 
     await prisma.browserSession.upsert({

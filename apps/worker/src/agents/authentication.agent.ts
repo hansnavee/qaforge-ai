@@ -9,11 +9,16 @@ type AuthInput = {
   loginUrl?: string;
   appUrl: string;
   waitForContinueSignal: () => Promise<void>;
+  onSessionLaunched?: (sessionId: string) => void;
 };
 
 /**
  * Authentication agent — launches browser, waits for human login.
  * NEVER reads or stores passwords.
+ *
+ * On hosted headless workers there is no live browser view; the UI
+ * "Continue after login" button publishes Redis continue so the pipeline
+ * can proceed with the current page (skip interactive login).
  */
 export const authenticationAgent: AgentHandler<
   AuthInput,
@@ -24,6 +29,7 @@ export const authenticationAgent: AgentHandler<
 
   async run(ctx, input) {
     const { browserManager } = input;
+    const headless = process.env.BROWSER_HEADLESS !== 'false';
 
     const launched = await browserManager.launch({
       executionId: ctx.executionId,
@@ -31,20 +37,24 @@ export const authenticationAgent: AgentHandler<
     });
 
     ctx.browserSessionId = launched.sessionId;
+    input.onSessionLaunched?.(launched.sessionId);
 
     await ctx.emit({
       type: 'auth.awaiting_login',
       phase: 'AUTHENTICATION',
-      message:
-        'Browser launched. Please log in manually in the session, then click Continue. Credentials are never collected.',
+      message: headless
+        ? 'Headless browser opened the login URL. There is no live viewer on this host — click Continue in the UI after you are ready (or to skip login). Credentials are never collected.'
+        : 'Browser launched. Please log in manually in the session, then click Continue. Credentials are never collected.',
       data: {
         sessionId: launched.sessionId,
         viewerHint: launched.viewerHint,
         startUrl: input.startUrl,
+        headless,
+        interactiveViewer: !headless,
       },
     });
 
-    // Race: BrowserSessionManager.waitForContinue (signaled via Redis) OR Redis subscribe
+    // Race: in-process continue OR Redis continue from API/UI
     await Promise.race([
       browserManager.waitForContinue(launched.sessionId),
       input.waitForContinueSignal().then(() => {

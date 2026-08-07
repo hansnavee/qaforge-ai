@@ -156,18 +156,14 @@ export class ExecutionsService {
       },
     });
 
+    // Unblock the waiting worker via Redis — do not re-enqueue a full run.
     await this.queue.publishContinue(executionId);
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'execution.continue_after_login',
-      phase: 'DISCOVERY',
-      message: 'User completed login; resuming execution',
+      phase: 'AUTHENTICATION',
+      message: 'User signaled continue after login; resuming execution',
       timestamp: new Date().toISOString(),
-    });
-
-    // Re-notify worker via queue (unique job id so continue can re-enqueue)
-    await this.queue.enqueueRunExecution(executionId, {
-      jobId: `continue-${executionId}-${Date.now()}`,
     });
 
     await this.audit.log({

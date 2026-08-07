@@ -109,7 +109,8 @@ export default function ExecutionLivePage() {
   const liveStatus = execution?.status ?? status;
   const livePhase = execution?.phase ?? phase;
   const liveScores = execution?.scores ?? scores;
-  const awaiting = liveStatus === 'AWAITING_LOGIN';
+  const awaiting =
+    liveStatus === 'AWAITING_LOGIN' || livePhase === 'AUTHENTICATION';
 
   return (
     <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[280px_1fr]">
@@ -163,9 +164,9 @@ export default function ExecutionLivePage() {
               Continue after login
             </h2>
             <p className="mt-2 text-sm text-muted">
-              A browser session is waiting. Log in manually in the launched
-              browser — QAForge never collects passwords — then continue the
-              pipeline.
+              QAForge never collects passwords. On the hosted worker the browser
+              is headless (no live view) — click Continue to resume with the
+              current page, or skip login for apps that do not need it.
             </p>
             <Button
               className="mt-4"

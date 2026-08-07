@@ -35,14 +35,21 @@ export class BrowserSessionManager {
     const sessionId = randomUUID();
     const headless = process.env.BROWSER_HEADLESS !== 'false';
 
-    const browser = await chromium.launch({ headless });
+    const browser = await chromium.launch({
+      headless,
+      timeout: 60_000,
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    });
     // Intentionally no storageState / disk cookie persistence.
     const context = await browser.newContext({
       viewport: { width: 1280, height: 720 },
       acceptDownloads: false,
     });
     const page = await context.newPage();
-    await page.goto(opts.startUrl, { waitUntil: 'domcontentloaded' });
+    await page.goto(opts.startUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    });
 
     this.sessions.set(sessionId, {
       sessionId,
