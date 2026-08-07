@@ -10,6 +10,7 @@ import { toNodeHandler } from 'better-auth/node';
 import { AppModule } from './app.module';
 import { auth } from './auth/auth';
 import { rateLimit } from './common/rate-limit';
+import { seedDefaultAdmin } from './common/seed-admin';
 
 async function bootstrap() {
   // bodyParser disabled so Better Auth can read the raw request body
@@ -54,6 +55,8 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api/v1');
   app.useWebSocketAdapter(new WsAdapter(app));
+
+  await seedDefaultAdmin();
 
   await app.listen(port, '0.0.0.0');
   logger.log(`QAForge API listening on http://0.0.0.0:${port}`);
