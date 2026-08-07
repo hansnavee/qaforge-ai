@@ -82,6 +82,19 @@ export class OrgsService {
     }));
   }
 
+  /** First organization the user belongs to (creation order). */
+  async getDefaultOrgId(userId: string): Promise<string> {
+    const membership = await prisma.membership.findFirst({
+      where: { userId },
+      orderBy: { createdAt: 'asc' },
+      select: { organizationId: true },
+    });
+    if (!membership) {
+      throw new NotFoundException('No organization found for this account');
+    }
+    return membership.organizationId;
+  }
+
   async getById(userId: string, orgId: string) {
     const membership = await this.requireMembership(userId, orgId, Role.VIEWER);
     const org = await prisma.organization.findUnique({
