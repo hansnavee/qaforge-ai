@@ -1,8 +1,8 @@
 'use client';
 
 import { useParams } from 'next/navigation';
-import { useEffect } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Badge } from '@/components/Badge';
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
@@ -12,16 +12,27 @@ import { api, ApiError, API_URL } from '@/lib/api';
 import { getDefaultOrgId } from '@/lib/org';
 import { useExecutionStore, type LiveEvent } from '@/store/execution';
 
+type ClarificationQuestion = {
+  id: string;
+  question: string;
+  reason?: string;
+  required?: boolean;
+};
+
 type Execution = {
   id: string;
   status: string;
   phase: string;
   scores?: Record<string, number> | null;
   project?: { name?: string; appUrl?: string };
+  clarificationQuestions?: {
+    questions?: ClarificationQuestion[];
+  } | null;
 };
 
 export default function ExecutionLivePage() {
   const { executionId } = useParams<{ executionId: string }>();
+  const queryClient = useQueryClient();
   const {
     status,
     phase,
@@ -33,6 +44,7 @@ export default function ExecutionLivePage() {
     appendEvents,
     reset,
   } = useExecutionStore();
+  const [answers, setAnswers] = useState<Record<string, string>>({});
 
   useEffect(() => {
     reset();
@@ -65,6 +77,19 @@ export default function ExecutionLivePage() {
     setStatus(execution.status, execution.phase);
     if (execution.scores) setScores(execution.scores);
   }, [execution, setStatus, setScores]);
+
+  const questions = execution?.clarificationQuestions?.questions ?? [];
+
+  useEffect(() => {
+    if (questions.length === 0) return;
+    setAnswers((prev) => {
+      const next = { ...prev };
+      for (const q of questions) {
+        if (next[q.id] === undefined) next[q.id] = '';
+      }
+      return next;
+    });
+  }, [questions]);
 
   useQuery({
     queryKey: ['execution-events', executionId],
@@ -99,6 +124,25 @@ export default function ExecutionLivePage() {
         },
       );
     },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
+  const clarify = useMutation({
+    mutationFn: async (opts: { skip?: boolean }) => {
+      const orgId = await getDefaultOrgId();
+      await api(`/api/v1/orgs/${orgId}/executions/${executionId}/clarify`, {
+        method: 'POST',
+        body: JSON.stringify({
+          skip: Boolean(opts.skip),
+          answers: opts.skip ? {} : answers,
+        }),
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
   });
 
   const { data: orgId } = useQuery({
@@ -109,8 +153,12 @@ export default function ExecutionLivePage() {
   const liveStatus = execution?.status ?? status;
   const livePhase = execution?.phase ?? phase;
   const liveScores = execution?.scores ?? scores;
-  const awaiting =
-    liveStatus === 'AWAITING_LOGIN' || livePhase === 'AUTHENTICATION';
+  const awaitingClarification =
+    liveStatus === 'AWAITING_CLARIFICATION' || livePhase === 'CLARIFICATION';
+  const awaitingLogin =
+    liveStatus === 'AWAITING_LOGIN' ||
+    (livePhase === 'AUTHENTICATION' && !awaitingClarification);
+  const awaiting = awaitingClarification || awaitingLogin;
 
   return (
     <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[280px_1fr]">
@@ -158,7 +206,71 @@ export default function ExecutionLivePage() {
           </a>
         </div>
 
-        {awaiting ? (
+        {awaitingClarification ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Clarify requirements
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              The agent found gaps in the requirements. Answer the questions
+              below, or skip to continue with the current requirements.
+            </p>
+            <div className="mt-4 space-y-4">
+              {questions.length === 0 ? (
+                <p className="text-sm text-muted">Loading questions…</p>
+              ) : (
+                questions.map((q) => (
+                  <label key={q.id} className="flex flex-col gap-1.5 text-sm">
+                    <span className="font-medium text-fg">
+                      {q.question}
+                      {q.required ? (
+                        <span className="text-danger"> *</span>
+                      ) : null}
+                    </span>
+                    {q.reason ? (
+                      <span className="text-xs text-muted">{q.reason}</span>
+                    ) : null}
+                    <textarea
+                      className="min-h-20 rounded-lg border border-border bg-bg-elevated px-3 py-2 text-fg outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+                      value={answers[q.id] ?? ''}
+                      onChange={(e) =>
+                        setAnswers((prev) => ({
+                          ...prev,
+                          [q.id]: e.target.value,
+                        }))
+                      }
+                      placeholder="Your answer…"
+                    />
+                  </label>
+                ))
+              )}
+            </div>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Button
+                size="lg"
+                onClick={() => clarify.mutate({ skip: false })}
+                disabled={clarify.isPending || questions.length === 0}
+              >
+                {clarify.isPending ? 'Submitting…' : 'Submit answers'}
+              </Button>
+              <Button
+                size="lg"
+                variant="secondary"
+                onClick={() => clarify.mutate({ skip: true })}
+                disabled={clarify.isPending}
+              >
+                Skip clarification
+              </Button>
+            </div>
+            {clarify.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not submit clarification. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {awaitingLogin ? (
           <Card className="border-warning/40 bg-warning/5">
             <h2 className="text-lg font-semibold text-warning">
               Continue after login

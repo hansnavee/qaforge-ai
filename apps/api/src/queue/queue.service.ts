@@ -75,6 +75,51 @@ export class QueueService implements OnModuleInit {
     );
   }
 
+  async publishClarify(
+    executionId: string,
+    payload: {
+      skip?: boolean;
+      answers?: Record<string, string>;
+    },
+  ) {
+    if (!this.pub) return;
+    await this.pub.publish(
+      `execution:${executionId}:clarify`,
+      JSON.stringify({
+        executionId,
+        skip: Boolean(payload.skip),
+        answers: payload.answers ?? {},
+        at: new Date().toISOString(),
+      }),
+    );
+  }
+
+  async setClarificationQuestions(
+    executionId: string,
+    questions: unknown,
+  ) {
+    if (!this.pub) return;
+    await this.pub.set(
+      `execution:${executionId}:clarification-questions`,
+      JSON.stringify(questions),
+      'EX',
+      60 * 60 * 24,
+    );
+  }
+
+  async getClarificationQuestions(executionId: string): Promise<unknown | null> {
+    if (!this.pub) return null;
+    const raw = await this.pub.get(
+      `execution:${executionId}:clarification-questions`,
+    );
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
   async getEventsAfter(executionId: string, after?: string): Promise<unknown[]> {
     if (!this.pub) return [];
     const key = `execution:${executionId}:events:log`;

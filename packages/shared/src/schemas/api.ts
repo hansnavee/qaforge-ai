@@ -32,3 +32,10 @@ export const continueAfterLoginSchema = z.object({
 });
 
 export type ContinueAfterLoginInput = z.infer<typeof continueAfterLoginSchema>;
+
+export const clarifyExecutionSchema = z.object({
+  answers: z.record(z.string(), z.string()).default({}),
+  skip: z.boolean().optional(),
+});
+
+export type ClarifyExecutionInput = z.infer<typeof clarifyExecutionSchema>;

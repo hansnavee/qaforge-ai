@@ -3,6 +3,7 @@ import { ExecutionPhase } from '@qaforge/shared';
 
 const PHASES = [
   ExecutionPhase.REQUIREMENTS,
+  ExecutionPhase.CLARIFICATION,
   ExecutionPhase.AUTHENTICATION,
   ExecutionPhase.DISCOVERY,
   ExecutionPhase.FUNCTIONAL,

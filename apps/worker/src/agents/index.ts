@@ -1,4 +1,5 @@
 export { requirementAgent } from './requirement.agent.js';
+export { clarificationAgent } from './clarification.agent.js';
 export { authenticationAgent } from './authentication.agent.js';
 export { discoveryAgent } from './discovery.agent.js';
 export { functionalAgent } from './functional.agent.js';

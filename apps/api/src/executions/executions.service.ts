@@ -8,9 +8,11 @@ import {
   ExecutionStatus,
   PLAN_LIMITS,
   Role,
+  clarifyExecutionSchema,
   type PlanId,
 } from '@qaforge/shared';
 import { AuditService } from '../common/audit.service';
+import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
 import { QueueService } from '../queue/queue.service';
@@ -117,7 +119,14 @@ export class ExecutionsService {
       },
     });
     if (!execution) throw new NotFoundException('Execution not found');
-    return execution;
+
+    const clarificationQuestions =
+      await this.queue.getClarificationQuestions(executionId);
+
+    return {
+      ...execution,
+      clarificationQuestions,
+    };
   }
 
   async listForProject(userId: string, orgId: string, projectId: string) {
@@ -133,6 +142,51 @@ export class ExecutionsService {
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
+  }
+
+  async clarify(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+    body: unknown,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+    const input = parseBody(clarifyExecutionSchema, body);
+
+    if (execution.status !== ExecutionStatus.AWAITING_CLARIFICATION) {
+      throw new ForbiddenException(
+        `Cannot clarify from status ${execution.status}`,
+      );
+    }
+
+    const skip = Boolean(input.skip);
+    const answers = input.answers ?? {};
+
+    await this.queue.publishClarify(executionId, { skip, answers });
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: skip
+        ? 'execution.clarification_skipped'
+        : 'execution.clarification_submitted',
+      phase: 'CLARIFICATION',
+      message: skip
+        ? 'User skipped clarification'
+        : 'User submitted clarification answers',
+      timestamp: new Date().toISOString(),
+      data: { skip, answerCount: Object.keys(answers).length },
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'execution.clarify',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { skip, answerCount: Object.keys(answers).length },
+    });
+
+    return this.get(user.id, orgId, executionId);
   }
 
   async continueAfterLogin(user: SessionUser, orgId: string, executionId: string) {

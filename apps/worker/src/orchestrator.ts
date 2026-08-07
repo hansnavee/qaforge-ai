@@ -2,14 +2,16 @@ import type { AgentHandler, AgentContext } from '@qaforge/agent-sdk';
 import { prisma } from '@qaforge/database';
 import {
   AgentId,
+  ArtifactType,
   ExecutionPhase,
   ExecutionStatus,
   type ExecutionPhase as Phase,
 } from '@qaforge/shared';
 import { BrowserSessionManager } from '@qaforge/browser-session';
 import { createAgentContext, type ExecutionJobData } from './context.js';
-import { getRedis, waitForContinueSignal } from './redis.js';
+import { getRedis, waitForContinueSignal, waitForClarifySignal, publishClarificationQuestions } from './redis.js';
 import { requirementAgent } from './agents/requirement.agent.js';
+import { clarificationAgent } from './agents/clarification.agent.js';
 import { authenticationAgent } from './agents/authentication.agent.js';
 import { discoveryAgent } from './agents/discovery.agent.js';
 import { functionalAgent } from './agents/functional.agent.js';
@@ -70,7 +72,9 @@ async function runAgent(
     status:
       step.phase === ExecutionPhase.AUTHENTICATION
         ? ExecutionStatus.AWAITING_LOGIN
-        : ExecutionStatus.RUNNING,
+        : step.phase === ExecutionPhase.CLARIFICATION
+          ? ExecutionStatus.AWAITING_CLARIFICATION
+          : ExecutionStatus.RUNNING,
     phase: step.phase,
   });
 
@@ -185,7 +189,86 @@ export async function runExecution(executionId: string): Promise<void> {
       },
     );
 
-    // 2. AUTHENTICATION — pauses for human login (or Continue in UI)
+    // 2. CLARIFICATION — pause for Q&A (or skip)
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_CLARIFICATION,
+      phase: ExecutionPhase.CLARIFICATION,
+    });
+
+    const clarificationOut = (await runAgent(
+      ctx,
+      {
+        agent: clarificationAgent,
+        phase: ExecutionPhase.CLARIFICATION,
+        agentId: AgentId.REQUIREMENT_CLARIFICATION,
+      },
+      {
+        requirementText: project.requirementText,
+        appUrl: project.appUrl,
+      },
+    )) as { questions: unknown[] };
+
+    await publishClarificationQuestions(executionId, {
+      questions: clarificationOut?.questions ?? [],
+    });
+
+    // Keep awaiting while waiting for UI answers (runAgent may have set status already)
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_CLARIFICATION,
+      phase: ExecutionPhase.CLARIFICATION,
+    });
+
+    const clarify = await waitForClarifySignal(executionId);
+    const answers = clarify.answers ?? {};
+    const skipped =
+      Boolean(clarify.skip) ||
+      Object.values(answers).every((v) => !String(v ?? '').trim());
+
+    await ctx.putArtifactJson(ArtifactType.CLARIFICATION_ANSWERS, {
+      skip: skipped,
+      answers,
+      answeredAt: new Date().toISOString(),
+    });
+
+    const requirements = (await ctx.getArtifactJson<Record<string, unknown>>(
+      ArtifactType.REQUIREMENTS_JSON,
+    )) ?? {};
+
+    const answerEntries = Object.entries(answers).filter(
+      ([, v]) => String(v ?? '').trim().length > 0,
+    );
+
+    const merged = {
+      ...requirements,
+      clarifications: {
+        skipped,
+        answers,
+      },
+      requirements: [
+        ...((Array.isArray(requirements.requirements)
+          ? requirements.requirements
+          : []) as unknown[]),
+        ...answerEntries.map(([id, answer], i) => ({
+          id: `CLR-${String(i + 1).padStart(3, '0')}`,
+          title: `Clarification ${id}`,
+          description: String(answer),
+          priority: 'high',
+          acceptanceCriteria: [`Addressed clarification ${id}`],
+        })),
+      ],
+    };
+
+    await ctx.putArtifactJson(ArtifactType.REQUIREMENTS_JSON, merged);
+    await ctx.emit({
+      type: skipped ? 'clarification.skipped' : 'clarification.answered',
+      phase: ExecutionPhase.CLARIFICATION,
+      message: skipped
+        ? 'Clarification skipped — continuing with current requirements'
+        : `Received ${answerEntries.length} clarification answer(s)`,
+      data: { skipped, answerCount: answerEntries.length },
+    });
+
+    // 3. AUTHENTICATION — pauses for human login (or Continue in UI)
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_LOGIN,
       phase: ExecutionPhase.AUTHENTICATION,

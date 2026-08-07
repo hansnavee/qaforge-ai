@@ -35,6 +35,8 @@ describe('@qaforge/shared schemas', () => {
 
   it('includes core artifact and agent ids', () => {
     expect(ArtifactType.ZIP_PACKAGE).toBeTruthy();
+    expect(ArtifactType.CLARIFICATION_QUESTIONS).toBeTruthy();
     expect(AgentId.AUTHENTICATION).toBeTruthy();
+    expect(AgentId.REQUIREMENT_CLARIFICATION).toBeTruthy();
   });
 });

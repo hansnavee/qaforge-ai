@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const ExecutionStatus = {
   PENDING: 'PENDING',
   QUEUED: 'QUEUED',
+  AWAITING_CLARIFICATION: 'AWAITING_CLARIFICATION',
   AWAITING_LOGIN: 'AWAITING_LOGIN',
   RUNNING: 'RUNNING',
   COMPLETED: 'COMPLETED',
@@ -15,6 +16,7 @@ export type ExecutionStatus = (typeof ExecutionStatus)[keyof typeof ExecutionSta
 export const executionStatusSchema = z.enum([
   'PENDING',
   'QUEUED',
+  'AWAITING_CLARIFICATION',
   'AWAITING_LOGIN',
   'RUNNING',
   'COMPLETED',
@@ -25,6 +27,7 @@ export const executionStatusSchema = z.enum([
 export const ExecutionPhase = {
   INIT: 'INIT',
   REQUIREMENTS: 'REQUIREMENTS',
+  CLARIFICATION: 'CLARIFICATION',
   AUTHENTICATION: 'AUTHENTICATION',
   DISCOVERY: 'DISCOVERY',
   FUNCTIONAL: 'FUNCTIONAL',
@@ -48,6 +51,7 @@ export type ExecutionPhase = (typeof ExecutionPhase)[keyof typeof ExecutionPhase
 export const executionPhaseSchema = z.enum([
   'INIT',
   'REQUIREMENTS',
+  'CLARIFICATION',
   'AUTHENTICATION',
   'DISCOVERY',
   'FUNCTIONAL',

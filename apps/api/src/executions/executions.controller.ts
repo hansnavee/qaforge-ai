@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Param,
@@ -41,6 +42,16 @@ export class ExecutionsController {
     @Param('executionId') executionId: string,
   ) {
     return this.executions.get(user.id, orgId, executionId);
+  }
+
+  @Post('orgs/:orgId/executions/:executionId/clarify')
+  clarify(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+    @Body() body: unknown,
+  ) {
+    return this.executions.clarify(user, orgId, executionId, body);
   }
 
   @Post('orgs/:orgId/executions/:executionId/continue-after-login')
