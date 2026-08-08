@@ -7,9 +7,13 @@ import {
   Post,
   Query,
   Res,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
+import { memoryStorage } from 'multer';
 import { CurrentUser } from '../auth/auth.decorator';
 import { SessionAuthGuard } from '../auth/auth.guard';
 import type { SessionUser } from '../auth/auth';
@@ -35,6 +39,90 @@ export class Phase1Controller {
     @Param('projectId') projectId: string,
   ) {
     return this.phase1.startCompat(user, projectId);
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/stlc/start')
+  startStlc(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.phase1.start(user, orgId, projectId);
+  }
+
+  @Post('projects/:projectId/stlc/start')
+  startStlcCompat(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.phase1.startCompat(user, projectId);
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/requirements/upload')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 15 * 1024 * 1024 },
+    }),
+  )
+  uploadRequirement(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    return this.phase1.uploadRequirement(user, orgId, projectId, file);
+  }
+
+  @Post('projects/:projectId/requirements/upload')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 15 * 1024 * 1024 },
+    }),
+  )
+  uploadRequirementCompat(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    return this.phase1.uploadRequirementCompat(user, projectId, file);
+  }
+
+  @Get('orgs/:orgId/projects/:projectId/requirements/documents')
+  listDocuments(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.phase1.listRequirementDocuments(user.id, orgId, projectId);
+  }
+
+  @Get('projects/:projectId/requirements/documents')
+  listDocumentsCompat(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.phase1.listRequirementDocumentsCompat(user.id, projectId);
+  }
+
+  @Get('orgs/:orgId/projects/:projectId/stlc/final-pack')
+  downloadFinalPack(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Res() res: Response,
+  ) {
+    return this.phase1.downloadFinalPack(user.id, orgId, projectId, res);
+  }
+
+  @Get('projects/:projectId/stlc/final-pack')
+  downloadFinalPackCompat(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+    @Res() res: Response,
+  ) {
+    return this.phase1.downloadFinalPackCompat(user.id, projectId, res);
   }
 
   @Patch('orgs/:orgId/projects/:projectId/requirements')

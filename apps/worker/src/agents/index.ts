@@ -1,5 +1,7 @@
 export { requirementAgent } from './requirement.agent.js';
 export { clarificationAgent } from './clarification.agent.js';
+export { strategyAgent } from './strategy.agent.js';
+export { designAgent } from './design.agent.js';
 export { authenticationAgent } from './authentication.agent.js';
 export { discoveryAgent } from './discovery.agent.js';
 export { functionalAgent } from './functional.agent.js';
@@ -7,6 +9,9 @@ export { accessibilityAgent } from './accessibility.agent.js';
 export { performanceAgent } from './performance.agent.js';
 export { securityAgent } from './security.agent.js';
 export { testcaseAgent } from './testcase.agent.js';
+export { bugAgent } from './bug.agent.js';
+export { qualityAgent } from './quality.agent.js';
+export { githubActionsAgent } from './github-actions.agent.js';
 export { automationAgent } from './automation.agent.js';
 export { executionAgent } from './execution.agent.js';
 export { failureAnalysisAgent } from './failure-analysis.agent.js';

@@ -35,8 +35,13 @@ describe('@qaforge/shared schemas', () => {
 
   it('includes core artifact and agent ids', () => {
     expect(ArtifactType.ZIP_PACKAGE).toBeTruthy();
+    expect(ArtifactType.STLC_FINAL_ZIP).toBeTruthy();
+    expect(ArtifactType.TEST_STRATEGY_JSON).toBeTruthy();
     expect(ArtifactType.CLARIFICATION_QUESTIONS).toBeTruthy();
     expect(AgentId.AUTHENTICATION).toBeTruthy();
     expect(AgentId.REQUIREMENT_CLARIFICATION).toBeTruthy();
+    expect(AgentId.TEST_STRATEGY).toBeTruthy();
+    expect(AgentId.TEST_DESIGN).toBeTruthy();
+    expect(AgentId.QUALITY_ANALYSIS).toBeTruthy();
   });
 });

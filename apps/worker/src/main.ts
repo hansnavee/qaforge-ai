@@ -24,7 +24,7 @@ async function processJob(job: Job<JobData>): Promise<void> {
   const runMode = job.data.runMode ?? row?.runMode ?? 'FULL';
 
   console.log(`[worker] Processing execution ${executionId} mode=${runMode}`);
-  if (runMode === 'PHASE1') {
+  if (runMode === 'PHASE1' || runMode === 'STLC') {
     await runPhase1Execution(executionId);
   } else {
     await runExecution(executionId);

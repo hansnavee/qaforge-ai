@@ -1,16 +1,21 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { randomUUID } from 'node:crypto';
+import { R2ArtifactStore } from '@qaforge/agent-sdk';
 import { prisma } from '@qaforge/database';
 import {
+  ArtifactType,
   ExecutionStatus,
   Role,
   clarifyExecutionSchema,
 } from '@qaforge/shared';
 import {
+  buildZipPackage,
   rowsToCsv,
   rowsToHtmlTable,
   rowsToSpreadsheetMl,
@@ -22,10 +27,16 @@ import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
 import { QueueService } from '../queue/queue.service';
+import {
+  isAllowedRequirementFile,
+  parseRequirementFile,
+} from './parse-requirement-file';
 
 const updateRequirementsSchema = z.object({
   requirementText: z.string().min(1),
 });
+
+const STLC_RUN_MODES = ['STLC', 'PHASE1'] as const;
 
 @Injectable()
 export class Phase1Service {
@@ -81,34 +92,133 @@ export class Phase1Service {
         projectId: project.id,
         status: ExecutionStatus.QUEUED,
         phase: 'INIT',
-        runMode: 'PHASE1',
+        runMode: 'STLC',
         startedAt: new Date(),
       },
     });
 
     await this.queue.enqueueRunExecution(execution.id, {
-      jobId: `phase1-${execution.id}`,
-      runMode: 'PHASE1',
+      jobId: `stlc-${execution.id}`,
+      runMode: 'STLC',
     });
 
     await this.queue.publishExecutionEvent(execution.id, {
       executionId: execution.id,
-      type: 'phase1.queued',
+      type: 'stlc.queued',
       phase: 'INIT',
-      message: 'Phase 1 QA run queued',
+      message: 'STLC QA run queued',
       timestamp: new Date().toISOString(),
     });
 
     await this.audit.log({
       organizationId: orgId,
       userId: user.id,
-      action: 'phase1.start',
+      action: 'stlc.start',
       resource: 'execution',
       resourceId: execution.id,
-      metadata: { projectId },
+      metadata: { projectId, runMode: 'STLC' },
     });
 
     return execution;
+  }
+
+  async uploadRequirementCompat(
+    user: SessionUser,
+    projectId: string,
+    file: Express.Multer.File | undefined,
+  ) {
+    const orgId = await this.resolveOrgId(user.id, projectId);
+    return this.uploadRequirement(user, orgId, projectId, file);
+  }
+
+  async uploadRequirement(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+    file: Express.Multer.File | undefined,
+  ) {
+    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
+    if (!file?.buffer?.length) {
+      throw new BadRequestException('No file uploaded');
+    }
+    if (!isAllowedRequirementFile(file.originalname, file.mimetype)) {
+      throw new BadRequestException(
+        'Unsupported file type. Upload PDF, DOCX, or TXT.',
+      );
+    }
+
+    let parsedText = '';
+    try {
+      parsedText = await parseRequirementFile(
+        file.buffer,
+        file.originalname,
+        file.mimetype,
+      );
+    } catch (err) {
+      throw new BadRequestException(
+        `Failed to parse file: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const storageKey = `projects/${projectId}/requirements/${randomUUID()}-${file.originalname}`;
+    const store = new R2ArtifactStore({
+      fallbackRootDir: `${process.cwd()}/.artifacts`,
+    });
+    await store.put(storageKey, file.buffer, file.mimetype);
+
+    const doc = await prisma.requirementDocument.create({
+      data: {
+        projectId,
+        storageKey,
+        mime: file.mimetype || 'application/octet-stream',
+        filename: file.originalname,
+        parsedText: parsedText.trim() || null,
+      },
+    });
+
+    // Append parsed text into project requirements so STLC always has inline text
+    if (parsedText.trim()) {
+      const project = await prisma.project.findUnique({
+        where: { id: projectId },
+        select: { requirementText: true },
+      });
+      const existing = project?.requirementText?.trim() ?? '';
+      const block = `# ${file.originalname}\n${parsedText.trim()}`;
+      await prisma.project.update({
+        where: { id: projectId },
+        data: {
+          requirementText: existing ? `${existing}\n\n${block}` : block,
+        },
+      });
+    }
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'requirements.upload',
+      resource: 'requirement_document',
+      resourceId: doc.id,
+      metadata: { filename: file.originalname, projectId },
+    });
+
+    return doc;
+  }
+
+  async listRequirementDocumentsCompat(userId: string, projectId: string) {
+    const orgId = await this.resolveOrgId(userId, projectId);
+    return this.listRequirementDocuments(userId, orgId, projectId);
+  }
+
+  async listRequirementDocuments(
+    userId: string,
+    orgId: string,
+    projectId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    return prisma.requirementDocument.findMany({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   async updateRequirementsCompat(
@@ -151,13 +261,13 @@ export class Phase1Service {
     const execution = await prisma.execution.findFirst({
       where: {
         projectId,
-        runMode: 'PHASE1',
+        runMode: { in: [...STLC_RUN_MODES] },
         status: ExecutionStatus.AWAITING_CLARIFICATION,
       },
       orderBy: { createdAt: 'desc' },
     });
     if (!execution) {
-      throw new ForbiddenException('No Phase 1 run awaiting clarification');
+      throw new ForbiddenException('No STLC run awaiting clarification');
     }
 
     await this.queue.publishClarify(execution.id, {
@@ -187,49 +297,127 @@ export class Phase1Service {
 
   async getWorkspace(userId: string, orgId: string, projectId: string) {
     const project = await this.requireProject(userId, orgId, projectId);
-    const [latestExecution, snapshot, rounds, testCases, bugs, results] =
-      await Promise.all([
-        prisma.execution.findFirst({
-          where: { projectId },
-          orderBy: { createdAt: 'desc' },
-        }),
-        prisma.projectRequirementSnapshot.findFirst({
-          where: { projectId },
-          orderBy: { createdAt: 'desc' },
-        }),
-        prisma.clarificationRound.findMany({
-          where: { projectId },
-          orderBy: [{ round: 'desc' }],
-          take: 5,
-        }),
-        prisma.testCase.findMany({
-          where: { projectId },
-          orderBy: { createdAt: 'desc' },
-          take: 200,
-        }),
-        prisma.bug.findMany({
-          where: { projectId },
-          orderBy: { createdAt: 'desc' },
-          take: 200,
-        }),
-        prisma.testResult.findMany({
-          where: { projectId },
-          include: { testCase: true },
-          orderBy: { createdAt: 'desc' },
-          take: 200,
-        }),
-      ]);
+    const [
+      latestExecution,
+      snapshot,
+      rounds,
+      testCases,
+      bugs,
+      results,
+      documents,
+    ] = await Promise.all([
+      prisma.execution.findFirst({
+        where: { projectId },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.projectRequirementSnapshot.findFirst({
+        where: { projectId },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.clarificationRound.findMany({
+        where: { projectId },
+        orderBy: [{ round: 'desc' }],
+        take: 5,
+      }),
+      prisma.testCase.findMany({
+        where: { projectId },
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+      }),
+      prisma.bug.findMany({
+        where: { projectId },
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+      }),
+      prisma.testResult.findMany({
+        where: { projectId },
+        include: { testCase: true },
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+      }),
+      prisma.requirementDocument.findMany({
+        where: { projectId },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      }),
+    ]);
 
     const openRound = rounds.find((r) => !r.answeredAt && !r.skipped);
     const questionsFromRedis = latestExecution
       ? await this.queue.getClarificationQuestions(latestExecution.id)
       : null;
 
+    const artifactTypes = [
+      ArtifactType.TEST_STRATEGY_JSON,
+      ArtifactType.TEST_DESIGN_JSON,
+      ArtifactType.TEST_DATA_JSON,
+      ArtifactType.APPLICATION_MAP,
+      ArtifactType.FUNCTIONAL_FINDINGS,
+      ArtifactType.API_RESULTS,
+      ArtifactType.QUALITY_ANALYSIS_JSON,
+      ArtifactType.STLC_FINAL_ZIP,
+      ArtifactType.ZIP_PACKAGE,
+      ArtifactType.GITHUB_ACTIONS_WORKFLOW,
+    ];
+
+    const artifacts = latestExecution
+      ? await prisma.artifact.findMany({
+          where: {
+            executionId: latestExecution.id,
+            type: { in: [...artifactTypes] },
+          },
+          orderBy: { createdAt: 'desc' },
+        })
+      : [];
+
+    const latestByType = new Map<string, (typeof artifacts)[number]>();
+    for (const a of artifacts) {
+      if (!latestByType.has(a.type)) latestByType.set(a.type, a);
+    }
+
+    const strategyArtifact = latestByType.get(ArtifactType.TEST_STRATEGY_JSON);
+    let strategy: unknown = null;
+    if (strategyArtifact) {
+      try {
+        const store = new R2ArtifactStore({
+          fallbackRootDir: `${process.cwd()}/.artifacts`,
+        });
+        const buf = await store.get(strategyArtifact.storageKey);
+        strategy = JSON.parse(buf.toString('utf8'));
+      } catch {
+        strategy = null;
+      }
+    }
+    if (!strategy) {
+      const strategySnap = await prisma.projectRequirementSnapshot.findFirst({
+        where: {
+          projectId,
+          payload: { path: ['kind'], equals: 'TEST_STRATEGY' },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (
+        strategySnap?.payload &&
+        typeof strategySnap.payload === 'object' &&
+        strategySnap.payload !== null &&
+        'strategy' in strategySnap.payload
+      ) {
+        strategy = (strategySnap.payload as { strategy: unknown }).strategy;
+      }
+    }
+
     return {
       project,
       latestExecution,
       requirementsClear: Boolean(snapshot?.clear),
       requirementSnapshot: snapshot,
+      requirementDocuments: documents.map((d) => ({
+        id: d.id,
+        filename: d.filename,
+        mime: d.mime,
+        createdAt: d.createdAt,
+        hasParsedText: Boolean(d.parsedText?.trim()),
+      })),
       clarificationRounds: rounds,
       openClarification: openRound
         ? {
@@ -250,14 +438,145 @@ export class Phase1Service {
       testCases,
       bugs,
       results,
+      strategy,
+      artifacts: [...latestByType.values()].map((a) => ({
+        id: a.id,
+        type: a.type,
+        storageKey: a.storageKey,
+        mime: a.mime,
+        size: a.size,
+      })),
       counts: {
         testCases: testCases.length,
         bugs: bugs.length,
         results: results.length,
         passed: results.filter((r) => r.status === 'PASSED').length,
         failed: results.filter((r) => r.status === 'FAILED').length,
+        documents: documents.length,
       },
     };
+  }
+
+  async downloadFinalPackCompat(
+    userId: string,
+    projectId: string,
+    res: Response,
+  ) {
+    const orgId = await this.resolveOrgId(userId, projectId);
+    return this.downloadFinalPack(userId, orgId, projectId, res);
+  }
+
+  async downloadFinalPack(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    res: Response,
+  ) {
+    const project = await this.requireProject(userId, orgId, projectId);
+    const execution = await prisma.execution.findFirst({
+      where: { projectId, runMode: { in: [...STLC_RUN_MODES] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!execution) throw new NotFoundException('No STLC execution found');
+
+    const artifact = await prisma.artifact.findFirst({
+      where: {
+        executionId: execution.id,
+        type: {
+          in: [ArtifactType.STLC_FINAL_ZIP, ArtifactType.ZIP_PACKAGE],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let buf: Buffer | null = null;
+    if (artifact) {
+      try {
+        const store = new R2ArtifactStore({
+          fallbackRootDir: `${process.cwd()}/.artifacts`,
+        });
+        buf = await store.get(artifact.storageKey);
+      } catch {
+        buf = null;
+      }
+    }
+
+    if (!buf) {
+      const [cases, bugs, results] = await Promise.all([
+        prisma.testCase.findMany({ where: { executionId: execution.id } }),
+        prisma.bug.findMany({ where: { executionId: execution.id } }),
+        prisma.testResult.findMany({
+          where: { executionId: execution.id },
+          include: { testCase: true },
+        }),
+      ]);
+      if (!cases.length && !bugs.length && !results.length && !artifact) {
+        throw new NotFoundException('Final STLC pack not ready');
+      }
+      buf = await buildZipPackage({
+        files: {
+          'test-cases.csv': rowsToCsv(
+            [
+              'id',
+              'module',
+              'scenario',
+              'expected',
+              'priority',
+              'type',
+              'testData',
+            ],
+            cases.map((c) => ({
+              id: c.externalId,
+              module: c.module,
+              scenario: c.scenario,
+              expected: c.expected,
+              priority: c.priority,
+              type: c.type,
+              testData: c.testData ? JSON.stringify(c.testData) : '',
+            })),
+          ),
+          'bugs.csv': rowsToCsv(
+            ['id', 'title', 'severity', 'status', 'description'],
+            bugs.map((b) => ({
+              id: b.id,
+              title: b.title,
+              severity: b.severity,
+              status: b.status,
+              description: b.description,
+            })),
+          ),
+          'results.csv': rowsToCsv(
+            ['id', 'testCase', 'status', 'message', 'durationMs'],
+            results.map((r) => ({
+              id: r.id,
+              testCase: r.testCase?.externalId ?? '',
+              status: r.status,
+              message: r.message,
+              durationMs: r.durationMs,
+            })),
+          ),
+          'manifest.json': JSON.stringify(
+            {
+              executionId: execution.id,
+              projectId,
+              projectName: project.name,
+              appUrl: project.appUrl,
+              rebuiltOnDownload: true,
+              generatedAt: new Date().toISOString(),
+            },
+            null,
+            2,
+          ),
+        },
+      });
+    }
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="stlc-final-${projectId}.zip"`,
+    );
+    res.send(buf);
   }
 
   async listTestCasesCompat(userId: string, projectId: string) {
@@ -374,6 +693,7 @@ export class Phase1Service {
       'priority',
       'severity',
       'type',
+      'testData',
     ];
     const rows: WorksheetRow[] = cases.map((c) => ({
       id: c.externalId,
@@ -385,6 +705,7 @@ export class Phase1Service {
       priority: c.priority,
       severity: c.severity,
       type: c.type,
+      testData: c.testData ? JSON.stringify(c.testData) : '',
     }));
     this.sendDownload(res, format, 'test-cases', headers, rows);
   }

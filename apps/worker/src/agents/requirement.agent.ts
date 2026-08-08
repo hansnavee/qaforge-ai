@@ -1,5 +1,6 @@
 import type { AgentHandler } from '@qaforge/agent-sdk';
 import { ArtifactType } from '@qaforge/shared';
+import mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
 
 type RequirementInput = {
@@ -50,6 +51,49 @@ function heuristicRequirements(text: string, appUrl: string) {
   };
 }
 
+async function extractDocumentText(
+  store: { get: (key: string) => Promise<Buffer> },
+  doc: {
+    storageKey: string;
+    mime: string;
+    filename: string;
+    parsedText?: string | null;
+  },
+): Promise<string> {
+  if (doc.parsedText?.trim()) return doc.parsedText;
+  const lower = doc.filename.toLowerCase();
+  try {
+    const buf = await store.get(doc.storageKey);
+
+    if (
+      doc.mime === 'text/plain' ||
+      doc.mime === 'text/markdown' ||
+      lower.endsWith('.txt') ||
+      lower.endsWith('.md') ||
+      lower.endsWith('.text')
+    ) {
+      return buf.toString('utf8');
+    }
+
+    if (doc.mime === 'application/pdf' || lower.endsWith('.pdf')) {
+      const parsed = await pdfParse(buf);
+      return parsed.text ?? '';
+    }
+
+    if (
+      doc.mime ===
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+      lower.endsWith('.docx')
+    ) {
+      const result = await mammoth.extractRawText({ buffer: buf });
+      return result.value ?? '';
+    }
+  } catch {
+    /* skip unreadable document */
+  }
+  return '';
+}
+
 export const requirementAgent: AgentHandler<RequirementInput, unknown> = {
   id: 'REQUIREMENT_ANALYSIS',
   name: 'Requirement Agent',
@@ -64,21 +108,9 @@ export const requirementAgent: AgentHandler<RequirementInput, unknown> = {
     let text = input.requirementText?.trim() ?? '';
 
     for (const doc of input.documents ?? []) {
-      if (doc.parsedText) {
-        text += `\n\n${doc.parsedText}`;
-        continue;
-      }
-      if (
-        doc.mime === 'application/pdf' ||
-        doc.filename.toLowerCase().endsWith('.pdf')
-      ) {
-        try {
-          const buf = await ctx.artifactStore.get(doc.storageKey);
-          const parsed = await pdfParse(buf);
-          text += `\n\n${parsed.text}`;
-        } catch {
-          /* skip unreadable PDF */
-        }
+      const extracted = await extractDocumentText(ctx.artifactStore, doc);
+      if (extracted.trim()) {
+        text += `\n\n# Document: ${doc.filename}\n${extracted}`;
       }
     }
 

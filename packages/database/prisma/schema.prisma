@@ -160,7 +160,7 @@ model Execution {
   projectId      String
   status         String          @default("PENDING")
   phase          String          @default("INIT")
-  runMode        String          @default("FULL") // FULL | PHASE1
+  runMode        String          @default("FULL") // FULL | PHASE1 | STLC
   scores         Json?
   errorSummary   String?         @db.Text
   startedAt      DateTime?
@@ -193,6 +193,7 @@ model TestCase {
   priority      String?
   severity      String?
   type          String?
+  testData      Json?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
   project       Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)

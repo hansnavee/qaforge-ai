@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   chromium,
   type Browser,
@@ -12,6 +15,7 @@ interface SessionState {
   browser: Browser;
   context: BrowserContext;
   page: Page;
+  videoDir: string | null;
   continueResolver: (() => void) | null;
   continuePromise: Promise<void> | null;
 }
@@ -40,10 +44,15 @@ export class BrowserSessionManager {
       timeout: 60_000,
       args: ['--no-sandbox', '--disable-dev-shm-usage'],
     });
+    const videoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qaforge-video-'));
     // Intentionally no storageState / disk cookie persistence.
     const context = await browser.newContext({
       viewport: { width: 1280, height: 720 },
       acceptDownloads: false,
+      recordVideo: {
+        dir: videoDir,
+        size: { width: 1280, height: 720 },
+      },
     });
     const page = await context.newPage();
     await page.goto(opts.startUrl, {
@@ -57,6 +66,7 @@ export class BrowserSessionManager {
       browser,
       context,
       page,
+      videoDir,
       continueResolver: null,
       continuePromise: null,
     });
@@ -144,6 +154,48 @@ export class BrowserSessionManager {
     return Buffer.from(buffer);
   }
 
+  /**
+   * Capture a short failure video by cloning cookies into a temp context
+   * with Playwright recordVideo, then closing it to flush the file.
+   */
+  async captureFailureVideo(
+    sessionId: string,
+    label: string,
+  ): Promise<Buffer | null> {
+    const session = this.requireSession(sessionId);
+    const videoDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), `qaforge-fail-${label}-`),
+    );
+    try {
+      const cookies = await session.context.cookies();
+      const currentUrl = session.page.url();
+      const failContext = await session.browser.newContext({
+        viewport: { width: 1280, height: 720 },
+        recordVideo: {
+          dir: videoDir,
+          size: { width: 1280, height: 720 },
+        },
+      });
+      await failContext.addCookies(cookies);
+      const failPage = await failContext.newPage();
+      await failPage
+        .goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+        .catch(() => undefined);
+      await failPage.waitForTimeout(1500);
+      const video = failPage.video();
+      await failPage.close().catch(() => undefined);
+      await failContext.close().catch(() => undefined);
+      if (!video) return null;
+      const videoPath = await video.path();
+      const buf = await fs.readFile(videoPath);
+      await fs.rm(videoDir, { recursive: true, force: true }).catch(() => undefined);
+      return buf;
+    } catch {
+      await fs.rm(videoDir, { recursive: true, force: true }).catch(() => undefined);
+      return null;
+    }
+  }
+
   async destroy(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -155,6 +207,11 @@ export class BrowserSessionManager {
     }
     await session.context.close().catch(() => undefined);
     await session.browser.close().catch(() => undefined);
+    if (session.videoDir) {
+      await fs
+        .rm(session.videoDir, { recursive: true, force: true })
+        .catch(() => undefined);
+    }
   }
 
   private requireSession(sessionId: string): SessionState {

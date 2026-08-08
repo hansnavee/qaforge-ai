@@ -61,16 +61,55 @@ type LatestExecution = {
   runMode?: string | null;
 };
 
+const STLC_STAGES = [
+  'REQUIREMENTS',
+  'CLARIFICATION',
+  'TEST_STRATEGY',
+  'TEST_DESIGN',
+  'AUTHENTICATION',
+  'DISCOVERY',
+  'FUNCTIONAL',
+  'API',
+  'MANUAL_TEST',
+  'BUG_ANALYSIS',
+  'RETEST',
+  'AUTOMATION',
+  'EXECUTION',
+  'REPORT',
+  'QUALITY_ANALYSIS',
+  'GITHUB',
+  'DONE',
+] as const;
+
 type Workspace = {
   project: WorkspaceProject;
   latestExecution?: LatestExecution | null;
   requirementsClear?: boolean;
   requirementSnapshot?: { clear?: boolean; payload?: unknown } | null;
+  requirementDocuments?: Array<{
+    id: string;
+    filename: string;
+    mime: string;
+    createdAt: string;
+    hasParsedText: boolean;
+  }>;
   openClarification?: {
     round: number;
     questions: unknown;
     executionId?: string | null;
   } | null;
+  strategy?: {
+    summary?: string;
+    objectives?: string[];
+    riskAreas?: string[];
+  } | null;
+  artifacts?: Array<{
+    id: string;
+    type: string;
+    storageKey: string;
+    mime: string;
+    size?: number | null;
+  }>;
   testCases: Array<{
     id: string;
     externalId: string;
@@ -80,6 +119,7 @@ type Workspace = {
     priority?: string | null;
     severity?: string | null;
     type?: string | null;
+    testData?: Record<string, string> | null;
   }>;
   bugs: Array<{
     id: string;
@@ -98,6 +138,7 @@ type Workspace = {
   }>;
   counts: {
     testCases: number;
+    documents?: number;
     bugs: number;
     results: number;
     passed: number;
@@ -210,6 +251,7 @@ export default function ProjectWorkspacePage() {
   const [requirementText, setRequirementText] = useState('');
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [actionError, setActionError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const workspaceQuery = useQuery({
     queryKey: ['project-workspace', projectId],
@@ -269,7 +311,7 @@ export default function ProjectWorkspacePage() {
   const startPhase1 = useMutation({
     mutationFn: async () => {
       setActionError(null);
-      return api(`/api/v1/projects/${projectId}/phase1/start`, {
+      return api(`/api/v1/projects/${projectId}/stlc/start`, {
         method: 'POST',
       });
     },
@@ -279,10 +321,59 @@ export default function ProjectWorkspacePage() {
     },
     onError: (e) => {
       setActionError(
-        e instanceof ApiError ? e.message : 'Failed to start Phase 1',
+        e instanceof ApiError ? e.message : 'Failed to start STLC run',
       );
     },
   });
+
+  const uploadRequirement = async (file: File) => {
+    setActionError(null);
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch(
+        `${API_URL.replace(/\/$/, '')}/api/v1/projects/${projectId}/requirements/upload`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          body: form,
+        },
+      );
+      const text = await res.text();
+      let data: unknown = null;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+      }
+      if (!res.ok) {
+        throw new ApiError(
+          typeof data === 'object' &&
+            data &&
+            'message' in data &&
+            typeof (data as { message: unknown }).message === 'string'
+            ? (data as { message: string }).message
+            : 'Upload failed',
+          res.status,
+          data,
+        );
+      }
+      await invalidate();
+    } catch (e) {
+      setActionError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : 'Upload failed',
+      );
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const saveRequirements = useMutation({
     mutationFn: async () => {
@@ -309,7 +400,7 @@ export default function ProjectWorkspacePage() {
         method: 'PATCH',
         body: JSON.stringify({ requirementText }),
       });
-      return api(`/api/v1/projects/${projectId}/phase1/start`, {
+      return api(`/api/v1/projects/${projectId}/stlc/start`, {
         method: 'POST',
       });
     },
@@ -321,7 +412,7 @@ export default function ProjectWorkspacePage() {
       setActionError(
         e instanceof ApiError
           ? e.message
-          : 'Failed to save requirements and start Phase 1',
+          : 'Failed to save requirements and start STLC',
       );
     },
   });
@@ -467,7 +558,7 @@ export default function ProjectWorkspacePage() {
             onClick={() => startPhase1.mutate()}
             disabled={startPhase1.isPending || POLL_STATUSES.has(latest?.status ?? '')}
           >
-            {startPhase1.isPending ? 'Starting…' : 'Start Phase 1'}
+            {startPhase1.isPending ? 'Starting…' : 'Start STLC'}
           </Button>
         </div>
       </div>
@@ -498,7 +589,7 @@ export default function ProjectWorkspacePage() {
                 )
               </>
             ) : null}
-            , then continue the Phase 1 run.
+            , then continue the STLC run.
           </p>
           <div className="mt-4">
             <Button
@@ -519,7 +610,7 @@ export default function ProjectWorkspacePage() {
             Clarification needed
           </h2>
           <p className="mt-2 text-sm text-muted">
-            Answer open questions in the Clarification tab to continue Phase 1.
+            Answer open questions in the Clarification tab to continue STLC.
           </p>
           <div className="mt-4">
             <Button
@@ -568,6 +659,37 @@ export default function ProjectWorkspacePage() {
               </div>
             </Card>
           ))}
+          <Card className="md:col-span-2 xl:col-span-4 space-y-3">
+            <h2 className="text-base font-medium">STLC stage timeline</h2>
+            <div className="flex flex-wrap gap-1.5">
+              {STLC_STAGES.map((stage) => {
+                const current = latest?.phase ?? 'INIT';
+                const currentIdx = STLC_STAGES.indexOf(
+                  current as (typeof STLC_STAGES)[number],
+                );
+                const stageIdx = STLC_STAGES.indexOf(stage);
+                const done =
+                  latest?.status === 'COMPLETED' ||
+                  (currentIdx >= 0 && stageIdx < currentIdx);
+                const active = current === stage;
+                return (
+                  <span
+                    key={stage}
+                    className={cn(
+                      'rounded border px-2 py-1 text-[10px] font-medium tracking-wide',
+                      active
+                        ? 'border-accent bg-accent/10 text-accent'
+                        : done
+                          ? 'border-success/40 bg-success/10 text-success'
+                          : 'border-border text-muted',
+                    )}
+                  >
+                    {stage.replace(/_/g, ' ')}
+                  </span>
+                );
+              })}
+            </div>
+          </Card>
           <Card className="md:col-span-2 xl:col-span-4">
             <h2 className="text-base font-medium">Latest execution</h2>
             {latest ? (
@@ -592,7 +714,8 @@ export default function ProjectWorkspacePage() {
               </div>
             ) : (
               <p className="mt-2 text-sm text-muted">
-                No Phase 1 run yet. Add requirements, then start Phase 1.
+                No STLC run yet. Add requirements (text or PDF/DOCX/TXT), then
+                start STLC.
               </p>
             )}
             <div className="mt-4 flex flex-wrap gap-2">
@@ -603,8 +726,19 @@ export default function ProjectWorkspacePage() {
                   POLL_STATUSES.has(latest?.status ?? '')
                 }
               >
-                {startPhase1.isPending ? 'Starting…' : 'Start Phase 1'}
+                {startPhase1.isPending ? 'Starting…' : 'Start STLC'}
               </Button>
+              {(workspace?.artifacts ?? []).some(
+                (a) =>
+                  a.type === 'STLC_FINAL_ZIP' || a.type === 'ZIP_PACKAGE',
+              ) ? (
+                <a
+                  href={`${API_URL.replace(/\/$/, '')}/api/v1/projects/${projectId}/stlc/final-pack`}
+                  className="inline-flex"
+                >
+                  <Button variant="secondary">Download final STLC pack</Button>
+                </a>
+              ) : null}
               {awaitingLogin ? (
                 <Button
                   variant="secondary"
@@ -630,8 +764,39 @@ export default function ProjectWorkspacePage() {
           <div>
             <h2 className="text-base font-medium">Requirements</h2>
             <p className="mt-1 text-sm text-muted">
-              Describe the application flows Phase 1 should analyze and cover.
+              Paste requirements text and/or upload PDF, DOCX, or TXT for the
+              Requirement Agent.
             </p>
+          </div>
+          <div className="rounded-lg border border-dashed border-border px-3 py-4">
+            <label className="flex cursor-pointer flex-col gap-2 text-sm">
+              <span className="font-medium">Upload PDF / DOCX / TXT</span>
+              <input
+                type="file"
+                accept=".pdf,.docx,.txt,.md,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                disabled={uploading}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) void uploadRequirement(file);
+                }}
+              />
+              <span className="text-xs text-muted">
+                {uploading
+                  ? 'Uploading and parsing…'
+                  : 'Parsed text is appended to the requirements field.'}
+              </span>
+            </label>
+            {(workspace?.requirementDocuments ?? []).length > 0 ? (
+              <ul className="mt-3 space-y-1 text-xs text-muted">
+                {(workspace?.requirementDocuments ?? []).map((d) => (
+                  <li key={d.id}>
+                    {d.filename}
+                    {d.hasParsedText ? ' · parsed' : ' · stored'}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </div>
           <textarea
             className="min-h-56 w-full rounded-lg border border-border bg-bg-elevated px-3 py-2 text-sm text-fg outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
@@ -653,12 +818,12 @@ export default function ProjectWorkspacePage() {
             <Button
               onClick={() => saveAndStart.mutate()}
               disabled={
-                saveAndStart.isPending || requirementText.trim().length === 0
+                saveAndStart.isPending ||
+                (requirementText.trim().length === 0 &&
+                  (workspace?.requirementDocuments?.length ?? 0) === 0)
               }
             >
-              {saveAndStart.isPending
-                ? 'Starting…'
-                : 'Save & start Phase 1'}
+              {saveAndStart.isPending ? 'Starting…' : 'Save & start STLC'}
             </Button>
           </div>
         </Card>
@@ -676,7 +841,7 @@ export default function ProjectWorkspacePage() {
           </div>
           {questions.length === 0 ? (
             <p className="text-sm text-muted">
-              When Phase 1 needs more detail, questions will appear here.
+              When STLC needs more detail, questions will appear here.
             </p>
           ) : (
             <div className="space-y-4">
@@ -725,77 +890,112 @@ export default function ProjectWorkspacePage() {
       ) : null}
 
       {activeTab === 'test-board' ? (
-        <Card className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-base font-medium">Test Board</h2>
-              <p className="mt-1 text-sm text-muted">
-                {workspace?.counts.testCases ?? 0} test case
-                {(workspace?.counts.testCases ?? 0) === 1 ? '' : 's'}
+        <div className="space-y-4">
+          {workspace?.strategy ? (
+            <Card className="space-y-2">
+              <h2 className="text-base font-medium">Test strategy</h2>
+              <p className="text-sm text-muted">
+                {workspace.strategy.summary ?? 'Strategy generated for this run.'}
               </p>
+              {workspace.strategy.objectives?.length ? (
+                <ul className="list-disc space-y-1 pl-5 text-sm text-muted">
+                  {workspace.strategy.objectives.slice(0, 5).map((o) => (
+                    <li key={o}>{o}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {workspace.strategy.riskAreas?.length ? (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {workspace.strategy.riskAreas.slice(0, 6).map((r) => (
+                    <Badge key={r} tone="warning">
+                      {r}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+            </Card>
+          ) : null}
+          <Card className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-base font-medium">Test Board</h2>
+                <p className="mt-1 text-sm text-muted">
+                  {workspace?.counts.testCases ?? 0} designed case
+                  {(workspace?.counts.testCases ?? 0) === 1 ? '' : 's'} with data
+                </p>
+              </div>
+              <DownloadLinks
+                projectId={projectId}
+                kind="test-cases"
+                formats={['csv', 'xlsx', 'json']}
+              />
             </div>
-            <DownloadLinks
-              projectId={projectId}
-              kind="test-cases"
-              formats={['csv', 'xlsx', 'json']}
-            />
-          </div>
-          <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-bg-elevated text-xs uppercase tracking-wide text-muted">
-                <tr>
-                  <th className="px-3 py-2 font-medium">ID</th>
-                  <th className="px-3 py-2 font-medium">Module</th>
-                  <th className="px-3 py-2 font-medium">Scenario</th>
-                  <th className="px-3 py-2 font-medium">Priority</th>
-                  <th className="px-3 py-2 font-medium">Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(workspace?.testCases ?? []).length === 0 ? (
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="min-w-full text-left text-sm">
+                <thead className="bg-bg-elevated text-xs uppercase tracking-wide text-muted">
                   <tr>
-                    <td
-                      colSpan={5}
-                      className="px-3 py-6 text-center text-muted"
-                    >
-                      No test cases yet.
-                    </td>
+                    <th className="px-3 py-2 font-medium">ID</th>
+                    <th className="px-3 py-2 font-medium">Module</th>
+                    <th className="px-3 py-2 font-medium">Scenario</th>
+                    <th className="px-3 py-2 font-medium">Data</th>
+                    <th className="px-3 py-2 font-medium">Priority</th>
+                    <th className="px-3 py-2 font-medium">Type</th>
                   </tr>
-                ) : (
-                  (workspace?.testCases ?? []).map((tc) => (
-                    <tr
-                      key={tc.id}
-                      className="border-t border-border align-top"
-                    >
-                      <td className="px-3 py-2 font-mono text-xs">
-                        {tc.externalId}
-                      </td>
-                      <td className="px-3 py-2 text-muted">
-                        {tc.module ?? '—'}
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="font-medium">{tc.scenario}</div>
-                        <div className="mt-1 text-xs text-muted line-clamp-2">
-                          {tc.expected}
-                        </div>
-                      </td>
-                      <td className="px-3 py-2">
-                        {tc.priority ? (
-                          <Badge>{tc.priority}</Badge>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-muted">
-                        {tc.type ?? '—'}
+                </thead>
+                <tbody>
+                  {(workspace?.testCases ?? []).length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={6}
+                        className="px-3 py-6 text-center text-muted"
+                      >
+                        No test cases yet — strategy/design runs before login.
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Card>
+                  ) : (
+                    (workspace?.testCases ?? []).map((tc) => (
+                      <tr
+                        key={tc.id}
+                        className="border-t border-border align-top"
+                      >
+                        <td className="px-3 py-2 font-mono text-xs">
+                          {tc.externalId}
+                        </td>
+                        <td className="px-3 py-2 text-muted">
+                          {tc.module ?? '—'}
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="font-medium">{tc.scenario}</div>
+                          <div className="mt-1 text-xs text-muted line-clamp-2">
+                            {tc.expected}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[11px] text-muted">
+                          {tc.testData
+                            ? Object.entries(tc.testData)
+                                .slice(0, 3)
+                                .map(([k, v]) => `${k}=${v}`)
+                                .join(' · ')
+                            : '—'}
+                        </td>
+                        <td className="px-3 py-2">
+                          {tc.priority ? (
+                            <Badge>{tc.priority}</Badge>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-muted">
+                          {tc.type ?? '—'}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </div>
       ) : null}
 
       {activeTab === 'bugs' ? (
@@ -855,6 +1055,23 @@ export default function ProjectWorkspacePage() {
                 {workspace?.counts.failed ?? 0} failed ·{' '}
                 {workspace?.counts.results ?? 0} total
               </p>
+              {(workspace?.artifacts ?? []).length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {(workspace?.artifacts ?? [])
+                    .filter((a) =>
+                      [
+                        'APPLICATION_MAP',
+                        'FUNCTIONAL_FINDINGS',
+                        'API_RESULTS',
+                        'QUALITY_ANALYSIS_JSON',
+                        'STLC_FINAL_ZIP',
+                      ].includes(a.type),
+                    )
+                    .map((a) => (
+                      <Badge key={a.id}>{a.type.replace(/_/g, ' ')}</Badge>
+                    ))}
+                </div>
+              ) : null}
             </div>
             <DownloadLinks
               projectId={projectId}

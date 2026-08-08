@@ -7,7 +7,8 @@ import {
 } from '@qaforge/shared';
 import type { AgentContext, AgentHandler } from '@qaforge/agent-sdk';
 import { BrowserSessionManager } from '@qaforge/browser-session';
-import { createAgentContext } from './context.js';
+import { buildZipPackage } from '@qaforge/report-engine';
+import { createAgentContext, putBinaryArtifact } from './context.js';
 import {
   getRedis,
   publishClarificationQuestions,
@@ -16,9 +17,18 @@ import {
 } from './redis.js';
 import { requirementAgent } from './agents/requirement.agent.js';
 import { clarificationAgent } from './agents/clarification.agent.js';
+import { strategyAgent } from './agents/strategy.agent.js';
+import { designAgent, type DesignedCase } from './agents/design.agent.js';
 import { authenticationAgent } from './agents/authentication.agent.js';
-import { testcaseAgent, type TestCase } from './agents/testcase.agent.js';
-import { putBinaryArtifact } from './context.js';
+import { discoveryAgent } from './agents/discovery.agent.js';
+import { functionalAgent } from './agents/functional.agent.js';
+import { apiAgent } from './agents/api.agent.js';
+import { bugAgent } from './agents/bug.agent.js';
+import { automationAgent } from './agents/automation.agent.js';
+import { executionAgent } from './agents/execution.agent.js';
+import { reportAgent } from './agents/report.agent.js';
+import { qualityAgent } from './agents/quality.agent.js';
+import { githubActionsAgent } from './agents/github-actions.agent.js';
 
 const MAX_CLARIFY_ROUNDS = 3;
 const browserManager = new BrowserSessionManager();
@@ -114,9 +124,14 @@ async function executeTestSteps(
   page: import('playwright').Page,
   steps: string[],
   appUrl: string,
+  testData?: Record<string, string> | null,
 ): Promise<void> {
-  for (const step of steps) {
-    const s = step.trim();
+  const data = testData ?? {};
+  for (const rawStep of steps) {
+    let s = rawStep.trim();
+    for (const [k, v] of Object.entries(data)) {
+      s = s.split(`{{${k}}}`).join(v).split(`\${${k}}`).join(v);
+    }
     const lower = s.toLowerCase();
 
     if (/^navigate|^open|^go to|^visit/i.test(s)) {
@@ -142,7 +157,11 @@ async function executeTestSteps(
 
     if (/type|enter|fill|input/i.test(lower)) {
       const quoted = [...s.matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1]);
-      const value = quoted[quoted.length - 1] ?? 'test';
+      let value = quoted[quoted.length - 1] ?? data.sampleInput ?? 'test';
+      if (lower.includes('user') && data.username) value = data.username;
+      if (lower.includes('pass') && data.password && data.password !== '<<manual>>') {
+        value = data.password;
+      }
       const fieldHint = quoted[0] && quoted.length > 1 ? quoted[0] : undefined;
       if (fieldHint) {
         await page
@@ -175,16 +194,156 @@ async function executeTestSteps(
       continue;
     }
 
-    // Best-effort: wait briefly so the page can settle between unknown steps
     await page.waitForTimeout(400);
   }
 }
 
+type ManualFailure = {
+  testCaseId: string;
+  testResultId: string;
+  externalId: string;
+  scenario: string;
+  severity?: string | null;
+  message: string;
+  steps: string[];
+  evidenceKeys: string[];
+};
+
+async function runManualSuite(opts: {
+  ctx: AgentContext;
+  project: { id: string; appUrl: string };
+  executionId: string;
+  browserSessionId: string;
+  cases: Array<{
+    id: string;
+    externalId: string;
+    scenario: string;
+    severity?: string | null;
+    steps: unknown;
+    testData?: unknown;
+  }>;
+  phase: string;
+  passLabel: string;
+}): Promise<{ passed: number; failed: number; failures: ManualFailure[] }> {
+  const page = await browserManager.getPage(opts.browserSessionId);
+  let passed = 0;
+  let failed = 0;
+  const failures: ManualFailure[] = [];
+
+  for (const tc of opts.cases) {
+    const started = Date.now();
+    const steps = Array.isArray(tc.steps) ? (tc.steps as string[]) : [];
+    const testData =
+      tc.testData && typeof tc.testData === 'object'
+        ? (tc.testData as Record<string, string>)
+        : null;
+    try {
+      await page.goto(opts.project.appUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 45_000,
+      });
+      await executeTestSteps(page, steps, opts.project.appUrl, testData);
+      await prisma.testResult.create({
+        data: {
+          projectId: opts.project.id,
+          executionId: opts.executionId,
+          testCaseId: tc.id,
+          status: 'PASSED',
+          message: `${opts.passLabel}: steps completed without hard failure`,
+          durationMs: Date.now() - started,
+        },
+      });
+      passed += 1;
+      await opts.ctx.emit({
+        type: 'stlc.test_passed',
+        phase: opts.phase,
+        message: `PASSED ${tc.externalId}: ${tc.scenario}`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const evidenceKeys: string[] = [];
+      try {
+        const shot = await browserManager.screenshot(
+          opts.browserSessionId,
+          `fail-${tc.externalId}`,
+        );
+        const key = await putBinaryArtifact({
+          executionId: opts.executionId,
+          type: ArtifactType.SCREENSHOT,
+          key: `${opts.executionId}/screenshots/fail-${tc.externalId}-${Date.now()}.png`,
+          body: shot,
+          mime: 'image/png',
+          store: opts.ctx.artifactStore,
+        });
+        evidenceKeys.push(key);
+      } catch {
+        /* ignore */
+      }
+      try {
+        const video = await browserManager.captureFailureVideo(
+          opts.browserSessionId,
+          tc.externalId.replace(/[^a-zA-Z0-9_-]/g, '_'),
+        );
+        if (video) {
+          const key = await putBinaryArtifact({
+            executionId: opts.executionId,
+            type: ArtifactType.VIDEO,
+            key: `${opts.executionId}/videos/fail-${tc.externalId}-${Date.now()}.webm`,
+            body: video,
+            mime: 'video/webm',
+            store: opts.ctx.artifactStore,
+          });
+          evidenceKeys.push(key);
+        }
+      } catch {
+        /* ignore */
+      }
+
+      const result = await prisma.testResult.create({
+        data: {
+          projectId: opts.project.id,
+          executionId: opts.executionId,
+          testCaseId: tc.id,
+          status: 'FAILED',
+          message,
+          durationMs: Date.now() - started,
+          evidenceKeys: evidenceKeys.length ? (evidenceKeys as never) : undefined,
+        },
+      });
+
+      failures.push({
+        testCaseId: tc.id,
+        testResultId: result.id,
+        externalId: tc.externalId,
+        scenario: tc.scenario,
+        severity: tc.severity,
+        message,
+        steps,
+        evidenceKeys,
+      });
+      failed += 1;
+      await opts.ctx.emit({
+        type: 'stlc.test_failed',
+        phase: opts.phase,
+        message: `FAILED ${tc.externalId}: ${message}`,
+      });
+    }
+  }
+
+  return { passed, failed, failures };
+}
+
 /**
- * Phase 1 focused pipeline:
- * requirements → clarify loop → test cases → login pause → execute → bugs/results
+ * STLC orchestrator (Phase 1 alias):
+ * requirements → clarify → strategy → design → login → discovery →
+ * UI/API → manual → bugs → retest → automation → execution →
+ * report → quality → final ZIP → GitHub Actions
  */
 export async function runPhase1Execution(executionId: string): Promise<void> {
+  return runStlcExecution(executionId);
+}
+
+export async function runStlcExecution(executionId: string): Promise<void> {
   const execution = await prisma.execution.findUnique({
     where: { id: executionId },
     include: {
@@ -200,33 +359,29 @@ export async function runPhase1Execution(executionId: string): Promise<void> {
   await setExecution(executionId, {
     status: ExecutionStatus.RUNNING,
     phase: ExecutionPhase.INIT,
-    startedAt: new Date(),
+    startedAt: execution.startedAt ?? new Date(),
   });
+
+  const redis = getRedis();
+  const contChannel = `execution:${executionId}:continue`;
+  const sub = redis.duplicate();
+  await sub.subscribe(contChannel);
 
   const ctx = await createAgentContext({
+    executionId,
     organizationId: project.organizationId,
     projectId: project.id,
-    executionId,
-  });
-
-  await ctx.emit({
-    type: 'phase1.started',
-    phase: ExecutionPhase.INIT,
-    message: `Phase 1 started for ${project.name}`,
-  });
-
-  const sub = getRedis().duplicate();
-  const contChannel = `execution:${executionId}:continue`;
-  void sub.subscribe(contChannel);
-  sub.on('message', (ch: string) => {
-    if (ch === contChannel && sessionRef.id) {
-      browserManager.signalContinue(sessionRef.id);
-    }
   });
 
   try {
+    await ctx.emit({
+      type: 'stlc.started',
+      phase: ExecutionPhase.INIT,
+      message: 'STLC run started',
+    });
+
     // 1. Requirements
-    await runAgent(
+    const requirementsJson = await runAgent(
       ctx,
       {
         agent: requirementAgent,
@@ -235,39 +390,34 @@ export async function runPhase1Execution(executionId: string): Promise<void> {
       },
       {
         requirementText: project.requirementText,
-        documents: project.requirements,
+        documents: project.requirements.map((d) => ({
+          storageKey: d.storageKey,
+          mime: d.mime,
+          filename: d.filename,
+          parsedText: d.parsedText,
+        })),
         appUrl: project.appUrl,
       },
     );
 
-    let requirementsJson =
-      (await ctx.getArtifactJson<Record<string, unknown>>(
-        ArtifactType.REQUIREMENTS_JSON,
-      )) ?? {};
-
     // 2. Clarification loop
     let clear = false;
-    for (let round = 1; round <= MAX_CLARIFY_ROUNDS; round++) {
-      await setExecution(executionId, {
-        status: ExecutionStatus.AWAITING_CLARIFICATION,
-        phase: ExecutionPhase.CLARIFICATION,
-      });
-
-      const clarificationOut = (await runAgent(
+    let round = 0;
+    while (!clear && round < MAX_CLARIFY_ROUNDS) {
+      round += 1;
+      const clarifyOut = (await runAgent(
         ctx,
         {
           agent: clarificationAgent,
           phase: ExecutionPhase.CLARIFICATION,
           agentId: AgentId.REQUIREMENT_CLARIFICATION,
         },
-        {
-          requirementText: project.requirementText,
-          appUrl: project.appUrl,
-        },
+        { appUrl: project.appUrl, round },
         ExecutionStatus.AWAITING_CLARIFICATION,
-      )) as { questions: Array<{ id: string; question: string; reason?: string }> };
+      )) as { questions?: Array<{ id: string }> };
 
-      const questions = clarificationOut?.questions ?? [];
+      const questions = clarifyOut?.questions ?? [];
+      await publishClarificationQuestions(executionId, { questions, round });
 
       await prisma.clarificationRound.create({
         data: {
@@ -278,105 +428,46 @@ export async function runPhase1Execution(executionId: string): Promise<void> {
         },
       });
 
-      await publishClarificationQuestions(executionId, { questions, round });
+      if (questions.length === 0) {
+        clear = true;
+        break;
+      }
 
       await setExecution(executionId, {
         status: ExecutionStatus.AWAITING_CLARIFICATION,
         phase: ExecutionPhase.CLARIFICATION,
       });
 
-      if (questions.length === 0) {
-        clear = true;
-        await prisma.clarificationRound.updateMany({
-          where: { projectId: project.id, executionId, round },
-          data: { answeredAt: new Date(), skipped: true },
-        });
-        break;
-      }
+      await ctx.emit({
+        type: 'stlc.awaiting_clarification',
+        phase: ExecutionPhase.CLARIFICATION,
+        message: `Awaiting clarification answers (round ${round})`,
+        data: { round, questionCount: questions.length },
+      });
 
-      const clarify = await waitForClarifySignal(executionId);
-      const answers = clarify.answers ?? {};
-      const skipped =
-        Boolean(clarify.skip) ||
-        Object.values(answers).every((v) => !String(v ?? '').trim());
+      const signal = await waitForClarifySignal(executionId);
+      const skip = Boolean(signal?.skip);
+      const answers = (signal?.answers ?? {}) as Record<string, string>;
 
       await prisma.clarificationRound.updateMany({
-        where: { projectId: project.id, executionId, round },
+        where: { executionId, round, answeredAt: null },
         data: {
           answers: answers as never,
-          skipped,
+          skipped: skip,
           answeredAt: new Date(),
         },
       });
 
       await ctx.putArtifactJson(ArtifactType.CLARIFICATION_ANSWERS, {
         round,
-        skip: skipped,
+        skip,
         answers,
       });
 
-      const answerEntries = Object.entries(answers).filter(
-        ([, v]) => String(v ?? '').trim().length > 0,
-      );
-
-      requirementsJson = {
-        ...requirementsJson,
-        clarifications: {
-          ...(typeof requirementsJson.clarifications === 'object' &&
-          requirementsJson.clarifications
-            ? (requirementsJson.clarifications as object)
-            : {}),
-          [`round_${round}`]: { skipped, answers },
-        },
-        requirements: [
-          ...((Array.isArray(requirementsJson.requirements)
-            ? requirementsJson.requirements
-            : []) as unknown[]),
-          ...answerEntries.map(([id, answer], i) => ({
-            id: `CLR-R${round}-${String(i + 1).padStart(3, '0')}`,
-            title: `Clarification ${id}`,
-            description: String(answer),
-            priority: 'high',
-            acceptanceCriteria: [`Addressed ${id}`],
-          })),
-        ],
-      };
-
-      await ctx.putArtifactJson(ArtifactType.REQUIREMENTS_JSON, requirementsJson);
-
-      // Re-analyze requirements with merged answers
-      await runAgent(
-        ctx,
-        {
-          agent: requirementAgent,
-          phase: ExecutionPhase.REQUIREMENTS,
-          agentId: AgentId.REQUIREMENT_ANALYSIS,
-        },
-        {
-          requirementText: [
-            project.requirementText ?? '',
-            '',
-            'Clarifications:',
-            ...answerEntries.map(([id, a]) => `- ${id}: ${a}`),
-          ].join('\n'),
-          documents: project.requirements,
-          appUrl: project.appUrl,
-        },
-      );
-
-      requirementsJson =
-        (await ctx.getArtifactJson<Record<string, unknown>>(
-          ArtifactType.REQUIREMENTS_JSON,
-        )) ?? requirementsJson;
-
-      clear = requirementsSeemClear(questions, skipped, round);
-      if (clear) break;
-
-      // Still gappy — next loop will ask again
-      await ctx.emit({
-        type: 'clarification.another_round',
+      clear = requirementsSeemClear(questions, skip, round);
+      await setExecution(executionId, {
+        status: ExecutionStatus.RUNNING,
         phase: ExecutionPhase.CLARIFICATION,
-        message: `Requirements still incomplete — starting clarification round ${round + 1}`,
       });
     }
 
@@ -389,25 +480,42 @@ export async function runPhase1Execution(executionId: string): Promise<void> {
       },
     });
 
-    // 3. Test case generation
-    const tcOut = (await runAgent(
+    // 3. Test Strategy
+    const strategyOut = await runAgent(
       ctx,
       {
-        agent: testcaseAgent,
-        phase: ExecutionPhase.TEST_CASES,
-        agentId: AgentId.TEST_CASE_GENERATION,
+        agent: strategyAgent,
+        phase: ExecutionPhase.TEST_STRATEGY,
+        agentId: AgentId.TEST_STRATEGY,
+      },
+      { appUrl: project.appUrl, projectName: project.name },
+    );
+
+    // Persist strategy in DB so API/UI can read it without shared disk/R2
+    await prisma.projectRequirementSnapshot.create({
+      data: {
+        projectId: project.id,
+        executionId,
+        payload: {
+          kind: 'TEST_STRATEGY',
+          strategy: strategyOut,
+        } as never,
+        clear: true,
+      },
+    });
+
+    // 4. Test Design (cases + data) — before browser login
+    const designOut = (await runAgent(
+      ctx,
+      {
+        agent: designAgent,
+        phase: ExecutionPhase.TEST_DESIGN,
+        agentId: AgentId.TEST_DESIGN,
       },
       { appUrl: project.appUrl },
-    )) as { testCases?: TestCase[] };
+    )) as { testCases?: DesignedCase[] };
 
-    const cases =
-      tcOut?.testCases ??
-      (
-        await ctx.getArtifactJson<{ testCases?: TestCase[] }>(
-          ArtifactType.TEST_CASES_JSON,
-        )
-      )?.testCases ??
-      [];
+    const cases = designOut?.testCases ?? [];
 
     await prisma.testCase.deleteMany({ where: { executionId } });
     for (const tc of cases) {
@@ -424,18 +532,19 @@ export async function runPhase1Execution(executionId: string): Promise<void> {
           priority: tc.priority,
           severity: tc.severity,
           type: tc.type,
+          testData: (tc.testData ?? null) as never,
         },
       });
     }
 
     await ctx.emit({
-      type: 'phase1.test_cases_ready',
-      phase: ExecutionPhase.TEST_CASES,
-      message: `Generated ${cases.length} test case(s) on the Test Board`,
+      type: 'stlc.test_design_ready',
+      phase: ExecutionPhase.TEST_DESIGN,
+      message: `Test Board ready — ${cases.length} case(s) with data`,
       data: { count: cases.length },
     });
 
-    // 4. Authentication pause
+    // 5. Authentication pause
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_LOGIN,
       phase: ExecutionPhase.AUTHENTICATION,
@@ -479,100 +588,234 @@ export async function runPhase1Execution(executionId: string): Promise<void> {
       },
     });
 
-    // 5. Execute generated tests
+    // 6. Application Discovery
+    await runAgent(
+      ctx,
+      {
+        agent: discoveryAgent,
+        phase: ExecutionPhase.DISCOVERY,
+        agentId: AgentId.APPLICATION_DISCOVERY,
+      },
+      { browserManager, sessionId: browserSessionId, appUrl: project.appUrl },
+    );
+
+    // 7. UI Testing + API Testing
+    await runAgent(
+      ctx,
+      {
+        agent: functionalAgent,
+        phase: ExecutionPhase.FUNCTIONAL,
+        agentId: AgentId.FUNCTIONAL_TESTING,
+      },
+      { browserManager, sessionId: browserSessionId, appUrl: project.appUrl },
+    );
+
+    await runAgent(
+      ctx,
+      {
+        agent: apiAgent,
+        phase: ExecutionPhase.API,
+        agentId: AgentId.API_TESTING,
+      },
+      {},
+    );
+
+    // 8. Manual Test Agent
     await setExecution(executionId, {
       status: ExecutionStatus.RUNNING,
-      phase: ExecutionPhase.EXECUTION,
+      phase: ExecutionPhase.MANUAL_TEST,
     });
 
-    const page = await browserManager.getPage(browserSessionId);
     const dbCases = await prisma.testCase.findMany({
       where: { executionId },
       orderBy: { createdAt: 'asc' },
     });
 
-    let passed = 0;
-    let failed = 0;
+    const manual = await runManualSuite({
+      ctx,
+      project,
+      executionId,
+      browserSessionId,
+      cases: dbCases,
+      phase: ExecutionPhase.MANUAL_TEST,
+      passLabel: 'Manual Test Agent',
+    });
 
-    for (const tc of dbCases) {
-      const started = Date.now();
-      const steps = Array.isArray(tc.steps) ? (tc.steps as string[]) : [];
-      try {
-        await page.goto(project.appUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: 45_000,
-        });
-        await executeTestSteps(page, steps, project.appUrl);
-        await prisma.testResult.create({
-          data: {
-            projectId: project.id,
-            executionId,
-            testCaseId: tc.id,
-            status: 'PASSED',
-            message: 'Agent completed steps without hard failure',
-            durationMs: Date.now() - started,
+    // 9. Bug Agent on failures
+    if (manual.failures.length) {
+      await runAgent(
+        ctx,
+        {
+          agent: bugAgent,
+          phase: ExecutionPhase.BUG_ANALYSIS,
+          agentId: AgentId.BUG_ANALYSIS,
+        },
+        { projectId: project.id, failures: manual.failures },
+      );
+    }
+
+    // 10. Retest failed cases once
+    let retestPassed = 0;
+    let retestFailed = 0;
+    if (manual.failures.length) {
+      await setExecution(executionId, {
+        status: ExecutionStatus.RUNNING,
+        phase: ExecutionPhase.RETEST,
+      });
+      const failedIds = new Set(manual.failures.map((f) => f.testCaseId));
+      const retestCases = dbCases.filter((c) => failedIds.has(c.id));
+      const retest = await runManualSuite({
+        ctx,
+        project,
+        executionId,
+        browserSessionId,
+        cases: retestCases,
+        phase: ExecutionPhase.RETEST,
+        passLabel: 'Retest',
+      });
+      retestPassed = retest.passed;
+      retestFailed = retest.failed;
+      if (retest.failures.length) {
+        await runAgent(
+          ctx,
+          {
+            agent: bugAgent,
+            phase: ExecutionPhase.BUG_ANALYSIS,
+            agentId: AgentId.BUG_ANALYSIS,
           },
-        });
-        passed += 1;
-        await ctx.emit({
-          type: 'phase1.test_passed',
-          phase: ExecutionPhase.EXECUTION,
-          message: `PASSED ${tc.externalId}: ${tc.scenario}`,
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        let evidenceKey: string | undefined;
-        try {
-          const shot = await browserManager.screenshot(
-            browserSessionId,
-            `fail-${tc.externalId}`,
-          );
-          evidenceKey = await putBinaryArtifact({
-            executionId,
-            type: ArtifactType.SCREENSHOT,
-            key: `${executionId}/screenshots/fail-${tc.externalId}.png`,
-            body: shot,
-            mime: 'image/png',
-            store: ctx.artifactStore,
-          });
-        } catch {
-          /* ignore screenshot errors */
-        }
-
-        const result = await prisma.testResult.create({
-          data: {
-            projectId: project.id,
-            executionId,
-            testCaseId: tc.id,
-            status: 'FAILED',
-            message,
-            durationMs: Date.now() - started,
-            evidenceKeys: evidenceKey ? ([evidenceKey] as never) : undefined,
-          },
-        });
-
-        await prisma.bug.create({
-          data: {
-            projectId: project.id,
-            executionId,
-            testCaseId: tc.id,
-            testResultId: result.id,
-            title: `Failed: ${tc.scenario}`,
-            severity: tc.severity ?? 'medium',
-            description: message,
-            stepsToReproduce: steps.join('\n'),
-            evidenceKeys: evidenceKey ? ([evidenceKey] as never) : undefined,
-          },
-        });
-
-        failed += 1;
-        await ctx.emit({
-          type: 'phase1.test_failed',
-          phase: ExecutionPhase.EXECUTION,
-          message: `FAILED ${tc.externalId}: ${message}`,
-        });
+          { projectId: project.id, failures: retest.failures },
+        );
       }
     }
+
+    // 11. Automation generation
+    await runAgent(
+      ctx,
+      {
+        agent: automationAgent,
+        phase: ExecutionPhase.AUTOMATION,
+        agentId: AgentId.AUTOMATION_GENERATION,
+      },
+      {
+        projectName: project.name,
+        appUrl: project.appUrl,
+        framework: project.framework ?? 'playwright',
+        language: project.language ?? 'typescript',
+      },
+    );
+
+    // 12. Automation execution
+    await runAgent(
+      ctx,
+      {
+        agent: executionAgent,
+        phase: ExecutionPhase.EXECUTION,
+        agentId: AgentId.EXECUTION,
+      },
+      {
+        browserManager,
+        sessionId: browserSessionId,
+        appUrl: project.appUrl,
+      },
+    );
+
+    // 13. HTML report
+    const reportOut = (await runAgent(
+      ctx,
+      {
+        agent: reportAgent,
+        phase: ExecutionPhase.REPORT,
+        agentId: AgentId.REPORT_GENERATION,
+      },
+      { projectName: project.name, appUrl: project.appUrl },
+    )) as { zipKey?: string };
+
+    // 14. Quality Analysis
+    await runAgent(
+      ctx,
+      {
+        agent: qualityAgent,
+        phase: ExecutionPhase.QUALITY_ANALYSIS,
+        agentId: AgentId.QUALITY_ANALYSIS,
+      },
+      { projectName: project.name, appUrl: project.appUrl },
+    );
+
+    // 15. Final STLC ZIP pack
+    const [testCasesCsv, bugsRows, resultsRows, quality, strategy] =
+      await Promise.all([
+        ctx.artifactStore
+          .get(`${executionId}/test-cases/cases.csv`)
+          .catch(() => Buffer.from('')),
+        prisma.bug.findMany({ where: { executionId } }),
+        prisma.testResult.findMany({
+          where: { executionId },
+          include: { testCase: true },
+        }),
+        ctx.getArtifactJson(ArtifactType.QUALITY_ANALYSIS_JSON),
+        ctx.getArtifactJson(ArtifactType.TEST_STRATEGY_JSON),
+      ]);
+
+    const bugsCsv = [
+      'id,title,severity,status,description',
+      ...bugsRows.map(
+        (b) =>
+          `"${b.id}","${b.title.replace(/"/g, '""')}","${b.severity}","${b.status}","${b.description.replace(/"/g, '""')}"`,
+      ),
+    ].join('\n');
+
+    const resultsCsv = [
+      'id,testCase,status,message,durationMs',
+      ...resultsRows.map(
+        (r) =>
+          `"${r.id}","${(r.testCase?.externalId ?? '').replace(/"/g, '""')}","${r.status}","${(r.message ?? '').replace(/"/g, '""')}","${r.durationMs ?? ''}"`,
+      ),
+    ].join('\n');
+
+    const finalZip = await buildZipPackage({
+      files: {
+        'test-cases.csv': testCasesCsv.toString('utf8') || 'id\n',
+        'bugs.csv': bugsCsv,
+        'results.csv': resultsCsv,
+        'strategy.json': JSON.stringify(strategy ?? {}, null, 2),
+        'quality-analysis.json': JSON.stringify(quality ?? {}, null, 2),
+        'manifest.json': JSON.stringify(
+          {
+            executionId,
+            projectId: project.id,
+            projectName: project.name,
+            appUrl: project.appUrl,
+            reportZipKey: reportOut?.zipKey ?? null,
+            generatedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      },
+    });
+
+    await putBinaryArtifact({
+      executionId,
+      type: ArtifactType.STLC_FINAL_ZIP,
+      key: `${executionId}/stlc/final-pack.zip`,
+      body: finalZip,
+      mime: 'application/zip',
+      store: ctx.artifactStore,
+    });
+
+    // 16. GitHub Actions workflow stub
+    await runAgent(
+      ctx,
+      {
+        agent: githubActionsAgent,
+        phase: ExecutionPhase.GITHUB,
+        agentId: AgentId.GITHUB_ACTIONS,
+      },
+      { projectName: project.name, appUrl: project.appUrl },
+    );
+
+    const totalPassed = manual.passed + retestPassed;
+    const totalFailed = retestFailed || manual.failed;
 
     await setExecution(executionId, {
       status: ExecutionStatus.COMPLETED,
@@ -580,19 +823,28 @@ export async function runPhase1Execution(executionId: string): Promise<void> {
       finishedAt: new Date(),
       scores: {
         functional: dbCases.length
-          ? Math.round((passed / dbCases.length) * 100)
+          ? Math.round((manual.passed / dbCases.length) * 100)
           : 0,
-        passed,
-        failed,
+        passed: totalPassed,
+        failed: totalFailed,
         total: dbCases.length,
+        retestPassed,
+        retestFailed,
+        bugs: bugsRows.length,
       },
     });
 
     await ctx.emit({
-      type: 'phase1.completed',
+      type: 'stlc.completed',
       phase: ExecutionPhase.DONE,
-      message: `Phase 1 complete — ${passed} passed, ${failed} failed`,
-      data: { passed, failed, total: dbCases.length },
+      message: `STLC complete — manual ${manual.passed}/${dbCases.length} passed, retest ${retestPassed} recovered, ${bugsRows.length} bug(s)`,
+      data: {
+        passed: manual.passed,
+        failed: manual.failed,
+        retestPassed,
+        retestFailed,
+        total: dbCases.length,
+      },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -602,7 +854,7 @@ export async function runPhase1Execution(executionId: string): Promise<void> {
       finishedAt: new Date(),
     });
     await ctx.emit({
-      type: 'phase1.failed',
+      type: 'stlc.failed',
       message,
     });
     throw err;
