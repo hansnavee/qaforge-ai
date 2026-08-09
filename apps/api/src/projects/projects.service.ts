@@ -10,6 +10,7 @@ import {
   Role,
   createProjectSchema,
   createRequirementPasteSchema,
+  updateProjectSchema,
 } from '@qaforge/shared';
 import { z } from 'zod';
 import { AuditService } from '../common/audit.service';
@@ -22,11 +23,6 @@ import {
 } from '../phase1/parse-requirement-file';
 
 const MAX_REQUIREMENT_BYTES = 15 * 1024 * 1024;
-
-const updateProjectSchema = createProjectSchema.partial().extend({
-  name: z.string().trim().min(2).optional(),
-  status: z.string().optional(),
-});
 
 function mapRequirementDoc(doc: {
   id: string;
@@ -84,8 +80,10 @@ export class ProjectsService {
       data: {
         organizationId: orgId,
         name: input.name,
+        description: input.description?.trim() || null,
         appUrl: input.appUrl ?? null,
         status: 'DRAFT',
+        analysisStatus: 'NOT_STARTED',
         loginUrl: input.loginUrl ?? null,
         framework: input.framework,
         language: input.language,
@@ -127,7 +125,7 @@ export class ProjectsService {
   async createWithUpload(
     user: SessionUser,
     orgId: string,
-    fields: { name?: string; appUrl?: string },
+    fields: { name?: string; appUrl?: string; description?: string },
     file: Express.Multer.File | undefined,
   ) {
     await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
@@ -156,8 +154,10 @@ export class ProjectsService {
       data: {
         organizationId: orgId,
         name,
+        description: fields.description?.trim() || null,
         appUrl: appUrl ?? null,
         status: 'DRAFT',
+        analysisStatus: 'NOT_STARTED',
       },
     });
 
@@ -201,8 +201,12 @@ export class ProjectsService {
       id: p.id,
       organizationId: p.organizationId,
       name: p.name,
+      description: p.description,
       appUrl: p.appUrl,
       status: p.status,
+      analysisStatus: p.analysisStatus,
+      analysisCompletedAt: p.analysisCompletedAt,
+      staleRequirementCount: p.staleRequirementCount,
       framework: p.framework,
       language: p.language,
       environment: p.environment,
@@ -219,17 +223,29 @@ export class ProjectsService {
       include: {
         requirements: { orderBy: { createdAt: 'desc' } },
         _count: {
-          select: { requirements: true, extractedRequirements: true },
+          select: {
+            requirements: true,
+            extractedRequirements: true,
+            requirementQuestions: true,
+            featureGroups: true,
+          },
         },
       },
     });
     if (!project) throw new NotFoundException('Project not found');
+
+    const staleCount = await prisma.requirement.count({
+      where: { projectId, analysisStale: true },
+    });
 
     const { requirements, _count, ...rest } = project;
     return {
       ...rest,
       requirementCount: _count.requirements,
       extractedRequirementCount: _count.extractedRequirements,
+      questionCount: _count.requirementQuestions,
+      featureGroupCount: _count.featureGroups,
+      staleRequirementCount: staleCount,
       requirements: requirements.map(mapRequirementDoc),
       primaryRequirement: requirements[0]
         ? mapRequirementDoc(requirements[0])
@@ -251,6 +267,9 @@ export class ProjectsService {
       where: { id: projectId },
       data: {
         ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.description !== undefined
+          ? { description: input.description?.trim() || null }
+          : {}),
         ...(input.appUrl !== undefined ? { appUrl: input.appUrl ?? null } : {}),
         ...(input.loginUrl !== undefined
           ? { loginUrl: input.loginUrl ?? null }
@@ -261,6 +280,9 @@ export class ProjectsService {
           ? { environment: input.environment }
           : {}),
         ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.requirementText !== undefined
+          ? { requirementText: input.requirementText }
+          : {}),
       },
     });
 
@@ -273,16 +295,16 @@ export class ProjectsService {
       metadata: input,
     });
 
-    return project;
+    return this.get(user.id, orgId, projectId);
   }
 
   async softDelete(user: SessionUser, orgId: string, projectId: string) {
-    await this.orgs.requireMembership(user.id, orgId, Role.ADMIN);
-    await this.requireProject(user.id, orgId, projectId, Role.ADMIN);
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
 
-    const project = await prisma.project.update({
-      where: { id: projectId },
-      data: { deletedAt: new Date() },
+    // Hard delete — cascades requirements, questions, features, relations
+    await prisma.$transaction(async (tx) => {
+      await tx.project.delete({ where: { id: projectId } });
     });
 
     await this.audit.log({
@@ -290,10 +312,10 @@ export class ProjectsService {
       userId: user.id,
       action: 'project.delete',
       resource: 'project',
-      resourceId: project.id,
+      resourceId: projectId,
     });
 
-    return { ok: true, id: project.id };
+    return { ok: true, id: projectId };
   }
 
   async listRequirements(userId: string, orgId: string, projectId: string) {

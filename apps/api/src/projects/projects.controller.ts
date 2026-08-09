@@ -18,7 +18,11 @@ import type { SessionUser } from '../auth/auth';
 import { ProjectsService } from './projects.service';
 import { RequirementExtractionService } from './requirement-extraction.service';
 import { RequirementReviewService } from './requirement-review.service';
-import { answerReviewQuestionSchema } from '@qaforge/shared';
+import {
+  answerReviewQuestionSchema,
+  createManualRequirementSchema,
+  updateManualRequirementSchema,
+} from '@qaforge/shared';
 
 const fileUpload = FileInterceptor('file', {
   storage: memoryStorage(),
@@ -49,6 +53,8 @@ export class ProjectsController {
         {
           name: typeof body.name === 'string' ? body.name : undefined,
           appUrl: typeof body.appUrl === 'string' ? body.appUrl : undefined,
+          description:
+            typeof body.description === 'string' ? body.description : undefined,
         },
         file,
       );
@@ -92,6 +98,50 @@ export class ProjectsController {
     @Param('projectId') projectId: string,
   ) {
     return this.extraction.extract(user, orgId, projectId);
+  }
+
+  @Post(':projectId/extracted-requirements')
+  createExtractedRequirement(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    createManualRequirementSchema.parse(body);
+    return this.extraction.createManual(user, orgId, projectId, body);
+  }
+
+  @Patch(':projectId/extracted-requirements/:requirementKey')
+  updateExtractedRequirement(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('requirementKey') requirementKey: string,
+    @Body() body: unknown,
+  ) {
+    updateManualRequirementSchema.parse(body);
+    return this.extraction.updateManual(
+      user,
+      orgId,
+      projectId,
+      requirementKey,
+      body,
+    );
+  }
+
+  @Delete(':projectId/extracted-requirements/:requirementKey')
+  deleteExtractedRequirement(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('requirementKey') requirementKey: string,
+  ) {
+    return this.extraction.deleteManual(
+      user,
+      orgId,
+      projectId,
+      requirementKey,
+    );
   }
 
   @Get(':projectId/extracted-requirements')
@@ -189,6 +239,24 @@ export class ProjectsController {
     @Param('projectId') projectId: string,
   ) {
     return this.review.listConflicts(user.id, orgId, projectId);
+  }
+
+  @Get(':projectId/review-features')
+  reviewFeatures(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.review.listFeatures(user.id, orgId, projectId);
+  }
+
+  @Get(':projectId/review-relations')
+  reviewRelations(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.review.listRelations(user.id, orgId, projectId);
   }
 
   @Get(':projectId')

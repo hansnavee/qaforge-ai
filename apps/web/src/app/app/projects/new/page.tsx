@@ -13,6 +13,7 @@ export default function NewProjectPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
   const [appUrl, setAppUrl] = useState('');
   const [requirementText, setRequirementText] = useState('');
   const [file, setFile] = useState<File | null>(null);
@@ -46,6 +47,7 @@ export default function NewProjectPage() {
       if (file) {
         const form = new FormData();
         form.append('name', name.trim());
+        if (description.trim()) form.append('description', description.trim());
         if (appUrl.trim()) form.append('appUrl', appUrl.trim());
         form.append('file', file);
         const res = await fetch(
@@ -83,6 +85,7 @@ export default function NewProjectPage() {
           method: 'POST',
           body: JSON.stringify({
             name: name.trim(),
+            description: description.trim() || undefined,
             appUrl: appUrl.trim() || undefined,
             requirementText: requirementText.trim(),
           }),
@@ -91,7 +94,10 @@ export default function NewProjectPage() {
       }
 
       clearOrgCache();
-      router.push(`/app/projects/${projectId}?tab=requirements`);
+      // Natural next step: Requirements screen (not project list)
+      router.push(
+        `/app/projects/${projectId}?tab=requirements&view=source`,
+      );
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         clearOrgCache();
@@ -114,12 +120,19 @@ export default function NewProjectPage() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Create QA Project
+        <div className="text-xs text-muted">
+          <a href="/app/projects" className="hover:text-fg">
+            Projects
+          </a>
+          <span className="mx-1">/</span>
+          <span>Create</span>
+        </div>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight">
+          Create Project
         </h1>
         <p className="mt-1 text-sm text-muted">
-          Set up a project and capture the original requirements. Analysis comes
-          next.
+          Enter project details and requirements. You will open the Requirements
+          screen next.
         </p>
       </div>
 
@@ -131,6 +144,16 @@ export default function NewProjectPage() {
           placeholder="E-Commerce Application"
           hint="Required · at least 2 characters"
         />
+
+        <div>
+          <label className="mb-1.5 block text-sm font-medium">Description</label>
+          <textarea
+            className="min-h-20 w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Online shopping application."
+          />
+        </div>
 
         <Input
           label="Application URL (Optional)"
@@ -179,10 +202,6 @@ export default function NewProjectPage() {
               placeholder="Paste requirements…"
               disabled={Boolean(file)}
             />
-            <p className="mt-2 text-xs text-muted">
-              Provide either a file upload or pasted text. The original content
-              is preserved and not modified.
-            </p>
           </div>
         </div>
 
@@ -197,7 +216,7 @@ export default function NewProjectPage() {
             Cancel
           </Button>
           <Button onClick={() => void create()} disabled={!canSubmit}>
-            {saving ? 'Creating…' : 'Create Project'}
+            {saving ? 'Creating…' : 'Create'}
           </Button>
         </div>
       </Card>

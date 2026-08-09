@@ -16,7 +16,11 @@ import { CurrentUser } from '../auth/auth.decorator';
 import { SessionAuthGuard } from '../auth/auth.guard';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
-import { answerReviewQuestionSchema } from '@qaforge/shared';
+import {
+  answerReviewQuestionSchema,
+  createManualRequirementSchema,
+  updateManualRequirementSchema,
+} from '@qaforge/shared';
 import { ProjectsService } from './projects.service';
 import { RequirementExtractionService } from './requirement-extraction.service';
 import { RequirementReviewService } from './requirement-review.service';
@@ -59,6 +63,8 @@ export class ProjectsCompatController {
         {
           name: typeof body.name === 'string' ? body.name : undefined,
           appUrl: typeof body.appUrl === 'string' ? body.appUrl : undefined,
+          description:
+            typeof body.description === 'string' ? body.description : undefined,
         },
         file,
       );
@@ -114,6 +120,17 @@ export class ProjectsCompatController {
     return this.extraction.list(user.id, orgId, projectId);
   }
 
+  @Post(':projectId/extracted-requirements')
+  async createExtracted(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    createManualRequirementSchema.parse(body);
+    return this.extraction.createManual(user, orgId, projectId, body);
+  }
+
   @Get(':projectId/extracted-requirements/:requirementKey')
   async getExtracted(
     @CurrentUser() user: SessionUser,
@@ -123,6 +140,39 @@ export class ProjectsCompatController {
     const orgId = await this.defaultOrgId(user.id);
     return this.extraction.getByKey(
       user.id,
+      orgId,
+      projectId,
+      requirementKey,
+    );
+  }
+
+  @Patch(':projectId/extracted-requirements/:requirementKey')
+  async updateExtracted(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+    @Param('requirementKey') requirementKey: string,
+    @Body() body: unknown,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    updateManualRequirementSchema.parse(body);
+    return this.extraction.updateManual(
+      user,
+      orgId,
+      projectId,
+      requirementKey,
+      body,
+    );
+  }
+
+  @Delete(':projectId/extracted-requirements/:requirementKey')
+  async deleteExtracted(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+    @Param('requirementKey') requirementKey: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.extraction.deleteManual(
+      user,
       orgId,
       projectId,
       requirementKey,
@@ -200,6 +250,24 @@ export class ProjectsCompatController {
   ) {
     const orgId = await this.defaultOrgId(user.id);
     return this.review.listConflicts(user.id, orgId, projectId);
+  }
+
+  @Get(':projectId/review-features')
+  async reviewFeatures(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.review.listFeatures(user.id, orgId, projectId);
+  }
+
+  @Get(':projectId/review-relations')
+  async reviewRelations(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.review.listRelations(user.id, orgId, projectId);
   }
 
   @Get(':projectId')

@@ -16,8 +16,18 @@ const optionalUrl = z
     !value || value === '' ? undefined : value,
   );
 
+export const projectAnalysisStatusSchema = z.enum([
+  'NOT_STARTED',
+  'READY',
+  'RUNNING',
+  'COMPLETED',
+  'FAILED',
+  'STALE',
+]);
+
 export const createProjectSchema = z.object({
   name: z.string().trim().min(2),
+  description: z.string().trim().max(5000).optional(),
   appUrl: optionalUrl,
   requirementText: z.string().optional(),
   framework: frameworkSchema.default('PLAYWRIGHT'),
@@ -28,6 +38,40 @@ export const createProjectSchema = z.object({
 
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
 
+export const updateProjectSchema = createProjectSchema.partial().extend({
+  name: z.string().trim().min(2).optional(),
+  status: z.string().optional(),
+  analysisStatus: projectAnalysisStatusSchema.optional(),
+});
+
+export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
+
+export const requirementTypeSchema = z.enum([
+  'FUNCTIONAL',
+  'NON_FUNCTIONAL',
+  'BUSINESS_RULE',
+]);
+
+export const createManualRequirementSchema = z.object({
+  title: z.string().trim().min(1).max(500),
+  description: z.string().trim().max(20000).optional().default(''),
+  type: requirementTypeSchema.default('FUNCTIONAL'),
+});
+
+export type CreateManualRequirementInput = z.infer<
+  typeof createManualRequirementSchema
+>;
+
+export const updateManualRequirementSchema = z.object({
+  title: z.string().trim().min(1).max(500).optional(),
+  description: z.string().trim().max(20000).optional(),
+  type: requirementTypeSchema.optional(),
+});
+
+export type UpdateManualRequirementInput = z.infer<
+  typeof updateManualRequirementSchema
+>;
+
 export const createRequirementPasteSchema = z.object({
   sourceType: z.literal('PASTE').optional().default('PASTE'),
   originalContent: z.string().trim().min(1),
@@ -36,12 +80,6 @@ export const createRequirementPasteSchema = z.object({
 export type CreateRequirementPasteInput = z.infer<
   typeof createRequirementPasteSchema
 >;
-
-export const requirementTypeSchema = z.enum([
-  'FUNCTIONAL',
-  'NON_FUNCTIONAL',
-  'BUSINESS_RULE',
-]);
 
 export const extractedRequirementSourceSchema = z.object({
   document: z.string().optional().nullable(),

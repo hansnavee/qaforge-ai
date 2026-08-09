@@ -7,7 +7,17 @@ import { prisma } from '@qaforge/database';
 import {
   Role,
   analyzeRequirement,
+  computeReadinessScore,
+  detectBusinessConflicts,
+  detectDuplicatePairs,
+  detectRequirementRelations,
+  dedupeQuestionsAgainstExisting,
+  deriveFeatureImpact,
+  deriveFeatureStatus,
+  deriveStatuses,
+  groupRequirementsIntoFeatures,
   interpretAnswer,
+  questionBucket,
   type BusinessReviewPayload,
   type FunctionalReviewPayload,
   type ReviewFact,
@@ -53,7 +63,18 @@ export class RequirementReviewService {
   }
 
   async reviewAll(user: SessionUser, orgId: string, projectId: string) {
-    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
+    const project = await this.requireProject(
+      user.id,
+      orgId,
+      projectId,
+      Role.MEMBER,
+    );
+
+    if (project.analysisStatus === 'RUNNING') {
+      throw new BadRequestException(
+        'Analysis is already running. Please wait for it to finish.',
+      );
+    }
 
     const requirements = await prisma.requirement.findMany({
       where: { projectId },
@@ -65,24 +86,212 @@ export class RequirementReviewService {
       );
     }
 
-    // Clear prior open questions/conflicts for a fresh review pass
+    await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        analysisStatus: 'RUNNING',
+        analysisStartedAt: new Date(),
+        analysisError: null,
+      },
+    });
+
+    try {
+      return await this.runReviewAll(user, orgId, projectId, requirements);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Analysis failed unexpectedly';
+      await prisma.project.update({
+        where: { id: projectId },
+        data: {
+          analysisStatus: 'FAILED',
+          analysisError: message,
+        },
+      });
+      throw err;
+    }
+  }
+
+  private async runReviewAll(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+    requirements: Array<{
+      id: string;
+      projectId: string;
+      requirementKey: string;
+      title: string;
+      description: string;
+      type: string;
+      sourceText: string | null;
+      sourceSection: string | null;
+      acceptanceCriteria: unknown;
+      businessRules: unknown;
+      supportingInformation: unknown;
+      businessReview: unknown;
+      featureGroupId: string | null;
+    }>,
+  ) {
+    // Fresh review pass — keep ANSWERED questions for provenance; clear OPEN
     await prisma.requirementQuestion.deleteMany({
       where: { projectId, status: 'OPEN' },
     });
     await prisma.requirementConflict.deleteMany({
       where: { projectId, status: 'OPEN' },
     });
+    await prisma.requirementRelation.deleteMany({ where: { projectId } });
+    await prisma.featureGroup.deleteMany({ where: { projectId } });
+
+    // Feature grouping (logical containers only)
+    const featureDrafts = groupRequirementsIntoFeatures(
+      requirements.map((r) => ({
+        requirementKey: r.requirementKey,
+        title: r.title,
+        description: r.description,
+        sourceSection: r.sourceSection,
+        sourceText: r.sourceText,
+      })),
+    );
+
+    const featureIdByKey = new Map<string, string>();
+    for (const fg of featureDrafts) {
+      const created = await prisma.featureGroup.create({
+        data: {
+          projectId,
+          featureKey: fg.featureKey,
+          name: fg.name,
+          businessArea: fg.businessArea,
+          businessIntent: fg.businessIntent ?? null,
+          businessImpact: 'MEDIUM',
+          reviewStatus: null,
+        },
+      });
+      featureIdByKey.set(fg.featureKey, created.id);
+      for (const reqKey of fg.requirementKeys) {
+        await prisma.requirement.updateMany({
+          where: { projectId, requirementKey: reqKey },
+          data: { featureGroupId: created.id },
+        });
+      }
+    }
+
+    // Duplicate / overlap soft flags (never delete)
+    const dupPairs = detectDuplicatePairs(
+      requirements.map((r) => ({
+        requirementKey: r.requirementKey,
+        title: r.title,
+        description: r.description,
+        sourceText: r.sourceText,
+      })),
+    );
+    const keyToId = new Map(requirements.map((r) => [r.requirementKey, r.id]));
+    for (const pair of dupPairs) {
+      const aId = keyToId.get(pair.requirementKeyA);
+      const bId = keyToId.get(pair.requirementKeyB);
+      if (!aId || !bId) continue;
+      // Flag lower key as possible duplicate of higher similarity peer
+      await prisma.requirement.update({
+        where: { id: bId },
+        data: {
+          possibleDuplicateOf: pair.requirementKeyA,
+          duplicateSimilarity: pair.similarity,
+          duplicateKind: pair.kind,
+        },
+      });
+      await prisma.requirementRelation.create({
+        data: {
+          projectId,
+          fromRequirementId: bId,
+          toRequirementId: aId,
+          relationType:
+            pair.kind === 'DUPLICATE'
+              ? 'DUPLICATE_OF'
+              : pair.kind === 'OVERLAPPING'
+                ? 'OVERLAPS'
+                : 'RELATED_TO',
+          confidence: pair.similarity / 100,
+          source: 'REVIEW',
+          detail: pair.recommendation,
+        },
+      });
+    }
+
+    // Reload with feature assignment
+    const refreshed = await prisma.requirement.findMany({
+      where: { projectId },
+      orderBy: { requirementKey: 'asc' },
+      include: { featureGroup: true },
+    });
 
     let qSeq = await this.nextQuestionSeq(projectId);
+    const answered = await prisma.requirementQuestion.findMany({
+      where: { projectId, status: 'ANSWERED' },
+    });
+    const existingTexts = answered.map((q) => q.question);
     const results = [];
 
-    for (const req of requirements) {
-      const saved = await this.analyzeAndPersist(req, qSeq);
+    for (const req of refreshed) {
+      const saved = await this.analyzeAndPersist(req, qSeq, existingTexts);
       qSeq = saved.nextSeq;
+      for (const q of saved.createdQuestions) {
+        existingTexts.push(q.question);
+      }
       results.push(saved.mapped);
     }
 
+    // Typed relationships
+    const featureNameByReq = new Map(
+      refreshed.map((r) => [
+        r.requirementKey,
+        r.featureGroup?.name ?? null,
+      ]),
+    );
+    const relDrafts = detectRequirementRelations(
+      refreshed.map((r) => ({
+        requirementKey: r.requirementKey,
+        title: r.title,
+        description: r.description,
+        sourceText: r.sourceText,
+        featureName: featureNameByReq.get(r.requirementKey),
+      })),
+    );
+    for (const rel of relDrafts) {
+      const fromId = keyToId.get(rel.fromKey);
+      const toId = keyToId.get(rel.toKey);
+      if (!fromId || !toId) continue;
+      try {
+        await prisma.requirementRelation.create({
+          data: {
+            projectId,
+            fromRequirementId: fromId,
+            toRequirementId: toId,
+            relationType: rel.relationType,
+            confidence: rel.confidence,
+            source: 'REVIEW',
+            detail: rel.detail ?? null,
+          },
+        });
+      } catch {
+        // unique constraint — ignore
+      }
+    }
+
     await this.detectConflicts(projectId);
+    await this.refreshFeatureStatuses(projectId);
+
+    await prisma.requirement.updateMany({
+      where: { projectId },
+      data: { analysisStale: false },
+    });
+
+    await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        analysisStatus: 'COMPLETED',
+        analysisCompletedAt: new Date(),
+        analysisError: null,
+        staleRequirementCount: 0,
+      },
+    });
 
     await this.audit.log({
       organizationId: orgId,
@@ -90,11 +299,12 @@ export class RequirementReviewService {
       action: 'requirements.review',
       resource: 'project',
       resourceId: projectId,
-      metadata: { count: results.length },
+      metadata: { count: results.length, features: featureDrafts.length },
     });
 
     const summary = await this.getSummary(user.id, orgId, projectId);
-    return { ok: true, summary, requirements: results };
+    const features = await this.listFeatures(user.id, orgId, projectId);
+    return { ok: true, summary, features, requirements: results };
   }
 
   async reviewOne(
@@ -118,9 +328,18 @@ export class RequirementReviewService {
       where: { requirementId: req.id, status: 'OPEN' },
     });
 
+    const answered = await prisma.requirementQuestion.findMany({
+      where: { projectId, status: { in: ['ANSWERED', 'OPEN'] } },
+      include: { requirement: { select: { requirementKey: true } } },
+    });
+    const existingTexts = answered
+      .filter((q) => q.requirementId !== req.id)
+      .map((q) => q.question);
+
     const qSeq = await this.nextQuestionSeq(projectId);
-    const saved = await this.analyzeAndPersist(req, qSeq);
+    const saved = await this.analyzeAndPersist(req, qSeq, existingTexts);
     await this.detectConflicts(projectId);
+    if (req.featureGroupId) await this.refreshFeatureStatuses(projectId);
     return { ok: true, requirement: saved.mapped };
   }
 
@@ -135,6 +354,8 @@ export class RequirementReviewService {
     const conflicts = await prisma.requirementConflict.count({
       where: { projectId, status: 'OPEN' },
     });
+    const features = await prisma.featureGroup.count({ where: { projectId } });
+    const duplicates = requirements.filter((r) => r.possibleDuplicateOf).length;
 
     const total = requirements.length;
     const business = {
@@ -180,12 +401,23 @@ export class RequirementReviewService {
             ((functional.complete + functional.partial * 0.5) / total) * 100,
           );
 
+    const impact = {
+      critical: requirements.filter((r) => r.businessImpact === 'CRITICAL')
+        .length,
+      high: requirements.filter((r) => r.businessImpact === 'HIGH').length,
+      medium: requirements.filter((r) => r.businessImpact === 'MEDIUM').length,
+      low: requirements.filter((r) => r.businessImpact === 'LOW').length,
+    };
+
     return {
       total,
       reviewed: reviewed.length,
+      features,
+      duplicates,
       business,
       functional,
       questions,
+      impact,
       openConflicts: conflicts,
       businessReadinessPct,
       functionalReadinessPct,
@@ -205,6 +437,65 @@ export class RequirementReviewService {
     };
   }
 
+  async listFeatures(userId: string, orgId: string, projectId: string) {
+    await this.requireProject(userId, orgId, projectId);
+    const features = await prisma.featureGroup.findMany({
+      where: { projectId },
+      include: {
+        requirements: {
+          orderBy: { requirementKey: 'asc' },
+          include: {
+            questions: { where: { status: 'OPEN' } },
+          },
+        },
+        questions: { where: { status: 'OPEN' } },
+      },
+      orderBy: [{ businessArea: 'asc' }, { name: 'asc' }],
+    });
+
+    return features.map((f) => {
+      const openQs = [
+        ...f.questions,
+        ...f.requirements.flatMap((r) => r.questions),
+      ];
+      const critical = openQs.filter((q) => q.priority === 'CRITICAL').length;
+      const high = openQs.filter((q) => q.priority === 'HIGH').length;
+      return {
+        id: f.id,
+        featureKey: f.featureKey,
+        name: f.name,
+        businessArea: f.businessArea,
+        businessIntent: f.businessIntent,
+        businessImpact: f.businessImpact,
+        reviewStatus: f.reviewStatus,
+        requirementCount: f.requirements.length,
+        criticalQuestions: critical,
+        highQuestions: high,
+        questionCount: openQs.length,
+        duplicateRequirements: f.requirements
+          .filter((r) => r.possibleDuplicateOf)
+          .map((r) => r.requirementKey),
+        requirements: f.requirements.map((r) => ({
+          id: r.id,
+          requirementKey: r.requirementKey,
+          title: r.title,
+          type: r.primaryType ?? r.type,
+          primaryType: r.primaryType ?? r.type,
+          secondaryType: r.secondaryType,
+          businessImpact: r.businessImpact,
+          reviewStatus: r.reviewStatus,
+          criticalOpenCount: r.questions.filter((q) => q.priority === 'CRITICAL')
+            .length,
+          highOpenCount: r.questions.filter((q) => q.priority === 'HIGH')
+            .length,
+          possibleDuplicateOf: r.possibleDuplicateOf,
+          duplicateSimilarity: r.duplicateSimilarity,
+          duplicateKind: r.duplicateKind,
+        })),
+      };
+    });
+  }
+
   async listQuestions(
     userId: string,
     orgId: string,
@@ -219,10 +510,10 @@ export class RequirementReviewService {
       },
       include: {
         requirement: { select: { requirementKey: true, title: true } },
+        featureGroup: { select: { featureKey: true, name: true } },
       },
       orderBy: [{ priority: 'asc' }, { questionKey: 'asc' }],
     });
-    // Priority sort CRITICAL first (string sort won't work) — re-sort
     const rank = (p: string) =>
       p === 'CRITICAL' ? 0 : p === 'HIGH' ? 1 : p === 'MEDIUM' ? 2 : 3;
     rows.sort(
@@ -247,10 +538,32 @@ export class RequirementReviewService {
       id: c.id,
       summary: c.summary,
       detail: c.detail,
+      conflictType: c.conflictType,
       status: c.status,
       requirementA: c.requirementA,
       requirementB: c.requirementB,
       createdAt: c.createdAt,
+    }));
+  }
+
+  async listRelations(userId: string, orgId: string, projectId: string) {
+    await this.requireProject(userId, orgId, projectId);
+    const rows = await prisma.requirementRelation.findMany({
+      where: { projectId },
+      include: {
+        fromRequirement: { select: { requirementKey: true, title: true } },
+        toRequirement: { select: { requirementKey: true, title: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 500,
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      relationType: r.relationType,
+      confidence: r.confidence,
+      detail: r.detail,
+      from: r.fromRequirement,
+      to: r.toRequirement,
     }));
   }
 
@@ -270,6 +583,9 @@ export class RequirementReviewService {
     if (question.status === 'ANSWERED') {
       throw new BadRequestException('Question already answered');
     }
+    if (!question.requirement) {
+      throw new BadRequestException('Feature-only questions are not answerable yet');
+    }
 
     const derived = interpretAnswer({
       question: question.question,
@@ -283,7 +599,7 @@ export class RequirementReviewService {
     const priorRules = asFacts(existingReview?.rules);
     const mergedRules = [
       ...priorRules,
-      ...derived.filter((d) => d.status === 'DERIVED_FROM_USER_ANSWER'),
+      ...derived.filter((d: ReviewFact) => d.status === 'DERIVED_FROM_USER_ANSWER'),
     ];
 
     await prisma.requirementQuestion.update({
@@ -296,27 +612,63 @@ export class RequirementReviewService {
       },
     });
 
-    // Preserve derived rules on requirement before re-analyze
     await prisma.requirement.update({
-      where: { id: question.requirementId },
+      where: { id: question.requirementId! },
       data: {
         businessReview: {
           ...(existingReview ?? {}),
           rules: mergedRules,
         } as object,
+        intentSource: 'USER_CONFIRMED',
       },
     });
 
-    // Re-analyze this requirement (keeps derived rules)
-    const refreshed = await prisma.requirement.findUniqueOrThrow({
-      where: { id: question.requirementId },
+    // Cross-requirement impact: related requirements via graph
+    const relatedIds = await this.findRelatedRequirementIds(
+      projectId,
+      question.requirementId!,
+    );
+    const affectedKeys: string[] = [question.requirement.requirementKey];
+
+    const answeredQs = await prisma.requirementQuestion.findMany({
+      where: { projectId, status: { in: ['ANSWERED', 'OPEN'] } },
     });
-    await prisma.requirementQuestion.deleteMany({
-      where: { requirementId: refreshed.id, status: 'OPEN' },
-    });
-    const qSeq = await this.nextQuestionSeq(projectId);
-    const saved = await this.analyzeAndPersist(refreshed, qSeq);
+    const existingTexts = answeredQs.map((q) => q.question);
+
+    for (const reqId of [question.requirementId!, ...relatedIds]) {
+      const req = await prisma.requirement.findUnique({ where: { id: reqId } });
+      if (!req) continue;
+      await prisma.requirementQuestion.deleteMany({
+        where: { requirementId: req.id, status: 'OPEN' },
+      });
+      // Propagate derived cancel/payment rules to related when relevant
+      if (reqId !== question.requirementId) {
+        const biz = (req.businessReview as BusinessReviewPayload | null) ?? null;
+        const rules = [
+          ...asFacts(biz?.rules),
+          ...derived.filter(
+            (d: ReviewFact) => d.status === 'DERIVED_FROM_USER_ANSWER',
+          ),
+        ];
+        await prisma.requirement.update({
+          where: { id: req.id },
+          data: {
+            businessReview: { ...(biz ?? {}), rules } as object,
+          },
+        });
+      }
+      const refreshed = await prisma.requirement.findUniqueOrThrow({
+        where: { id: req.id },
+      });
+      const qSeq = await this.nextQuestionSeq(projectId);
+      await this.analyzeAndPersist(refreshed, qSeq, existingTexts);
+      if (req.requirementKey !== question.requirement.requirementKey) {
+        affectedKeys.push(req.requirementKey);
+      }
+    }
+
     await this.detectConflicts(projectId);
+    await this.refreshFeatureStatuses(projectId);
 
     await this.audit.log({
       organizationId: orgId,
@@ -324,7 +676,25 @@ export class RequirementReviewService {
       action: 'requirements.review.answer',
       resource: 'requirement_question',
       resourceId: question.id,
-      metadata: { requirementKey: refreshed.requirementKey },
+      metadata: {
+        requirementKey: question.requirement.requirementKey,
+        affected: affectedKeys,
+      },
+    });
+
+    const savedReq = await prisma.requirement.findUniqueOrThrow({
+      where: { id: question.requirementId! },
+      include: {
+        sourceDocument: { select: { filename: true } },
+        questions: { orderBy: { questionKey: 'asc' } },
+        featureGroup: true,
+        relationsFrom: {
+          include: {
+            toRequirement: { select: { requirementKey: true, title: true } },
+          },
+          take: 20,
+        },
+      },
     });
 
     return {
@@ -337,9 +707,96 @@ export class RequirementReviewService {
           },
         })
         .then((q) => (q ? this.mapQuestion(q) : null)),
-      requirement: saved.mapped,
+      requirement: this.mapRequirement(savedReq),
       derived,
+      affectedRequirements: affectedKeys,
     };
+  }
+
+  private async findRelatedRequirementIds(
+    projectId: string,
+    requirementId: string,
+  ): Promise<string[]> {
+    const rels = await prisma.requirementRelation.findMany({
+      where: {
+        projectId,
+        OR: [
+          { fromRequirementId: requirementId },
+          { toRequirementId: requirementId },
+        ],
+        relationType: {
+          in: ['DEPENDS_ON', 'AFFECTS', 'RELATED_TO', 'CONFLICTS_WITH'],
+        },
+      },
+    });
+    const ids = new Set<string>();
+    for (const r of rels) {
+      if (r.fromRequirementId !== requirementId) ids.add(r.fromRequirementId);
+      if (r.toRequirementId !== requirementId) ids.add(r.toRequirementId);
+    }
+    // Same feature group
+    const self = await prisma.requirement.findUnique({
+      where: { id: requirementId },
+    });
+    if (self?.featureGroupId) {
+      const siblings = await prisma.requirement.findMany({
+        where: {
+          projectId,
+          featureGroupId: self.featureGroupId,
+          id: { not: requirementId },
+        },
+        select: { id: true },
+      });
+      for (const s of siblings) ids.add(s.id);
+    }
+    return [...ids].slice(0, 12);
+  }
+
+  private async refreshFeatureStatuses(projectId: string) {
+    const features = await prisma.featureGroup.findMany({
+      where: { projectId },
+      include: { requirements: true },
+    });
+    for (const f of features) {
+      const status = deriveFeatureStatus(
+        f.requirements.map((r) => r.reviewStatus),
+      );
+      const impact = deriveFeatureImpact(
+        f.requirements.map((r) => r.businessImpact),
+      );
+      const intent =
+        f.businessIntent ||
+        f.requirements.find((r) => {
+          const biz = r.businessReview as BusinessReviewPayload | null;
+          return biz?.intent?.text;
+        });
+      const intentText =
+        typeof intent === 'string'
+          ? intent
+          : ((
+              f.requirements.find((r) => {
+                const biz = r.businessReview as BusinessReviewPayload | null;
+                return biz?.intent?.text;
+              })?.businessReview as BusinessReviewPayload | null
+            )?.intent?.text ?? f.businessIntent);
+
+      await prisma.featureGroup.update({
+        where: { id: f.id },
+        data: {
+          reviewStatus: status,
+          businessImpact: impact,
+          businessIntent: intentText,
+          analysis: {
+            requirementCount: f.requirements.length,
+            ready: f.requirements.filter(
+              (r) => r.reviewStatus === 'READY_FOR_TEST_DESIGN',
+            ).length,
+            blocked: f.requirements.filter((r) => r.reviewStatus === 'BLOCKED')
+              .length,
+          },
+        },
+      });
+    }
   }
 
   private async nextQuestionSeq(projectId: string): Promise<number> {
@@ -366,8 +823,10 @@ export class RequirementReviewService {
       businessRules: unknown;
       supportingInformation: unknown;
       businessReview: unknown;
+      featureGroupId?: string | null;
     },
     startSeq: number,
+    existingQuestionTexts: string[] = [],
   ) {
     const existingBiz = req.businessReview as BusinessReviewPayload | null;
     const knownDerived = asFacts(existingBiz?.rules).filter(
@@ -385,12 +844,31 @@ export class RequirementReviewService {
       businessRules: asStringArray(req.businessRules),
       supportingInformation: asStringArray(req.supportingInformation),
       knownDerivedRules: knownDerived,
+      existingQuestionTexts,
     });
 
-    // Ensure derived rules remain in businessReview.rules
+    const projectQs = await prisma.requirementQuestion.findMany({
+      where: {
+        projectId: req.projectId,
+        status: { in: ['OPEN', 'ANSWERED'] },
+        NOT: { requirementId: req.id },
+      },
+      include: { requirement: { select: { requirementKey: true } } },
+    });
+    const { keep, suppressed } = dedupeQuestionsAgainstExisting(
+      analysis.questions,
+      projectQs.map((q) => ({
+        question: q.question,
+        fingerprint: q.fingerprint,
+        questionKey: q.questionKey,
+        requirementKey: q.requirement?.requirementKey,
+        status: q.status,
+      })),
+    );
+
     const rules = [
       ...analysis.businessReview.rules.filter(
-        (r) => r.status !== 'DERIVED_FROM_USER_ANSWER',
+        (r: ReviewFact) => r.status !== 'DERIVED_FROM_USER_ANSWER',
       ),
       ...knownDerived,
     ];
@@ -399,52 +877,88 @@ export class RequirementReviewService {
       rules,
     };
 
-    const updated = await prisma.requirement.update({
+    // Recompute status from kept (non-duplicate) questions only
+    const statuses = deriveStatuses({
+      openQuestions: keep,
+      functionalCompleteness: analysis.functionalCompleteness,
+    });
+    const readinessScore = computeReadinessScore(
+      keep.map((q) => ({
+        priority: q.priority,
+        category: q.category,
+        blocking: q.blocking,
+      })),
+    );
+
+    await prisma.requirement.update({
       where: { id: req.id },
       data: {
         businessReview: businessReview as object,
         functionalReview: analysis.functionalReview as object,
-        businessReadiness: analysis.businessReadiness,
+        businessReadiness: statuses.businessReadiness,
         functionalCompleteness: analysis.functionalCompleteness,
-        reviewStatus: analysis.reviewStatus,
-        readinessScore: analysis.readinessScore,
+        reviewStatus: statuses.reviewStatus,
+        readinessScore,
         reviewedAt: new Date(),
         status: 'EXTRACTED',
-      },
-      include: {
-        sourceDocument: { select: { filename: true } },
-        questions: true,
+        primaryType: analysis.primaryType,
+        secondaryType: analysis.secondaryType,
+        businessImpact: analysis.businessImpact,
+        intentSource: analysis.intentSource,
+        // keep legacy type in sync with primary for list filters
+        type: analysis.primaryType,
+        analysisStale: false,
       },
     });
 
     let seq = startSeq;
-    for (const q of analysis.questions) {
+    const createdQuestions: Array<{ question: string; questionKey: string }> =
+      [];
+    for (const draft of keep) {
       const questionKey = `Q${String(seq).padStart(3, '0')}`;
       seq += 1;
       await prisma.requirementQuestion.create({
         data: {
           projectId: req.projectId,
           requirementId: req.id,
+          featureGroupId: req.featureGroupId ?? null,
+          scope: 'REQUIREMENT',
           questionKey,
-          category: q.category,
-          priority: q.priority,
-          question: q.question,
-          reason: q.reason,
-          blocking: q.blocking,
+          category: draft.category,
+          priority: draft.priority,
+          question: draft.question,
+          reason: draft.reason,
+          blocking: draft.blocking,
+          fingerprint: draft.fingerprint ?? questionBucket(draft.question),
           status: 'OPEN',
         },
       });
+      createdQuestions.push({ question: draft.question, questionKey });
     }
+
+    // Note suppressed duplicates in reason trail (no new questions)
+    void suppressed;
 
     const withQuestions = await prisma.requirement.findUniqueOrThrow({
       where: { id: req.id },
       include: {
         sourceDocument: { select: { filename: true } },
         questions: { orderBy: { questionKey: 'asc' } },
+        featureGroup: true,
+        relationsFrom: {
+          include: {
+            toRequirement: { select: { requirementKey: true, title: true } },
+          },
+          take: 20,
+        },
       },
     });
 
-    return { mapped: this.mapRequirement(withQuestions), nextSeq: seq };
+    return {
+      mapped: this.mapRequirement(withQuestions),
+      nextSeq: seq,
+      createdQuestions,
+    };
   }
 
   private async detectConflicts(projectId: string) {
@@ -453,64 +967,65 @@ export class RequirementReviewService {
       orderBy: { requirementKey: 'asc' },
     });
 
-    // Simple heuristic: cancel eligibility contradictions in derived/confirmed rules
-    const cancelRelated = requirements.filter((r) => {
-      const blob = `${r.title} ${r.description} ${JSON.stringify(r.businessReview)}`.toLowerCase();
-      return /cancel/.test(blob) && /order/.test(blob);
-    });
-
-    for (let i = 0; i < cancelRelated.length; i++) {
-      for (let j = i + 1; j < cancelRelated.length; j++) {
-        const a = cancelRelated[i]!;
-        const b = cancelRelated[j]!;
-        const rulesA = asFacts(
-          (a.businessReview as BusinessReviewPayload | null)?.rules,
+    const conflictDrafts = detectBusinessConflicts(
+      requirements.map((r) => ({
+        requirementKey: r.requirementKey,
+        title: r.title,
+        description: r.description,
+        rulesText: asFacts(
+          (r.businessReview as BusinessReviewPayload | null)?.rules,
         )
-          .map((r) => r.text.toLowerCase())
-          .join(' ');
-        const rulesB = asFacts(
-          (b.businessReview as BusinessReviewPayload | null)?.rules,
-        )
-          .map((r) => r.text.toLowerCase())
-          .join(' ');
+          .map((x) => x.text)
+          .join(' '),
+      })),
+    );
 
-        const aPendingOnly =
-          /pending/.test(rulesA) && !/confirmed|shipped|until shipment/.test(rulesA);
-        const bUntilShip = /until shipment|shipped/.test(rulesB);
-        const conflict =
-          (aPendingOnly && bUntilShip) ||
-          (/pending and confirmed|pending or confirmed/.test(rulesA) &&
-            /until shipment/.test(rulesB));
+    const keyToId = new Map(requirements.map((r) => [r.requirementKey, r.id]));
 
-        if (!conflict) continue;
+    for (const c of conflictDrafts) {
+      const aId = keyToId.get(c.keyA);
+      const bId = keyToId.get(c.keyB);
+      if (!aId || !bId) continue;
+      const exists = await prisma.requirementConflict.findFirst({
+        where: {
+          projectId,
+          status: 'OPEN',
+          OR: [
+            { requirementAId: aId, requirementBId: bId },
+            { requirementAId: bId, requirementBId: aId },
+          ],
+        },
+      });
+      if (exists) continue;
 
-        const exists = await prisma.requirementConflict.findFirst({
-          where: {
-            projectId,
-            status: 'OPEN',
-            OR: [
-              { requirementAId: a.id, requirementBId: b.id },
-              { requirementAId: b.id, requirementBId: a.id },
-            ],
-          },
-        });
-        if (exists) continue;
+      await prisma.requirementConflict.create({
+        data: {
+          projectId,
+          requirementAId: aId,
+          requirementBId: bId,
+          summary: c.summary,
+          detail: c.detail,
+          conflictType: 'BUSINESS',
+          status: 'OPEN',
+        },
+      });
 
-        await prisma.requirementConflict.create({
+      try {
+        await prisma.requirementRelation.create({
           data: {
             projectId,
-            requirementAId: a.id,
-            requirementBId: b.id,
-            summary: 'Cancellation eligibility differs',
-            detail: `Business rule conflict between ${a.requirementKey} and ${b.requirementKey}. Cancellation eligibility statements do not agree. Business clarification required.`,
-            status: 'OPEN',
+            fromRequirementId: aId,
+            toRequirementId: bId,
+            relationType: 'CONFLICTS_WITH',
+            confidence: 0.9,
+            source: 'REVIEW',
+            detail: c.summary,
           },
         });
+      } catch {
+        // ignore unique
       }
     }
-
-    // Payment failure vs success contradiction (light check)
-    void asFacts;
   }
 
   mapRequirement(row: {
@@ -520,6 +1035,10 @@ export class RequirementReviewService {
     title: string;
     description: string;
     type: string;
+    primaryType?: string | null;
+    secondaryType?: string | null;
+    businessImpact?: string | null;
+    intentSource?: string | null;
     priority: string | null;
     status: string;
     sourceDocumentId: string | null;
@@ -531,6 +1050,9 @@ export class RequirementReviewService {
     dependencies: unknown;
     supportingInformation?: unknown;
     possibleDuplicateOf: string | null;
+    duplicateSimilarity?: number | null;
+    duplicateKind?: string | null;
+    featureGroupId?: string | null;
     reviewStatus: string | null;
     businessReadiness: string | null;
     functionalCompleteness: string | null;
@@ -538,9 +1060,20 @@ export class RequirementReviewService {
     functionalReview: unknown;
     readinessScore: number | null;
     reviewedAt: Date | null;
+    analysisStale?: boolean;
     createdAt: Date;
     updatedAt: Date;
     sourceDocument?: { filename: string } | null;
+    featureGroup?: {
+      id: string;
+      featureKey: string;
+      name: string;
+      businessArea: string | null;
+    } | null;
+    relationsFrom?: Array<{
+      relationType: string;
+      toRequirement: { requirementKey: string; title: string };
+    }>;
     questions?: Array<{
       id: string;
       questionKey: string;
@@ -552,16 +1085,24 @@ export class RequirementReviewService {
       status: string;
       answer: string | null;
       answeredAt: Date | null;
+      fingerprint?: string | null;
+      linkedQuestionId?: string | null;
     }>;
   }) {
     const openQuestions = (row.questions ?? []).filter((q) => q.status === 'OPEN');
+    const biz = row.businessReview as BusinessReviewPayload | null;
     return {
       id: row.id,
       projectId: row.projectId,
       requirementKey: row.requirementKey,
       title: row.title,
       description: row.description,
-      type: row.type,
+      type: row.primaryType ?? row.type,
+      primaryType: row.primaryType ?? row.type,
+      secondaryType: row.secondaryType ?? null,
+      businessImpact: row.businessImpact ?? null,
+      intentSource: row.intentSource ?? null,
+      businessIntent: biz?.intent?.text ?? null,
       priority: row.priority,
       status: row.status,
       sourceDocumentId: row.sourceDocumentId,
@@ -573,6 +1114,22 @@ export class RequirementReviewService {
       dependencies: asStringArray(row.dependencies),
       supportingInformation: asStringArray(row.supportingInformation),
       possibleDuplicateOf: row.possibleDuplicateOf,
+      duplicateSimilarity: row.duplicateSimilarity ?? null,
+      duplicateKind: row.duplicateKind ?? null,
+      featureGroupId: row.featureGroupId ?? null,
+      featureGroup: row.featureGroup
+        ? {
+            id: row.featureGroup.id,
+            featureKey: row.featureGroup.featureKey,
+            name: row.featureGroup.name,
+            businessArea: row.featureGroup.businessArea,
+          }
+        : null,
+      relatedRequirements: (row.relationsFrom ?? []).map((r) => ({
+        relationType: r.relationType,
+        requirementKey: r.toRequirement.requirementKey,
+        title: r.toRequirement.title,
+      })),
       reviewStatus: row.reviewStatus,
       businessReadiness: row.businessReadiness,
       functionalCompleteness: row.functionalCompleteness,
@@ -580,6 +1137,7 @@ export class RequirementReviewService {
       functionalReview: row.functionalReview as FunctionalReviewPayload | null,
       readinessScore: row.readinessScore,
       reviewedAt: row.reviewedAt,
+      analysisStale: row.analysisStale ?? false,
       sourceDocumentName: row.sourceDocument?.filename ?? null,
       openQuestionCount: openQuestions.length,
       criticalOpenCount: openQuestions.filter((q) => q.priority === 'CRITICAL')
@@ -596,6 +1154,7 @@ export class RequirementReviewService {
         status: q.status,
         answer: q.answer,
         answeredAt: q.answeredAt,
+        fingerprint: q.fingerprint ?? null,
       })),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
@@ -613,7 +1172,10 @@ export class RequirementReviewService {
     status: string;
     answer: string | null;
     answeredAt: Date | null;
-    requirement?: { requirementKey: string; title: string };
+    scope?: string;
+    fingerprint?: string | null;
+    requirement?: { requirementKey: string; title: string } | null;
+    featureGroup?: { featureKey: string; name: string } | null;
   }) {
     return {
       id: q.id,
@@ -626,8 +1188,12 @@ export class RequirementReviewService {
       status: q.status,
       answer: q.answer,
       answeredAt: q.answeredAt,
+      scope: q.scope ?? 'REQUIREMENT',
+      fingerprint: q.fingerprint ?? null,
       requirementKey: q.requirement?.requirementKey,
       requirementTitle: q.requirement?.title,
+      featureKey: q.featureGroup?.featureKey,
+      featureName: q.featureGroup?.name,
     };
   }
 }

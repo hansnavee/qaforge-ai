@@ -1,17 +1,23 @@
 'use client';
 
 import Link from 'next/link';
-import { useQuery } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ActionMenu } from '@/components/ActionMenu';
 import { Badge } from '@/components/Badge';
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { api, ApiError } from '@/lib/api';
 
 type Project = {
   id: string;
   name: string;
+  description?: string | null;
   appUrl?: string | null;
   status?: string | null;
+  analysisStatus?: string | null;
   requirementCount?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -30,7 +36,21 @@ function formatDate(value?: string) {
   }
 }
 
+function analysisLabel(status?: string | null) {
+  if (!status || status === 'NOT_STARTED') return 'Not Started';
+  if (status === 'READY') return 'Ready';
+  if (status === 'RUNNING') return 'Running';
+  if (status === 'COMPLETED') return 'Completed';
+  if (status === 'FAILED') return 'Failed';
+  if (status === 'STALE') return 'Stale';
+  return status;
+}
+
 export default function ProjectsPage() {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['projects'],
     queryFn: async () => {
@@ -45,15 +65,25 @@ export default function ProjectsPage() {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) =>
+      api(`/api/v1/projects/${id}`, { method: 'DELETE' }),
+    onSuccess: async () => {
+      setDeleteId(null);
+      await queryClient.invalidateQueries({ queryKey: ['projects'] });
+    },
+  });
+
   const projects = data ?? [];
+  const deleting = projects.find((p) => p.id === deleteId);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
           <p className="mt-1 text-sm text-muted">
-            Your QA projects and requirement intake status.
+            Manage projects, requirements, and analysis.
           </p>
         </div>
         <Link href="/app/projects/new">
@@ -73,8 +103,7 @@ export default function ProjectsPage() {
         <Card className="border-dashed">
           <h2 className="text-base font-medium">No projects yet</h2>
           <p className="mt-1 text-sm text-muted">
-            Create a project, attach requirements, and open the Requirements
-            workspace.
+            Create a project, attach requirements, then run analysis.
           </p>
           <Link href="/app/projects/new" className="mt-4 inline-block">
             <Button size="sm">Create Project</Button>
@@ -84,75 +113,108 @@ export default function ProjectsPage() {
 
       <div className="grid gap-3">
         {projects.map((p) => (
-          <Link
-            key={p.id}
-            href={`/app/projects/${p.id}?tab=requirements`}
-          >
-            <Card className="transition hover:border-accent/40">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="text-xs uppercase tracking-wide text-muted">
-                    Project
-                  </div>
-                  <div className="mt-1 text-lg font-medium">{p.name}</div>
-                  {p.appUrl ? (
-                    <div className="mt-1 font-mono text-xs text-muted">
-                      {p.appUrl}
-                    </div>
-                  ) : null}
+          <Card key={p.id} className="transition hover:border-accent/40">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <button
+                type="button"
+                className="min-w-0 flex-1 text-left"
+                onClick={() =>
+                  router.push(`/app/projects/${p.id}?tab=overview`)
+                }
+              >
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Project
                 </div>
+                <div className="mt-1 text-lg font-medium">{p.name}</div>
+                {p.description ? (
+                  <p className="mt-1 line-clamp-2 text-sm text-muted">
+                    {p.description}
+                  </p>
+                ) : null}
+              </button>
+              <div className="flex items-center gap-2">
                 <Badge tone="warning">{p.status ?? 'DRAFT'}</Badge>
+                <ActionMenu
+                  items={[
+                    {
+                      label: 'View',
+                      onClick: () =>
+                        router.push(`/app/projects/${p.id}?tab=overview`),
+                    },
+                    {
+                      label: 'Open Requirements',
+                      onClick: () =>
+                        router.push(
+                          `/app/projects/${p.id}?tab=requirements&view=list`,
+                        ),
+                    },
+                    {
+                      label: 'Edit',
+                      onClick: () =>
+                        router.push(
+                          `/app/projects/${p.id}?tab=overview&edit=1`,
+                        ),
+                    },
+                    {
+                      label: 'Delete',
+                      danger: true,
+                      onClick: () => setDeleteId(p.id),
+                    },
+                  ]}
+                />
               </div>
+            </div>
 
-              <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                <div>
-                  <div className="text-xs text-muted">Requirements</div>
-                  <div className="mt-0.5 text-sm font-medium">
-                    {p.requirementCount ?? 0} Document
-                    {(p.requirementCount ?? 0) === 1 ? '' : 's'}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-xs text-muted">Status</div>
-                  <div className="mt-0.5 text-sm font-medium">
-                    {p.status ?? 'DRAFT'}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-xs text-muted">Created</div>
-                  <div className="mt-0.5 text-sm font-medium">
-                    {formatDate(p.createdAt)}
-                  </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-4">
+              <div>
+                <div className="text-xs text-muted">Requirements</div>
+                <div className="mt-0.5 text-sm font-medium">
+                  {p.requirementCount ?? 0}
                 </div>
               </div>
-
-              <div className="mt-4 flex flex-wrap gap-1.5 text-[11px]">
-                <span className="rounded border border-success/40 bg-success/10 px-2 py-0.5 text-success">
-                  ✓ Project
-                </span>
-                <span className="rounded border border-accent/40 bg-accent/10 px-2 py-0.5 text-accent">
-                  ● Requirements
-                </span>
-                {[
-                  'Test Design',
-                  'Manual Testing',
-                  'Bug Management',
-                  'Automation',
-                  'Execution',
-                  'Reports',
-                ].map((label) => (
-                  <span
-                    key={label}
-                    className="rounded border border-border px-2 py-0.5 text-muted"
-                  >
-                    🔒 {label}
-                  </span>
-                ))}
+              <div>
+                <div className="text-xs text-muted">Analysis</div>
+                <div className="mt-0.5 text-sm font-medium">
+                  {analysisLabel(p.analysisStatus)}
+                </div>
               </div>
-            </Card>
-          </Link>
+              <div>
+                <div className="text-xs text-muted">Status</div>
+                <div className="mt-0.5 text-sm font-medium">
+                  {p.status ?? 'DRAFT'}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-muted">Created</div>
+                <div className="mt-0.5 text-sm font-medium">
+                  {formatDate(p.createdAt)}
+                </div>
+              </div>
+            </div>
+          </Card>
         ))}
       </div>
+
+      <ConfirmDialog
+        open={Boolean(deleteId)}
+        title="Delete Project?"
+        danger
+        confirmLabel="Delete Project"
+        busy={deleteMutation.isPending}
+        onCancel={() => setDeleteId(null)}
+        onConfirm={() => {
+          if (deleteId) deleteMutation.mutate(deleteId);
+        }}
+      >
+        <p>
+          This will remove project <strong>{deleting?.name}</strong>, its
+          requirements, analysis results, questions, review data, feature
+          groups, and relationships.
+        </p>
+        <p className="mt-2 font-medium text-danger">
+          This action cannot be undone.
+        </p>
+      </ConfirmDialog>
     </div>
   );
 }

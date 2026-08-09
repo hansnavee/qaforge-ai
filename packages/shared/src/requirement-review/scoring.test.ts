@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { computeReadinessScore, deriveStatuses } from './scoring.js';
+import {
+  computeReadinessScore,
+  deriveStatuses,
+  isCosmeticQuestion,
+} from './scoring.js';
 import type { ReviewQuestionDraft } from './types.js';
 
 describe('requirement review scoring', () => {
@@ -35,6 +39,24 @@ describe('requirement review scoring', () => {
     });
     expect(reviewStatus).toBe('BLOCKED');
     expect(businessReadiness).toBe('BLOCKED');
+  });
+
+  it('does not BLOCK for cosmetic error-message questions', () => {
+    const questions: ReviewQuestionDraft[] = [
+      {
+        category: 'ERROR_HANDLING',
+        priority: 'LOW',
+        question: 'What error message should appear for invalid login credentials?',
+        reason: 'Error presentation is not specified (cosmetic/functional refinement).',
+        blocking: false,
+      },
+    ];
+    expect(isCosmeticQuestion(questions[0]!)).toBe(true);
+    const { reviewStatus } = deriveStatuses({
+      openQuestions: questions,
+      functionalCompleteness: 'PARTIAL',
+    });
+    expect(reviewStatus).toBe('REVIEW_RECOMMENDED');
   });
 
   it('is READY_FOR_TEST_DESIGN when no high gaps remain', () => {

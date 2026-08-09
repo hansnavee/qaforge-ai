@@ -4,9 +4,11 @@ import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ActionMenu } from '@/components/ActionMenu';
 import { Badge } from '@/components/Badge';
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Input } from '@/components/Input';
 import { api, ApiError } from '@/lib/api';
 import { cn } from '@/lib/cn';
@@ -71,6 +73,11 @@ type ExtractedRequirement = {
   title: string;
   description: string;
   type: string;
+  primaryType?: string | null;
+  secondaryType?: string | null;
+  businessImpact?: string | null;
+  intentSource?: string | null;
+  businessIntent?: string | null;
   priority?: string | null;
   status: string;
   sourcePage?: number | null;
@@ -82,6 +89,19 @@ type ExtractedRequirement = {
   dependencies: string[];
   supportingInformation?: string[];
   possibleDuplicateOf?: string | null;
+  duplicateSimilarity?: number | null;
+  duplicateKind?: string | null;
+  featureGroup?: {
+    id: string;
+    featureKey: string;
+    name: string;
+    businessArea?: string | null;
+  } | null;
+  relatedRequirements?: Array<{
+    relationType: string;
+    requirementKey: string;
+    title: string;
+  }>;
   reviewStatus?: string | null;
   businessReadiness?: string | null;
   functionalCompleteness?: string | null;
@@ -93,11 +113,14 @@ type ExtractedRequirement = {
   criticalOpenCount?: number;
   highOpenCount?: number;
   questions?: ReviewQuestion[];
+  analysisStale?: boolean;
 };
 
 type ReviewSummary = {
   total: number;
   reviewed: number;
+  features?: number;
+  duplicates?: number;
   business: {
     ready: number;
     needsClarification: number;
@@ -114,6 +137,12 @@ type ReviewSummary = {
     medium: number;
     low: number;
   };
+  impact?: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
   openConflicts: number;
   businessReadinessPct: number;
   functionalReadinessPct: number;
@@ -123,6 +152,34 @@ type ReviewSummary = {
     reviewRecommended: number;
     readyForTestDesign: number;
   };
+};
+
+type FeatureGroupView = {
+  id: string;
+  featureKey: string;
+  name: string;
+  businessArea?: string | null;
+  businessIntent?: string | null;
+  businessImpact?: string | null;
+  reviewStatus?: string | null;
+  requirementCount: number;
+  criticalQuestions: number;
+  highQuestions: number;
+  questionCount: number;
+  duplicateRequirements: string[];
+  requirements: Array<{
+    id: string;
+    requirementKey: string;
+    title: string;
+    type: string;
+    primaryType?: string | null;
+    businessImpact?: string | null;
+    reviewStatus?: string | null;
+    criticalOpenCount?: number;
+    highOpenCount?: number;
+    possibleDuplicateOf?: string | null;
+    duplicateSimilarity?: number | null;
+  }>;
 };
 
 type ReviewConflict = {
@@ -172,11 +229,19 @@ const SHOW_EXTRACTION_DEBUG =
 type ProjectDetail = {
   id: string;
   name: string;
+  description?: string | null;
   appUrl?: string | null;
   status?: string | null;
   createdAt: string;
+  updatedAt?: string;
+  analysisStatus?: string | null;
+  analysisCompletedAt?: string | null;
+  analysisError?: string | null;
+  staleRequirementCount?: number;
   requirementCount?: number;
   extractedRequirementCount?: number;
+  questionCount?: number;
+  featureGroupCount?: number;
   requirements?: RequirementDoc[];
   primaryRequirement?: RequirementDoc | null;
 };
@@ -209,7 +274,8 @@ const REVIEW_STEPS = [
   'Clarifying questions',
 ];
 
-function formatDate(value: string) {
+function formatDate(value?: string | null) {
+  if (!value) return '—';
   try {
     return new Date(value).toLocaleDateString(undefined, {
       year: 'numeric',
@@ -219,6 +285,16 @@ function formatDate(value: string) {
   } catch {
     return value;
   }
+}
+
+function analysisLabel(status?: string | null) {
+  if (!status || status === 'NOT_STARTED') return 'Not Started';
+  if (status === 'READY') return 'Ready';
+  if (status === 'RUNNING') return 'Running';
+  if (status === 'COMPLETED') return 'Completed';
+  if (status === 'FAILED') return 'Failed';
+  if (status === 'STALE') return 'Stale';
+  return status;
 }
 
 function typeLabel(type: string) {
@@ -249,6 +325,19 @@ function reviewStatusTone(
   if (status === 'BLOCKED') return 'danger';
   if (status === 'NEEDS_CLARIFICATION') return 'warning';
   return 'accent';
+}
+
+function impactTone(
+  impact?: string | null,
+): 'success' | 'warning' | 'danger' | 'accent' | undefined {
+  if (impact === 'CRITICAL') return 'danger';
+  if (impact === 'HIGH') return 'warning';
+  if (impact === 'MEDIUM') return 'accent';
+  return undefined;
+}
+
+function impactLabel(impact?: string | null) {
+  return impact ?? '—';
 }
 
 function factStatusTone(
@@ -326,9 +415,24 @@ export default function ProjectWorkspacePage() {
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [answerError, setAnswerError] = useState<string | null>(null);
+  const [expandedFeatures, setExpandedFeatures] = useState<
+    Record<string, boolean>
+  >({});
   const [debugDecisions, setDebugDecisions] = useState<ExtractionDecision[]>(
     [],
   );
+  const [editProjectOpen, setEditProjectOpen] = useState(false);
+  const [deleteProjectOpen, setDeleteProjectOpen] = useState(false);
+  const [addReqOpen, setAddReqOpen] = useState(false);
+  const [editReq, setEditReq] = useState<ExtractedRequirement | null>(null);
+  const [deleteReq, setDeleteReq] = useState<ExtractedRequirement | null>(null);
+  const [projectForm, setProjectForm] = useState({ name: '', description: '' });
+  const [reqForm, setReqForm] = useState({
+    title: '',
+    description: '',
+    type: 'FUNCTIONAL',
+  });
+  const [menuOpenKey, setMenuOpenKey] = useState<string | null>(null);
 
   const projectQuery = useQuery({
     queryKey: ['project', projectId],
@@ -403,6 +507,21 @@ export default function ProjectWorkspacePage() {
     enabled: Boolean(projectId),
   });
 
+  const featuresQuery = useQuery({
+    queryKey: ['review-features', projectId],
+    queryFn: async () => {
+      try {
+        return await api<FeatureGroupView[]>(
+          `/api/v1/projects/${projectId}/review-features`,
+        );
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 0) return [] as FeatureGroupView[];
+        throw e;
+      }
+    },
+    enabled: Boolean(projectId),
+  });
+
   const project = projectQuery.data;
   const sourceDoc = useMemo(() => {
     if (!project) return null;
@@ -428,6 +547,22 @@ export default function ProjectWorkspacePage() {
     () => extracted.find((r) => r.requirementKey === selectedKey) ?? null,
     [extracted, selectedKey],
   );
+
+  const invalidateReviewQueries = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+    await queryClient.invalidateQueries({
+      queryKey: ['extracted-requirements', projectId],
+    });
+    await queryClient.invalidateQueries({
+      queryKey: ['review-summary', projectId],
+    });
+    await queryClient.invalidateQueries({
+      queryKey: ['review-conflicts', projectId],
+    });
+    await queryClient.invalidateQueries({
+      queryKey: ['review-features', projectId],
+    });
+  };
 
   const extractMutation = useMutation({
     mutationFn: async () => {
@@ -489,16 +624,8 @@ export default function ProjectWorkspacePage() {
     },
     onSuccess: async () => {
       setReviewProgressStep(REVIEW_STEPS.length);
-      await queryClient.invalidateQueries({
-        queryKey: ['extracted-requirements', projectId],
-      });
-      await queryClient.invalidateQueries({
-        queryKey: ['review-summary', projectId],
-      });
-      await queryClient.invalidateQueries({
-        queryKey: ['review-conflicts', projectId],
-      });
-      router.replace(`?tab=requirements&view=review-dashboard`, {
+      await invalidateReviewQueries();
+      router.replace(`?tab=requirements&view=features`, {
         scroll: false,
       });
     },
@@ -511,6 +638,95 @@ export default function ProjectWorkspacePage() {
     },
   });
 
+  const updateProjectMutation = useMutation({
+    mutationFn: async (body: { name: string; description: string }) => {
+      return api<ProjectDetail>(`/api/v1/projects/${projectId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: body.name,
+          description: body.description || null,
+        }),
+      });
+    },
+    onSuccess: async () => {
+      setEditProjectOpen(false);
+      await invalidateReviewQueries();
+      const params = new URLSearchParams(searchParams.toString());
+      params.delete('edit');
+      router.replace(`?${params.toString()}`, { scroll: false });
+    },
+  });
+
+  const deleteProjectMutation = useMutation({
+    mutationFn: async () => {
+      return api(`/api/v1/projects/${projectId}`, { method: 'DELETE' });
+    },
+    onSuccess: async () => {
+      setDeleteProjectOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ['projects'] });
+      router.push('/app/projects');
+    },
+  });
+
+  const createReqMutation = useMutation({
+    mutationFn: async (body: {
+      title: string;
+      description: string;
+      type: string;
+    }) => {
+      return api(
+        `/api/v1/projects/${projectId}/extracted-requirements`,
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+        },
+      );
+    },
+    onSuccess: async () => {
+      setAddReqOpen(false);
+      setReqForm({ title: '', description: '', type: 'FUNCTIONAL' });
+      await invalidateReviewQueries();
+    },
+  });
+
+  const updateReqMutation = useMutation({
+    mutationFn: async ({
+      key,
+      body,
+    }: {
+      key: string;
+      body: { title: string; description: string; type: string };
+    }) => {
+      return api(
+        `/api/v1/projects/${projectId}/extracted-requirements/${key}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        },
+      );
+    },
+    onSuccess: async () => {
+      setEditReq(null);
+      await invalidateReviewQueries();
+    },
+  });
+
+  const deleteReqMutation = useMutation({
+    mutationFn: async (key: string) => {
+      return api(
+        `/api/v1/projects/${projectId}/extracted-requirements/${key}`,
+        { method: 'DELETE' },
+      );
+    },
+    onSuccess: async (_data, key) => {
+      setDeleteReq(null);
+      await invalidateReviewQueries();
+      if (selectedKey === key) {
+        router.replace(`?tab=requirements&view=list`, { scroll: false });
+      }
+    },
+  });
+
   const reanalyzeMutation = useMutation({
     mutationFn: async (requirementKey: string) => {
       return api<{ ok: boolean }>(
@@ -519,15 +735,7 @@ export default function ProjectWorkspacePage() {
       );
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: ['extracted-requirements', projectId],
-      });
-      await queryClient.invalidateQueries({
-        queryKey: ['review-summary', projectId],
-      });
-      await queryClient.invalidateQueries({
-        queryKey: ['review-conflicts', projectId],
-      });
+      await invalidateReviewQueries();
     },
   });
 
@@ -563,6 +771,9 @@ export default function ProjectWorkspacePage() {
       await queryClient.invalidateQueries({
         queryKey: ['review-conflicts', projectId],
       });
+      await queryClient.invalidateQueries({
+        queryKey: ['review-features', projectId],
+      });
     },
     onError: (e) => {
       setAnswerError(
@@ -579,6 +790,21 @@ export default function ProjectWorkspacePage() {
     );
     return () => timers.forEach((t) => window.clearTimeout(t));
   }, [reviewMutation.isPending]);
+
+  useEffect(() => {
+    if (searchParams.get('edit') !== '1') return;
+    if (!projectQuery.data) return;
+    setProjectForm({
+      name: projectQuery.data.name,
+      description: projectQuery.data.description ?? '',
+    });
+    setEditProjectOpen(true);
+    if ((searchParams.get('tab') ?? 'requirements') !== 'overview') {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set('tab', 'overview');
+      router.replace(`?${params.toString()}`, { scroll: false });
+    }
+  }, [searchParams, projectQuery.data, router]);
 
   const setView = (next: string, req?: string | null) => {
     const params = new URLSearchParams();
@@ -610,6 +836,42 @@ export default function ProjectWorkspacePage() {
   }
 
   const status = project.status ?? 'DRAFT';
+  const analysisStatus = project.analysisStatus ?? 'NOT_STARTED';
+  const extractedCount =
+    project.extractedRequirementCount ?? extracted.length;
+  const analysisBusy =
+    reviewMutation.isPending ||
+    extractMutation.isPending ||
+    analysisStatus === 'RUNNING';
+  const runAnalysis = () => {
+    if (extracted.length > 0) reviewMutation.mutate();
+    else extractMutation.mutate();
+  };
+  const openEditProject = () => {
+    setProjectForm({
+      name: project.name,
+      description: project.description ?? '',
+    });
+    setEditProjectOpen(true);
+  };
+  const openAddReq = () => {
+    setReqForm({ title: '', description: '', type: 'FUNCTIONAL' });
+    setAddReqOpen(true);
+  };
+  const openEditReq = (r: ExtractedRequirement) => {
+    setReqForm({
+      title: r.title,
+      description: r.description,
+      type: r.type || 'FUNCTIONAL',
+    });
+    setEditReq(r);
+  };
+  const breadcrumbTail =
+    tab === 'overview'
+      ? null
+      : view === 'detail' && selected
+        ? 'Detail'
+        : 'Requirements';
   const progressPct = Math.min(
     100,
     Math.round(
@@ -625,26 +887,39 @@ export default function ProjectWorkspacePage() {
     <div className="mx-auto max-w-5xl space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2 text-xs text-muted">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
             <Link href="/app/projects" className="hover:text-fg">
-              Dashboard
+              Projects
             </Link>
             <span>/</span>
-            <span className="text-fg">{project.name}</span>
+            <button
+              type="button"
+              className="hover:text-fg"
+              onClick={() =>
+                router.replace('?tab=overview', { scroll: false })
+              }
+            >
+              {project.name}
+            </button>
+            {breadcrumbTail ? (
+              <>
+                <span>/</span>
+                <span className="text-fg">{breadcrumbTail}</span>
+              </>
+            ) : null}
           </div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight">
             {project.name}
           </h1>
           <div className="mt-3 flex flex-wrap gap-2">
             <Badge tone="warning">Status: {status}</Badge>
+            <Badge>Analysis: {analysisLabel(analysisStatus)}</Badge>
             <Badge>
               {project.requirementCount ?? 0} Source Document
               {(project.requirementCount ?? 0) === 1 ? '' : 's'}
             </Badge>
-            {(project.extractedRequirementCount ?? extracted.length) > 0 ? (
-              <Badge tone="success">
-                {project.extractedRequirementCount ?? extracted.length} Extracted
-              </Badge>
+            {extractedCount > 0 ? (
+              <Badge tone="success">{extractedCount} Extracted</Badge>
             ) : null}
           </div>
         </div>
@@ -693,39 +968,258 @@ export default function ProjectWorkspacePage() {
       </Card>
 
       {tab === 'overview' ? (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Card>
-            <div className="text-xs uppercase tracking-wide text-muted">
-              Project
+        <Card className="space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-medium">Project Details</h2>
+              <p className="mt-1 text-sm text-muted">
+                Project metadata, requirement counts, and analysis status.
+              </p>
             </div>
-            <div className="mt-2 font-medium">{project.name}</div>
-          </Card>
-          <Card>
-            <div className="text-xs uppercase tracking-wide text-muted">
-              Source
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="secondary" onClick={openEditProject}>
+                Edit Project
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => setDeleteProjectOpen(true)}
+              >
+                Delete Project
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => setView(extracted.length ? 'list' : 'source')}
+              >
+                Open Requirements
+              </Button>
+              <Button
+                size="sm"
+                onClick={runAnalysis}
+                disabled={analysisBusy || (!sourceDoc?.originalContent && extracted.length === 0)}
+              >
+                {extracted.length > 0 ? 'Run Analysis' : 'Analyze first'}
+              </Button>
             </div>
-            <div className="mt-2 font-medium">
-              {project.requirementCount ?? 0} Document
-              {(project.requirementCount ?? 0) === 1 ? '' : 's'}
+          </div>
+
+          {editProjectOpen ? (
+            <form
+              className="space-y-3 rounded-lg border border-border bg-bg-elevated/40 p-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!projectForm.name.trim()) return;
+                updateProjectMutation.mutate({
+                  name: projectForm.name.trim(),
+                  description: projectForm.description,
+                });
+              }}
+            >
+              <div>
+                <label className="text-xs uppercase tracking-wide text-muted">
+                  Name
+                </label>
+                <Input
+                  className="mt-1"
+                  value={projectForm.name}
+                  onChange={(e) =>
+                    setProjectForm((prev) => ({
+                      ...prev,
+                      name: e.target.value,
+                    }))
+                  }
+                  required
+                />
+              </div>
+              <div>
+                <label className="text-xs uppercase tracking-wide text-muted">
+                  Description
+                </label>
+                <textarea
+                  className="mt-1 min-h-[88px] w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm"
+                  value={projectForm.description}
+                  onChange={(e) =>
+                    setProjectForm((prev) => ({
+                      ...prev,
+                      description: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={
+                    updateProjectMutation.isPending || !projectForm.name.trim()
+                  }
+                >
+                  {updateProjectMutation.isPending ? 'Saving…' : 'Save'}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setEditProjectOpen(false)}
+                  disabled={updateProjectMutation.isPending}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </form>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Name
+                </div>
+                <div className="mt-1 font-medium">{project.name}</div>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Project status
+                </div>
+                <div className="mt-1 font-medium">{status}</div>
+              </div>
+              <div className="sm:col-span-2">
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Description
+                </div>
+                <p className="mt-1 text-sm text-muted">
+                  {project.description?.trim() || 'No description'}
+                </p>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Created
+                </div>
+                <div className="mt-1 font-medium">
+                  {formatDate(project.createdAt)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Updated
+                </div>
+                <div className="mt-1 font-medium">
+                  {formatDate(project.updatedAt)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Source documents
+                </div>
+                <div className="mt-1 font-medium">
+                  {project.requirementCount ?? 0}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Extracted requirements
+                </div>
+                <div className="mt-1 font-medium">{extractedCount}</div>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Analysis status
+                </div>
+                <div className="mt-1 font-medium">
+                  {analysisLabel(analysisStatus)}
+                  {(project.staleRequirementCount ?? 0) > 0
+                    ? ` · ${project.staleRequirementCount} stale`
+                    : ''}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Questions / features
+                </div>
+                <div className="mt-1 font-medium">
+                  {project.questionCount ?? 0} questions ·{' '}
+                  {project.featureGroupCount ?? 0} features
+                </div>
+              </div>
+              {project.analysisCompletedAt ? (
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-muted">
+                    Analysis completed
+                  </div>
+                  <div className="mt-1 font-medium">
+                    {formatDate(project.analysisCompletedAt)}
+                  </div>
+                </div>
+              ) : null}
             </div>
-          </Card>
-          <Card>
-            <div className="text-xs uppercase tracking-wide text-muted">
-              Extracted
+          )}
+          {analysisStatus === 'FAILED' && project.analysisError ? (
+            <div className="rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm">
+              <div className="font-medium text-danger">Analysis failed</div>
+              <p className="mt-1 text-muted">{project.analysisError}</p>
+              <Button
+                className="mt-2"
+                size="sm"
+                onClick={runAnalysis}
+                disabled={analysisBusy}
+              >
+                Retry
+              </Button>
             </div>
-            <div className="mt-2 font-medium">
-              {project.extractedRequirementCount ?? extracted.length}
+          ) : null}
+        </Card>
+      ) : null}
+
+      {tab !== 'overview' &&
+      !extractMutation.isPending &&
+      !reviewMutation.isPending ? (
+        <Card className="sticky top-0 z-10 space-y-3 border-accent/30 bg-bg/95 backdrop-blur">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-medium">{project.name}</h2>
+              <p className="mt-1 text-sm text-muted">
+                Requirements: {extractedCount} · Analysis:{' '}
+                {analysisLabel(analysisStatus)}
+              </p>
             </div>
-          </Card>
-          <Card>
-            <div className="text-xs uppercase tracking-wide text-muted">
-              Created
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="secondary" onClick={openAddReq}>
+                Add Requirement
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => setView('source')}
+              >
+                Import / Source
+              </Button>
+              <Button size="sm" onClick={runAnalysis} disabled={analysisBusy || (!sourceDoc?.originalContent && extracted.length === 0)}>
+                {extracted.length > 0 ? 'Run Analysis' : 'Analyze first'}
+              </Button>
             </div>
-            <div className="mt-2 font-medium">
-              {formatDate(project.createdAt)}
+          </div>
+          {analysisStatus === 'STALE' ? (
+            <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              Analysis is stale — requirements changed since the last run.
+              Re-run analysis to refresh review results.
             </div>
-          </Card>
-        </div>
+          ) : null}
+          {analysisStatus === 'FAILED' ? (
+            <div className="rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm">
+              <div className="font-medium text-danger">Analysis failed</div>
+              {project.analysisError ? (
+                <p className="mt-1 text-muted">{project.analysisError}</p>
+              ) : null}
+              <Button
+                className="mt-2"
+                size="sm"
+                onClick={runAnalysis}
+                disabled={analysisBusy}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : null}
+        </Card>
       ) : null}
 
       {tab !== 'overview' && extractMutation.isPending ? (
@@ -808,7 +1302,7 @@ export default function ProjectWorkspacePage() {
               onClick={() => reviewMutation.mutate()}
               disabled={reviewMutation.isPending}
             >
-              Start Business Review
+              Run Analysis
             </Button>
             {SHOW_EXTRACTION_DEBUG ? (
               <Button variant="secondary" onClick={() => setView('debug')}>
@@ -1059,11 +1553,20 @@ export default function ProjectWorkspacePage() {
                   </Badge>
                 </div>
               </div>
+              {reviewSummaryQuery.data.features != null ? (
+                <div className="text-sm text-muted">
+                  {reviewSummaryQuery.data.features} feature groups ·{' '}
+                  {reviewSummaryQuery.data.duplicates ?? 0} possible duplicates
+                </div>
+              ) : null}
+              <Button size="sm" onClick={() => setView('features')}>
+                Open Feature View
+              </Button>
             </>
           ) : (
             <p className="text-sm text-muted">
-              No review data yet. Start Business Review from the extraction
-              summary or requirements list.
+              No review data yet. Run Analysis from the extraction summary or
+              requirements list to start a business review.
             </p>
           )}
           {reviewError ? (
@@ -1075,20 +1578,180 @@ export default function ProjectWorkspacePage() {
       {tab !== 'overview' &&
       !extractMutation.isPending &&
       !reviewMutation.isPending &&
-      view === 'detail' &&
-      selected ? (
+      view === 'features' ? (
         <Card className="space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="font-mono text-sm text-muted">
-                {selected.requirementKey}
-              </div>
-              <h2 className="mt-1 text-xl font-semibold">{selected.title}</h2>
+              <h2 className="text-base font-medium">Features</h2>
+              <p className="mt-1 text-sm text-muted">
+                Business Area → Feature → Requirements (logical grouping only)
+              </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              {selected.reviewedAt ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setView('review-dashboard')}
+              >
+                Dashboard
+              </Button>
+              <Button size="sm" onClick={() => setView('list')}>
+                Flat list
+              </Button>
+            </div>
+          </div>
+
+          {(featuresQuery.data?.length ?? 0) === 0 ? (
+            <p className="text-sm text-muted">
+              No feature groups yet. Run Analysis to generate feature groups.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {(featuresQuery.data ?? []).map((f) => {
+                const open = expandedFeatures[f.id] ?? true;
+                return (
+                  <div
+                    key={f.id}
+                    className="rounded-lg border border-border bg-bg-elevated/30"
+                  >
+                    <button
+                      type="button"
+                      className="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-3 text-left text-sm"
+                      onClick={() =>
+                        setExpandedFeatures((prev) => ({
+                          ...prev,
+                          [f.id]: !open,
+                        }))
+                      }
+                    >
+                      <div>
+                        <div className="font-medium">
+                          {open ? '▼' : '▶'} {f.businessArea ?? 'Other'} /{' '}
+                          {f.name}
+                        </div>
+                        <div className="mt-1 text-xs text-muted">
+                          {f.requirementCount} requirements ·{' '}
+                          {f.criticalQuestions} critical · {f.highQuestions} high
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Badge tone={impactTone(f.businessImpact)}>
+                          {impactLabel(f.businessImpact)}
+                        </Badge>
+                        <Badge tone={reviewStatusTone(f.reviewStatus)}>
+                          {reviewStatusLabel(f.reviewStatus)}
+                        </Badge>
+                      </div>
+                    </button>
+                    {open ? (
+                      <ul className="space-y-1 border-t border-border px-3 py-2 text-sm">
+                        {f.businessIntent ? (
+                          <li className="mb-2 text-xs text-muted">
+                            Intent: {f.businessIntent}
+                          </li>
+                        ) : null}
+                        {f.requirements.map((r) => (
+                          <li key={r.id}>
+                            <button
+                              type="button"
+                              className="flex w-full flex-wrap items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-bg-elevated"
+                              onClick={() =>
+                                setView('detail', r.requirementKey)
+                              }
+                            >
+                              <span>
+                                <span className="font-mono text-xs text-muted">
+                                  {r.requirementKey}
+                                </span>{' '}
+                                {r.title}
+                                {r.possibleDuplicateOf ? (
+                                  <span className="ml-2 text-xs text-warning">
+                                    Possible duplicate of{' '}
+                                    {r.possibleDuplicateOf}
+                                    {r.duplicateSimilarity != null
+                                      ? ` (${Math.round(r.duplicateSimilarity)}%)`
+                                      : ''}
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="flex gap-1">
+                                <Badge tone={impactTone(r.businessImpact)}>
+                                  {impactLabel(r.businessImpact)}
+                                </Badge>
+                                <Badge tone={reviewStatusTone(r.reviewStatus)}>
+                                  {reviewStatusLabel(r.reviewStatus)}
+                                </Badge>
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      ) : null}
+
+      {tab !== 'overview' &&
+      !extractMutation.isPending &&
+      !reviewMutation.isPending &&
+      view === 'detail' &&
+      selected ? (
+        <Card className="space-y-4">
+          <div className="sticky top-14 z-10 -mx-1 space-y-3 border-b border-border bg-bg/95 px-1 pb-3 backdrop-blur">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-mono text-sm text-muted">
+                  {selected.requirementKey}
+                </div>
+                <h2 className="mt-1 line-clamp-2 text-xl font-semibold">
+                  {selected.title}
+                </h2>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  onClick={() =>
+                    reanalyzeMutation.mutate(selected.requirementKey)
+                  }
+                  disabled={
+                    reanalyzeMutation.isPending || analysisStatus === 'RUNNING'
+                  }
+                >
+                  {selected.reviewedAt ? 'Re-analyze' : 'Run Analysis'}
+                </Button>
                 <Button
                   variant="secondary"
+                  size="sm"
+                  onClick={() => openEditReq(selected)}
+                >
+                  Edit
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => setDeleteReq(selected)}
+                >
+                  Delete
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setView('list')}
+                >
+                  Back to list
+                </Button>
+              </div>
+            </div>
+            {selected.analysisStale ? (
+              <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                This requirement is stale after edits. Re-analyze to refresh
+                review results.
+                <Button
+                  className="ml-3"
                   size="sm"
                   onClick={() =>
                     reanalyzeMutation.mutate(selected.requirementKey)
@@ -1097,15 +1760,8 @@ export default function ProjectWorkspacePage() {
                 >
                   Re-analyze
                 </Button>
-              ) : null}
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setView('list')}
-              >
-                Back to list
-              </Button>
-            </div>
+              </div>
+            ) : null}
           </div>
 
           {(conflictsQuery.data ?? []).filter(
@@ -1125,6 +1781,9 @@ export default function ProjectWorkspacePage() {
               <Badge tone={reviewStatusTone(selected.reviewStatus)}>
                 {reviewStatusLabel(selected.reviewStatus)}
               </Badge>
+              <Badge tone={impactTone(selected.businessImpact)}>
+                Impact: {impactLabel(selected.businessImpact)}
+              </Badge>
               {selected.businessReadiness ? (
                 <Badge>Business: {selected.businessReadiness}</Badge>
               ) : null}
@@ -1141,8 +1800,49 @@ export default function ProjectWorkspacePage() {
               <div className="text-xs uppercase tracking-wide text-muted">
                 Type
               </div>
-              <div className="mt-1">{typeLabel(selected.type)}</div>
+              <div className="mt-1">
+                {typeLabel(selected.primaryType ?? selected.type)}
+                {selected.secondaryType
+                  ? ` · Secondary: ${typeLabel(selected.secondaryType)}`
+                  : ''}
+              </div>
             </div>
+            {selected.featureGroup ? (
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Feature
+                </div>
+                <div className="mt-1">
+                  {selected.featureGroup.businessArea} /{' '}
+                  {selected.featureGroup.name}
+                </div>
+              </div>
+            ) : null}
+            {(selected.businessIntent ||
+              selected.businessReview?.intent?.text) && (
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Business Intent
+                  {selected.intentSource
+                    ? ` · ${selected.intentSource}`
+                    : ''}
+                </div>
+                <p className="mt-1 leading-relaxed">
+                  {selected.businessIntent ??
+                    selected.businessReview?.intent?.text}
+                </p>
+              </div>
+            )}
+            {selected.possibleDuplicateOf ? (
+              <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                Possible {selected.duplicateKind ?? 'Duplicate'} of{' '}
+                {selected.possibleDuplicateOf}
+                {selected.duplicateSimilarity != null
+                  ? ` · Similarity ${Math.round(selected.duplicateSimilarity)}%`
+                  : ''}
+                . Original IDs are preserved — no automatic delete/merge.
+              </div>
+            ) : null}
             <div>
               <div className="text-xs uppercase tracking-wide text-muted">
                 Description
@@ -1251,6 +1951,26 @@ export default function ProjectWorkspacePage() {
                 title="Dependencies"
                 facts={selected.businessReview.dependencies}
               />
+            </div>
+          ) : null}
+
+          {(selected.relatedRequirements?.length ?? 0) > 0 ? (
+            <div className="space-y-2 border-t border-border pt-4 text-sm">
+              <h3 className="font-medium">Related Requirements</h3>
+              <ul className="space-y-1">
+                {selected.relatedRequirements!.slice(0, 12).map((r) => (
+                  <li key={`${r.relationType}-${r.requirementKey}`}>
+                    <button
+                      type="button"
+                      className="text-left hover:underline"
+                      onClick={() => setView('detail', r.requirementKey)}
+                    >
+                      <Badge>{r.relationType}</Badge>{' '}
+                      {r.requirementKey} — {r.title}
+                    </button>
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : null}
 
@@ -1414,13 +2134,22 @@ export default function ProjectWorkspacePage() {
                 Source
               </Button>
               {(reviewSummaryQuery.data?.reviewed ?? 0) > 0 ? (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setView('review-dashboard')}
-                >
-                  Review Dashboard
-                </Button>
+                <>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setView('features')}
+                  >
+                    Features
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setView('review-dashboard')}
+                  >
+                    Review Dashboard
+                  </Button>
+                </>
               ) : null}
               <Button
                 variant="secondary"
@@ -1428,7 +2157,7 @@ export default function ProjectWorkspacePage() {
                 onClick={() => reviewMutation.mutate()}
                 disabled={extracted.length === 0 || reviewMutation.isPending}
               >
-                Start Business Review
+                Run Analysis
               </Button>
               <Button
                 size="sm"
@@ -1448,82 +2177,160 @@ export default function ProjectWorkspacePage() {
             </div>
           ) : null}
 
-          <div className="flex flex-wrap gap-3">
-            <div className="min-w-[200px] flex-1">
-              <Input
-                placeholder="Search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
+          {extracted.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-border p-6 text-center">
+              <h3 className="text-sm font-medium">No requirements yet</h3>
+              <p className="mt-1 text-sm text-muted">
+                Add a requirement manually or import from a source document.
+              </p>
+              <div className="mt-4 flex flex-wrap justify-center gap-2">
+                <Button size="sm" onClick={openAddReq}>
+                  Add Requirement
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setView('source')}
+                >
+                  Import / Source
+                </Button>
+              </div>
             </div>
-            <select
-              className="h-10 rounded-lg border border-border bg-bg-elevated px-3 text-sm"
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value)}
-            >
-              <option value="ALL">All</option>
-              <option value="FUNCTIONAL">Functional</option>
-              <option value="NON_FUNCTIONAL">Non-Functional</option>
-              <option value="BUSINESS_RULE">Business Rule</option>
-            </select>
-          </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap gap-3">
+                <div className="min-w-[200px] flex-1">
+                  <Input
+                    placeholder="Search"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                </div>
+                <select
+                  className="h-10 rounded-lg border border-border bg-bg-elevated px-3 text-sm"
+                  value={typeFilter}
+                  onChange={(e) => setTypeFilter(e.target.value)}
+                >
+                  <option value="ALL">All</option>
+                  <option value="FUNCTIONAL">Functional</option>
+                  <option value="NON_FUNCTIONAL">Non-Functional</option>
+                  <option value="BUSINESS_RULE">Business Rule</option>
+                </select>
+              </div>
 
-          <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-bg-elevated text-xs uppercase tracking-wide text-muted">
-                <tr>
-                  <th className="px-3 py-2 font-medium">ID</th>
-                  <th className="px-3 py-2 font-medium">Requirement</th>
-                  <th className="px-3 py-2 font-medium">Type</th>
-                  <th className="px-3 py-2 font-medium">Review</th>
-                  <th className="px-3 py-2 font-medium">Open C/H</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={5}
-                      className="px-3 py-6 text-center text-muted"
-                    >
-                      No extracted requirements yet.
-                    </td>
-                  </tr>
-                ) : (
-                  filtered.map((r) => (
-                    <tr
-                      key={r.id}
-                      className="cursor-pointer border-t border-border hover:bg-bg-elevated/60"
-                      onClick={() => setView('detail', r.requirementKey)}
-                    >
-                      <td className="px-3 py-2 font-mono text-xs">
-                        {r.requirementKey.replace('-', '')}
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="font-medium">{r.title}</div>
-                        {r.possibleDuplicateOf ? (
-                          <div className="text-xs text-warning">
-                            Possible duplicate of {r.possibleDuplicateOf}
-                          </div>
-                        ) : null}
-                      </td>
-                      <td className="px-3 py-2">{typeLabel(r.type)}</td>
-                      <td className="px-3 py-2">
-                        <Badge tone={reviewStatusTone(r.reviewStatus)}>
-                          {reviewStatusLabel(r.reviewStatus)}
-                        </Badge>
-                      </td>
-                      <td className="px-3 py-2 font-mono text-xs">
-                        {(r.criticalOpenCount ?? 0) + (r.highOpenCount ?? 0) > 0
-                          ? `${r.criticalOpenCount ?? 0}/${r.highOpenCount ?? 0}`
-                          : '—'}
-                      </td>
+              <div className="overflow-x-auto rounded-lg border border-border">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-bg-elevated text-xs uppercase tracking-wide text-muted">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">ID</th>
+                      <th className="px-3 py-2 font-medium">Requirement</th>
+                      <th className="px-3 py-2 font-medium">Type</th>
+                      <th className="px-3 py-2 font-medium">Business Impact</th>
+                      <th className="px-3 py-2 font-medium">Review</th>
+                      <th className="px-3 py-2 font-medium">Questions</th>
+                      <th className="px-3 py-2 font-medium">Actions</th>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+                  </thead>
+                  <tbody>
+                    {filtered.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={7}
+                          className="px-3 py-6 text-center text-muted"
+                        >
+                          No requirements match your filters.
+                        </td>
+                      </tr>
+                    ) : (
+                      filtered.map((r) => (
+                        <tr
+                          key={r.id}
+                          className="cursor-pointer border-t border-border hover:bg-bg-elevated/60"
+                          onClick={() => setView('detail', r.requirementKey)}
+                        >
+                          <td className="px-3 py-2 font-mono text-xs">
+                            {r.requirementKey.replace('-', '')}
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="line-clamp-2 font-medium">
+                              {r.title}
+                            </div>
+                            {r.description ? (
+                              <div className="mt-0.5 line-clamp-2 text-xs text-muted">
+                                {r.description}
+                              </div>
+                            ) : null}
+                            {r.analysisStale ? (
+                              <div className="text-xs text-warning">Stale</div>
+                            ) : null}
+                            {r.possibleDuplicateOf ? (
+                              <div className="text-xs text-warning">
+                                Possible duplicate of {r.possibleDuplicateOf}
+                                {r.duplicateSimilarity != null
+                                  ? ` (${Math.round(r.duplicateSimilarity)}%)`
+                                  : ''}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-2">
+                            {typeLabel(r.primaryType ?? r.type)}
+                          </td>
+                          <td className="px-3 py-2">
+                            <Badge tone={impactTone(r.businessImpact)}>
+                              {impactLabel(r.businessImpact)}
+                            </Badge>
+                          </td>
+                          <td className="px-3 py-2">
+                            <Badge tone={reviewStatusTone(r.reviewStatus)}>
+                              {reviewStatusLabel(r.reviewStatus)}
+                            </Badge>
+                          </td>
+                          <td className="px-3 py-2 font-mono text-xs">
+                            {(r.criticalOpenCount ?? 0) > 0
+                              ? `🔴${r.criticalOpenCount}`
+                              : (r.highOpenCount ?? 0) > 0
+                                ? `🟠${r.highOpenCount}`
+                                : '—'}
+                          </td>
+                          <td
+                            className="px-3 py-2"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <ActionMenu
+                              items={[
+                                {
+                                  label: 'View',
+                                  onClick: () =>
+                                    setView('detail', r.requirementKey),
+                                },
+                                {
+                                  label: 'Edit',
+                                  onClick: () => openEditReq(r),
+                                },
+                                {
+                                  label: 'Analyze',
+                                  onClick: () =>
+                                    reanalyzeMutation.mutate(r.requirementKey),
+                                  disabled:
+                                    reanalyzeMutation.isPending ||
+                                    analysisStatus === 'RUNNING',
+                                },
+                                {
+                                  label: 'Delete',
+                                  danger: true,
+                                  onClick: () => setDeleteReq(r),
+                                },
+                              ]}
+                            />
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
           {reviewError ? (
             <p className="text-sm text-danger">{reviewError}</p>
           ) : null}
@@ -1622,6 +2429,171 @@ export default function ProjectWorkspacePage() {
             )}
           </div>
         </Card>
+      ) : null}
+
+      <ConfirmDialog
+        open={deleteProjectOpen}
+        title="Delete Project?"
+        danger
+        confirmLabel="Delete Project"
+        busy={deleteProjectMutation.isPending}
+        onCancel={() => setDeleteProjectOpen(false)}
+        onConfirm={() => deleteProjectMutation.mutate()}
+      >
+        <p>
+          This will permanently remove <strong>{project.name}</strong> and all
+          related data:
+        </p>
+        <ul className="mt-2 list-disc space-y-1 pl-5">
+          <li>Source documents and extracted requirements</li>
+          <li>Analysis results and review findings</li>
+          <li>Clarifying questions and answers</li>
+          <li>Feature groups and requirement relationships</li>
+          <li>Conflicts and readiness scores</li>
+        </ul>
+        <p className="mt-2 font-medium text-danger">
+          This action cannot be undone.
+        </p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={Boolean(deleteReq)}
+        title="Delete Requirement?"
+        danger
+        confirmLabel="Delete Requirement"
+        busy={deleteReqMutation.isPending}
+        onCancel={() => setDeleteReq(null)}
+        onConfirm={() => {
+          if (deleteReq) deleteReqMutation.mutate(deleteReq.requirementKey);
+        }}
+      >
+        <p>
+          Delete <strong>{deleteReq?.requirementKey}</strong> —{' '}
+          {deleteReq?.title}? Related review data and questions for this
+          requirement will also be removed.
+        </p>
+        <p className="mt-2 font-medium text-danger">
+          This action cannot be undone.
+        </p>
+      </ConfirmDialog>
+
+      {addReqOpen || editReq ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/50"
+            aria-label="Close dialog"
+            onClick={() => {
+              setAddReqOpen(false);
+              setEditReq(null);
+            }}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="relative z-10 w-full max-w-md rounded-xl border border-border bg-bg p-5 shadow-xl"
+          >
+            <h2 className="text-base font-semibold">
+              {editReq ? 'Edit Requirement' : 'Add Requirement'}
+            </h2>
+            <form
+              className="mt-4 space-y-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!reqForm.title.trim()) return;
+                const body = {
+                  title: reqForm.title.trim(),
+                  description: reqForm.description,
+                  type: reqForm.type,
+                };
+                if (editReq) {
+                  updateReqMutation.mutate({
+                    key: editReq.requirementKey,
+                    body,
+                  });
+                } else {
+                  createReqMutation.mutate(body);
+                }
+              }}
+            >
+              <div>
+                <label className="text-xs uppercase tracking-wide text-muted">
+                  Title
+                </label>
+                <Input
+                  className="mt-1"
+                  value={reqForm.title}
+                  onChange={(e) =>
+                    setReqForm((prev) => ({ ...prev, title: e.target.value }))
+                  }
+                  required
+                />
+              </div>
+              <div>
+                <label className="text-xs uppercase tracking-wide text-muted">
+                  Description
+                </label>
+                <textarea
+                  className="mt-1 min-h-[88px] w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm"
+                  value={reqForm.description}
+                  onChange={(e) =>
+                    setReqForm((prev) => ({
+                      ...prev,
+                      description: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <label className="text-xs uppercase tracking-wide text-muted">
+                  Type
+                </label>
+                <select
+                  className="mt-1 h-10 w-full rounded-lg border border-border bg-bg-elevated px-3 text-sm"
+                  value={reqForm.type}
+                  onChange={(e) =>
+                    setReqForm((prev) => ({ ...prev, type: e.target.value }))
+                  }
+                >
+                  <option value="FUNCTIONAL">Functional</option>
+                  <option value="NON_FUNCTIONAL">Non-Functional</option>
+                  <option value="BUSINESS_RULE">Business Rule</option>
+                </select>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setAddReqOpen(false);
+                    setEditReq(null);
+                  }}
+                  disabled={
+                    createReqMutation.isPending || updateReqMutation.isPending
+                  }
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={
+                    !reqForm.title.trim() ||
+                    createReqMutation.isPending ||
+                    updateReqMutation.isPending
+                  }
+                >
+                  {createReqMutation.isPending || updateReqMutation.isPending
+                    ? 'Saving…'
+                    : editReq
+                      ? 'Save'
+                      : 'Add Requirement'}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
       ) : null}
     </div>
   );

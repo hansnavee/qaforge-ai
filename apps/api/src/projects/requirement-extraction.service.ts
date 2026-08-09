@@ -7,12 +7,17 @@ import { OpenRouterLlmClient } from '@qaforge/agent-sdk';
 import { prisma } from '@qaforge/database';
 import {
   Role,
+  createManualRequirementSchema,
+  deriveFeatureImpact,
+  deriveFeatureStatus,
   extractionAiResponseSchema,
   finalizeExtraction,
   parseRequirementDocument,
+  updateManualRequirementSchema,
   type ExtractedRequirementInput,
   type ExtractionDecision,
 } from '@qaforge/shared';
+import { parseBody } from '../common/parse-body';
 import { AuditService } from '../common/audit.service';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
@@ -50,6 +55,10 @@ export class RequirementExtractionService {
     title: string;
     description: string;
     type: string;
+    primaryType?: string | null;
+    secondaryType?: string | null;
+    businessImpact?: string | null;
+    intentSource?: string | null;
     priority: string | null;
     status: string;
     sourceDocumentId: string | null;
@@ -61,6 +70,9 @@ export class RequirementExtractionService {
     dependencies: unknown;
     supportingInformation?: unknown;
     possibleDuplicateOf: string | null;
+    duplicateSimilarity?: number | null;
+    duplicateKind?: string | null;
+    featureGroupId?: string | null;
     reviewStatus?: string | null;
     businessReadiness?: string | null;
     functionalCompleteness?: string | null;
@@ -68,9 +80,20 @@ export class RequirementExtractionService {
     functionalReview?: unknown;
     readinessScore?: number | null;
     reviewedAt?: Date | null;
+    analysisStale?: boolean;
     createdAt: Date;
     updatedAt: Date;
     sourceDocument?: { filename: string } | null;
+    featureGroup?: {
+      id: string;
+      featureKey: string;
+      name: string;
+      businessArea: string | null;
+    } | null;
+    relationsFrom?: Array<{
+      relationType: string;
+      toRequirement: { requirementKey: string; title: string };
+    }>;
     questions?: Array<{
       id: string;
       questionKey: string;
@@ -87,6 +110,7 @@ export class RequirementExtractionService {
     const asStringArray = (v: unknown): string[] =>
       Array.isArray(v) ? v.map(String) : [];
     const openQuestions = (row.questions ?? []).filter((q) => q.status === 'OPEN');
+    const biz = row.businessReview as { intent?: { text?: string } } | null;
 
     return {
       id: row.id,
@@ -94,7 +118,12 @@ export class RequirementExtractionService {
       requirementKey: row.requirementKey,
       title: row.title,
       description: row.description,
-      type: row.type,
+      type: row.primaryType ?? row.type,
+      primaryType: row.primaryType ?? row.type,
+      secondaryType: row.secondaryType ?? null,
+      businessImpact: row.businessImpact ?? null,
+      intentSource: row.intentSource ?? null,
+      businessIntent: biz?.intent?.text ?? null,
       priority: row.priority,
       status: row.status,
       sourceDocumentId: row.sourceDocumentId,
@@ -106,6 +135,22 @@ export class RequirementExtractionService {
       dependencies: asStringArray(row.dependencies),
       supportingInformation: asStringArray(row.supportingInformation),
       possibleDuplicateOf: row.possibleDuplicateOf,
+      duplicateSimilarity: row.duplicateSimilarity ?? null,
+      duplicateKind: row.duplicateKind ?? null,
+      featureGroupId: row.featureGroupId ?? null,
+      featureGroup: row.featureGroup
+        ? {
+            id: row.featureGroup.id,
+            featureKey: row.featureGroup.featureKey,
+            name: row.featureGroup.name,
+            businessArea: row.featureGroup.businessArea,
+          }
+        : null,
+      relatedRequirements: (row.relationsFrom ?? []).map((r) => ({
+        relationType: r.relationType,
+        requirementKey: r.toRequirement.requirementKey,
+        title: r.toRequirement.title,
+      })),
       reviewStatus: row.reviewStatus ?? null,
       businessReadiness: row.businessReadiness ?? null,
       functionalCompleteness: row.functionalCompleteness ?? null,
@@ -113,6 +158,7 @@ export class RequirementExtractionService {
       functionalReview: row.functionalReview ?? null,
       readinessScore: row.readinessScore ?? null,
       reviewedAt: row.reviewedAt ?? null,
+      analysisStale: row.analysisStale ?? false,
       openQuestionCount: openQuestions.length,
       criticalOpenCount: openQuestions.filter((q) => q.priority === 'CRITICAL')
         .length,
@@ -142,6 +188,13 @@ export class RequirementExtractionService {
       include: {
         sourceDocument: { select: { filename: true } },
         questions: true,
+        featureGroup: true,
+        relationsFrom: {
+          include: {
+            toRequirement: { select: { requirementKey: true, title: true } },
+          },
+          take: 20,
+        },
       },
       orderBy: { requirementKey: 'asc' },
     });
@@ -163,6 +216,13 @@ export class RequirementExtractionService {
       include: {
         sourceDocument: { select: { filename: true } },
         questions: { orderBy: { questionKey: 'asc' } },
+        featureGroup: true,
+        relationsFrom: {
+          include: {
+            toRequirement: { select: { requirementKey: true, title: true } },
+          },
+          take: 20,
+        },
       },
     });
     if (!row) throw new NotFoundException('Requirement not found');
@@ -318,6 +378,15 @@ export class RequirementExtractionService {
       sourceDocument: doc.filename,
     };
 
+    await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        analysisStatus: 'READY',
+        staleRequirementCount: 0,
+        analysisError: null,
+      },
+    });
+
     await this.audit.log({
       organizationId: orgId,
       userId: user.id,
@@ -338,6 +407,255 @@ export class RequirementExtractionService {
         stats: finalized.stats,
       },
     };
+  }
+
+  async createManual(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
+    const input = parseBody(createManualRequirementSchema, body);
+
+    const last = await prisma.requirement.findFirst({
+      where: { projectId },
+      orderBy: { requirementKey: 'desc' },
+    });
+    let next = 1;
+    if (last) {
+      const m = last.requirementKey.match(/^REQ-?(\d+)$/i);
+      if (m) next = Number(m[1]) + 1;
+    }
+    const requirementKey = `REQ-${String(next).padStart(3, '0')}`;
+
+    const exists = await prisma.requirement.findUnique({
+      where: { projectId_requirementKey: { projectId, requirementKey } },
+    });
+    if (exists) {
+      throw new BadRequestException(`Requirement ID ${requirementKey} already exists`);
+    }
+
+    const reqType = input.type ?? 'FUNCTIONAL';
+    const row = await prisma.requirement.create({
+      data: {
+        projectId,
+        requirementKey,
+        title: input.title,
+        description: input.description || input.title,
+        type: reqType,
+        primaryType: reqType,
+        status: 'EXTRACTED',
+        sourceText: input.description || input.title,
+        analysisStale: false,
+      },
+      include: {
+        sourceDocument: { select: { filename: true } },
+        questions: true,
+        featureGroup: true,
+      },
+    });
+
+    await this.markProjectAnalysisStale(projectId);
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'requirement.create',
+      resource: 'requirement',
+      resourceId: row.id,
+      metadata: { requirementKey },
+    });
+
+    return this.mapRequirement(row);
+  }
+
+  async updateManual(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+    requirementKey: string,
+    body: unknown,
+  ) {
+    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
+    const input = parseBody(updateManualRequirementSchema, body);
+    const key = requirementKey.toUpperCase();
+    const existing = await prisma.requirement.findUnique({
+      where: { projectId_requirementKey: { projectId, requirementKey: key } },
+    });
+    if (!existing) throw new NotFoundException('Requirement not found');
+
+    const wasAnalyzed = Boolean(existing.reviewedAt);
+    const row = await prisma.requirement.update({
+      where: { id: existing.id },
+      data: {
+        ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.description !== undefined
+          ? { description: input.description }
+          : {}),
+        ...(input.type !== undefined
+          ? { type: input.type, primaryType: input.type }
+          : {}),
+        analysisStale: wasAnalyzed ? true : existing.analysisStale,
+      },
+      include: {
+        sourceDocument: { select: { filename: true } },
+        questions: true,
+        featureGroup: true,
+        relationsFrom: {
+          include: {
+            toRequirement: { select: { requirementKey: true, title: true } },
+          },
+          take: 20,
+        },
+      },
+    });
+
+    if (wasAnalyzed) await this.markProjectAnalysisStale(projectId);
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'requirement.update',
+      resource: 'requirement',
+      resourceId: row.id,
+      metadata: { requirementKey: key, analysisStale: row.analysisStale },
+    });
+
+    return this.mapRequirement(row);
+  }
+
+  async deleteManual(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+    requirementKey: string,
+  ) {
+    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
+    const key = requirementKey.toUpperCase();
+    const existing = await prisma.requirement.findUnique({
+      where: { projectId_requirementKey: { projectId, requirementKey: key } },
+      include: {
+        _count: {
+          select: {
+            questions: true,
+            relationsFrom: true,
+            relationsTo: true,
+          },
+        },
+        featureGroup: true,
+      },
+    });
+    if (!existing) throw new NotFoundException('Requirement not found');
+
+    const featureGroupId = existing.featureGroupId;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.requirementRelation.deleteMany({
+        where: {
+          OR: [
+            { fromRequirementId: existing.id },
+            { toRequirementId: existing.id },
+          ],
+        },
+      });
+      await tx.requirementConflict.deleteMany({
+        where: {
+          OR: [
+            { requirementAId: existing.id },
+            { requirementBId: existing.id },
+          ],
+        },
+      });
+      await tx.requirementQuestion.deleteMany({
+        where: { requirementId: existing.id },
+      });
+      await tx.requirement.delete({ where: { id: existing.id } });
+    });
+
+    if (featureGroupId) {
+      const remaining = await prisma.requirement.count({
+        where: { featureGroupId },
+      });
+      if (remaining === 0) {
+        await prisma.featureGroup.delete({ where: { id: featureGroupId } }).catch(() => undefined);
+      } else {
+        // Refresh feature status from remaining requirements
+        const siblings = await prisma.requirement.findMany({
+          where: { featureGroupId },
+          select: { reviewStatus: true, businessImpact: true },
+        });
+        await prisma.featureGroup.update({
+          where: { id: featureGroupId },
+          data: {
+            reviewStatus: deriveFeatureStatus(
+              siblings.map((s) => s.reviewStatus),
+            ),
+            businessImpact: deriveFeatureImpact(
+              siblings.map((s) => s.businessImpact),
+            ),
+          },
+        });
+      }
+    }
+
+    await this.markProjectAnalysisStale(projectId);
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'requirement.delete',
+      resource: 'requirement',
+      resourceId: existing.id,
+      metadata: {
+        requirementKey: key,
+        questions: existing._count.questions,
+        relations:
+          existing._count.relationsFrom + existing._count.relationsTo,
+      },
+    });
+
+    return {
+      ok: true,
+      requirementKey: key,
+      removed: {
+        questions: existing._count.questions,
+        relationships:
+          existing._count.relationsFrom + existing._count.relationsTo,
+        featureGroup: existing.featureGroup?.name ?? null,
+      },
+    };
+  }
+
+  private async markProjectAnalysisStale(projectId: string) {
+    const staleCount = await prisma.requirement.count({
+      where: { projectId, analysisStale: true },
+    });
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { analysisStatus: true },
+    });
+    if (!project) return;
+    if (
+      project.analysisStatus === 'COMPLETED' ||
+      project.analysisStatus === 'STALE' ||
+      project.analysisStatus === 'FAILED'
+    ) {
+      await prisma.project.update({
+        where: { id: projectId },
+        data: {
+          analysisStatus: 'STALE',
+          staleRequirementCount: Math.max(staleCount, 1),
+        },
+      });
+    } else if (project.analysisStatus === 'NOT_STARTED') {
+      // leave
+    } else {
+      await prisma.project.update({
+        where: { id: projectId },
+        data: { staleRequirementCount: staleCount },
+      });
+    }
   }
 
   /**

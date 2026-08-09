@@ -92,8 +92,15 @@ model Project {
   id              String                 @id @default(cuid())
   organizationId  String
   name            String
+  description     String?                @db.Text
   appUrl          String?
   status          String                 @default("DRAFT") // DRAFT | ...
+  /// NOT_STARTED | READY | RUNNING | COMPLETED | FAILED | STALE
+  analysisStatus  String                 @default("NOT_STARTED")
+  analysisStartedAt   DateTime?
+  analysisCompletedAt DateTime?
+  analysisError   String?                @db.Text
+  staleRequirementCount Int              @default(0)
   loginUrl        String?
   framework       String                 @default("PLAYWRIGHT")
   language        String                 @default("TYPESCRIPT")
@@ -106,8 +113,10 @@ model Project {
   organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   requirements    RequirementDocument[]
   extractedRequirements Requirement[]
+  featureGroups   FeatureGroup[]
   requirementQuestions RequirementQuestion[]
   requirementConflicts RequirementConflict[]
+  requirementRelations RequirementRelation[]
   executions      Execution[]
   requirementSnapshots ProjectRequirementSnapshot[]
   clarificationRounds  ClarificationRound[]
@@ -138,6 +147,28 @@ model RequirementDocument {
   @@index([projectId])
 }
 
+/// Logical feature container (Business Area → Feature → Requirements). Does not merge/delete requirements.
+model FeatureGroup {
+  id               String   @id @default(cuid())
+  projectId        String
+  featureKey       String
+  name             String
+  businessArea     String?
+  businessIntent   String?  @db.Text
+  businessImpact   String?  // CRITICAL | HIGH | MEDIUM | LOW
+  reviewStatus     String?  // BLOCKED | NEEDS_CLARIFICATION | REVIEW_RECOMMENDED | READY_FOR_TEST_DESIGN
+  analysis         Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @default(now()) @updatedAt
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  requirements     Requirement[]
+  questions        RequirementQuestion[]
+
+  @@unique([projectId, featureKey])
+  @@index([projectId])
+  @@index([businessArea])
+}
+
 /// Structured requirements extracted from an original document (Piece 2+).
 /// status: EXTRACTED | ...
 /// reviewStatus: BLOCKED | NEEDS_CLARIFICATION | REVIEW_RECOMMENDED | READY_FOR_TEST_DESIGN
@@ -147,7 +178,14 @@ model Requirement {
   requirementKey       String
   title                String
   description          String   @db.Text
-  type                 String   // FUNCTIONAL | NON_FUNCTIONAL | BUSINESS_RULE
+  type                 String   // FUNCTIONAL | NON_FUNCTIONAL | BUSINESS_RULE (legacy primary)
+  /// Dual typing — primaryType defaults from type when null
+  primaryType          String?
+  secondaryType        String?
+  /// CRITICAL | HIGH | MEDIUM | LOW — business impact (independent of question count)
+  businessImpact       String?
+  /// EXPLICIT | USER_CONFIRMED | AI_DERIVED | AI_INFERRED
+  intentSource         String?
   priority             String?
   status               String   @default("EXTRACTED")
   sourceDocumentId     String?
@@ -159,6 +197,11 @@ model Requirement {
   dependencies         Json?
   supportingInformation Json?
   possibleDuplicateOf  String?
+  /// 0–100 similarity when possibleDuplicateOf set
+  duplicateSimilarity  Float?
+  /// DUPLICATE | OVERLAPPING | RELATED | null
+  duplicateKind        String?
+  featureGroupId       String?
   /// BLOCKED | NEEDS_CLARIFICATION | REVIEW_RECOMMENDED | READY_FOR_TEST_DESIGN
   reviewStatus         String?
   /// READY | NEEDS_CLARIFICATION | BLOCKED
@@ -169,44 +212,61 @@ model Requirement {
   functionalReview     Json?
   readinessScore       Int?
   reviewedAt           DateTime?
+  /// True when content changed after last analysis
+  analysisStale        Boolean  @default(false)
   createdAt            DateTime @default(now())
   updatedAt            DateTime @default(now()) @updatedAt
   project              Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   sourceDocument       RequirementDocument? @relation(fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+  featureGroup         FeatureGroup? @relation(fields: [featureGroupId], references: [id], onDelete: SetNull)
   questions            RequirementQuestion[]
   conflictsAsA         RequirementConflict[] @relation("ConflictA")
   conflictsAsB         RequirementConflict[] @relation("ConflictB")
+  relationsFrom        RequirementRelation[] @relation("RelationFrom")
+  relationsTo          RequirementRelation[] @relation("RelationTo")
 
   @@unique([projectId, requirementKey])
   @@index([projectId])
   @@index([sourceDocumentId])
   @@index([reviewStatus])
+  @@index([featureGroupId])
+  @@index([businessImpact])
 }
 
 /// Clarification questions from Business + Functional review (not STLC ClarificationRound).
 model RequirementQuestion {
   id             String   @id @default(cuid())
   projectId      String
-  requirementId  String
+  requirementId  String?
+  featureGroupId String?
+  /// REQUIREMENT | FEATURE
+  scope          String   @default("REQUIREMENT")
   questionKey    String
   category       String
   priority       String   // CRITICAL | HIGH | MEDIUM | LOW
   question       String   @db.Text
   reason         String   @db.Text
   blocking       Boolean  @default(false)
+  /// Normalized key for cross-requirement deduplication
+  fingerprint    String?
   status         String   @default("OPEN") // OPEN | ANSWERED | DISMISSED
   answer         String?  @db.Text
   interpretation Json?
   answeredAt     DateTime?
+  /// When this question is answered via / references another question
+  linkedQuestionId String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @default(now()) @updatedAt
   project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  requirement    Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  requirement    Requirement? @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  featureGroup   FeatureGroup? @relation(fields: [featureGroupId], references: [id], onDelete: SetNull)
 
   @@unique([projectId, questionKey])
   @@index([projectId])
   @@index([requirementId])
+  @@index([featureGroupId])
   @@index([status])
+  @@index([fingerprint])
 }
 
 model RequirementConflict {
@@ -216,6 +276,8 @@ model RequirementConflict {
   requirementBId  String
   summary         String
   detail          String   @db.Text
+  /// BUSINESS | FUNCTIONAL
+  conflictType    String   @default("BUSINESS")
   status          String   @default("OPEN") // OPEN | RESOLVED
   createdAt       DateTime @default(now())
   updatedAt       DateTime @default(now()) @updatedAt
@@ -225,6 +287,28 @@ model RequirementConflict {
 
   @@index([projectId])
   @@index([status])
+}
+
+/// Typed requirement relationships (does not replace extraction dependencies Json).
+model RequirementRelation {
+  id                String   @id @default(cuid())
+  projectId         String
+  fromRequirementId String
+  toRequirementId   String
+  /// DEPENDS_ON | AFFECTS | RELATED_TO | CONFLICTS_WITH | DUPLICATE_OF | OVERLAPS
+  relationType      String
+  confidence        Float?
+  source            String   @default("REVIEW") // EXTRACTION | REVIEW | USER
+  detail            String?  @db.Text
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now()) @updatedAt
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fromRequirement   Requirement @relation("RelationFrom", fields: [fromRequirementId], references: [id], onDelete: Cascade)
+  toRequirement     Requirement @relation("RelationTo", fields: [toRequirementId], references: [id], onDelete: Cascade)
+
+  @@unique([fromRequirementId, toRequirementId, relationType])
+  @@index([projectId])
+  @@index([relationType])
 }
 
 model ProjectRequirementSnapshot {

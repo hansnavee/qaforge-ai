@@ -34,6 +34,7 @@ export const REVIEW_QUESTION_CATEGORIES = [
 export type ReviewQuestionCategory =
   (typeof REVIEW_QUESTION_CATEGORIES)[number];
 
+/** Legacy fact statuses (preserved for existing Json payloads). */
 export const REVIEW_FACT_STATUSES = [
   'CONFIRMED',
   'INFERRED',
@@ -42,6 +43,16 @@ export const REVIEW_FACT_STATUSES = [
 ] as const;
 
 export type ReviewFactStatus = (typeof REVIEW_FACT_STATUSES)[number];
+
+/** Provenance for business intent / rules (enhancement vocabulary). */
+export const INTENT_SOURCES = [
+  'EXPLICIT',
+  'USER_CONFIRMED',
+  'AI_DERIVED',
+  'AI_INFERRED',
+] as const;
+
+export type IntentSource = (typeof INTENT_SOURCES)[number];
 
 export const REQUIREMENT_REVIEW_STATUSES = [
   'BLOCKED',
@@ -70,9 +81,44 @@ export const FUNCTIONAL_COMPLETENESS = [
 export type FunctionalCompleteness =
   (typeof FUNCTIONAL_COMPLETENESS)[number];
 
+export const BUSINESS_IMPACT_LEVELS = [
+  'CRITICAL',
+  'HIGH',
+  'MEDIUM',
+  'LOW',
+] as const;
+
+export type BusinessImpact = (typeof BUSINESS_IMPACT_LEVELS)[number];
+
+export const REVIEW_REQUIREMENT_TYPES = [
+  'FUNCTIONAL',
+  'BUSINESS_RULE',
+  'NON_FUNCTIONAL',
+] as const;
+
+export type ReviewRequirementType = (typeof REVIEW_REQUIREMENT_TYPES)[number];
+
+export const RELATION_TYPES = [
+  'DEPENDS_ON',
+  'AFFECTS',
+  'RELATED_TO',
+  'CONFLICTS_WITH',
+  'DUPLICATE_OF',
+  'OVERLAPS',
+] as const;
+
+export type RelationType = (typeof RELATION_TYPES)[number];
+
+export const DUPLICATE_KINDS = [
+  'DUPLICATE',
+  'OVERLAPPING',
+  'RELATED',
+] as const;
+
+export type DuplicateKind = (typeof DUPLICATE_KINDS)[number];
+
 /**
  * Configurable question impact weights (business impact over count).
- * Override at runtime via env in the API layer if needed.
  */
 export const REVIEW_PRIORITY_WEIGHTS: Record<ReviewQuestionPriority, number> = {
   CRITICAL: 40,
@@ -97,6 +143,8 @@ export type ReviewFact = {
   text: string;
   status: ReviewFactStatus;
   source?: string | null;
+  /** Optional enhancement provenance; defaults derived from status. */
+  intentSource?: IntentSource | null;
 };
 
 export type BusinessReviewPayload = {
@@ -130,6 +178,8 @@ export type ReviewQuestionDraft = {
   question: string;
   reason: string;
   blocking: boolean;
+  /** Stable key for cross-requirement deduplication */
+  fingerprint?: string;
 };
 
 export type RequirementAnalysisResult = {
@@ -140,4 +190,42 @@ export type RequirementAnalysisResult = {
   functionalCompleteness: FunctionalCompleteness;
   reviewStatus: RequirementReviewStatus;
   readinessScore: number;
+  primaryType: ReviewRequirementType;
+  secondaryType: ReviewRequirementType | null;
+  businessImpact: BusinessImpact;
+  intentSource: IntentSource;
+  businessIntentText: string | null;
 };
+
+export type FeatureGroupDraft = {
+  featureKey: string;
+  name: string;
+  businessArea: string;
+  requirementKeys: string[];
+  businessIntent?: string;
+};
+
+export type DuplicatePair = {
+  requirementKeyA: string;
+  requirementKeyB: string;
+  similarity: number;
+  kind: DuplicateKind;
+  recommendation: string;
+};
+
+export type RelationDraft = {
+  fromKey: string;
+  toKey: string;
+  relationType: RelationType;
+  confidence: number;
+  detail?: string;
+};
+
+export function factStatusToIntentSource(
+  status: ReviewFactStatus,
+): IntentSource {
+  if (status === 'CONFIRMED') return 'EXPLICIT';
+  if (status === 'DERIVED_FROM_USER_ANSWER') return 'USER_CONFIRMED';
+  if (status === 'INFERRED') return 'AI_INFERRED';
+  return 'AI_INFERRED';
+}

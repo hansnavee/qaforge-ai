@@ -4,15 +4,21 @@
  */
 
 import {
+  classifyRequirementTypes,
+  computeBusinessImpact,
+} from './classify.js';
+import { questionBucket } from './question-utils.js';
+import {
   computeReadinessScore,
   deriveStatuses,
 } from './scoring.js';
-import type {
-  BusinessReviewPayload,
-  FunctionalReviewPayload,
-  RequirementAnalysisResult,
-  ReviewFact,
-  ReviewQuestionDraft,
+import {
+  factStatusToIntentSource,
+  type BusinessReviewPayload,
+  type FunctionalReviewPayload,
+  type RequirementAnalysisResult,
+  type ReviewFact,
+  type ReviewQuestionDraft,
 } from './types.js';
 
 export type AnalyzableRequirement = {
@@ -27,6 +33,8 @@ export type AnalyzableRequirement = {
   supportingInformation?: string[];
   /** Previously derived facts from user answers (preserved across re-analyze). */
   knownDerivedRules?: ReviewFact[];
+  /** Existing project questions for dedup (optional; also applied at service layer). */
+  existingQuestionTexts?: string[];
 };
 
 function fact(
@@ -34,7 +42,12 @@ function fact(
   status: ReviewFact['status'],
   source?: string | null,
 ): ReviewFact {
-  return { text, status, source: source ?? null };
+  return {
+    text,
+    status,
+    source: source ?? null,
+    intentSource: factStatusToIntentSource(status),
+  };
 }
 
 function blobOf(req: AnalyzableRequirement): string {
@@ -85,16 +98,10 @@ function detectActors(blob: string, source: string): ReviewFact[] {
     if (re.test(blob)) actors.push(fact(label, 'CONFIRMED', source));
   };
   add('Customer / User', /\b(user|users|customer|customers)\b/);
+  add('Guest', /\b(guest|anonymous)\b/);
   add('Administrator', /\b(admin|administrator|administrators)\b/);
-  add('Guest', /\bguest\b/);
-  add('System', /\b(system|application)\b/);
   add('Payment Gateway', /\b(payment gateway|payment provider)\b/);
-  add('Email Service', /\b(email|otp).*\b(sent|send|deliver)/);
-  if (!actors.length) {
-    actors.push(
-      fact('Actor not explicitly identified', 'MISSING', source),
-    );
-  }
+  add('System', /\b(system shall|the system)\b/);
   return actors;
 }
 
@@ -104,10 +111,9 @@ function extractConfirmedRules(req: AnalyzableRequirement): ReviewFact[] {
   for (const br of req.businessRules ?? []) {
     if (br.trim()) rules.push(fact(br.trim(), 'CONFIRMED', source));
   }
-  // Explicit constraint phrases in description
   const desc = req.description.trim();
   if (
-    /\b(must|cannot|can only|only users?|only administrators?|must be unique|expire|should not allow)\b/i.test(
+    /\b(must|cannot|can only|only users?|only administrators?|must be unique|expire|should not allow|only purchased|out of stock.*cannot|cannot be purchased)\b/i.test(
       desc,
     )
   ) {
@@ -118,18 +124,60 @@ function extractConfirmedRules(req: AnalyzableRequirement): ReviewFact[] {
   return rules;
 }
 
-function inferIntent(req: AnalyzableRequirement): ReviewFact {
+function buildBusinessIntent(req: AnalyzableRequirement): ReviewFact {
   const title = req.title.trim();
   const desc = req.description.trim();
-  // Intent is always inferred unless the source states "purpose/goal"
+  const source = req.sourceText || desc;
+
   if (/\b(purpose|goal|intent|in order to)\b/i.test(desc)) {
-    return fact(desc, 'CONFIRMED', req.sourceText || desc);
+    return fact(desc, 'CONFIRMED', source);
   }
-  return fact(
-    `Enable: ${title}. ${desc}`,
-    'INFERRED',
-    req.sourceText || desc,
-  );
+
+  // Domain-aware intent phrasing (AI_INFERRED — never confirmed)
+  const blob = blobOf(req);
+  let intent = `Enable: ${title}. ${desc}`;
+  if (/cancel.*order|order.*cancel/.test(blob)) {
+    intent =
+      'Allow customers to cancel eligible orders before fulfillment reaches a restricted state.';
+  } else if (/payment fail|payment failure/.test(blob)) {
+    intent =
+      'Prevent unsuccessful payments from creating invalid orders and define failure recovery.';
+  } else if (/payment success|successful payment/.test(blob)) {
+    intent =
+      'Ensure successful payments result in a valid confirmed order for the customer.';
+  } else if (/out of stock|cannot be purchased/.test(blob)) {
+    intent =
+      'Prevent purchase of unavailable inventory and protect order integrity.';
+  } else if (/unique email/.test(blob)) {
+    intent = 'Ensure each user account is uniquely identified by email.';
+  } else if (/access control|another user/.test(blob)) {
+    intent = 'Restrict users to their own data and prevent unauthorized access.';
+  } else if (/register|registration/.test(blob)) {
+    intent = 'Allow new customers to create accounts and become authenticated users.';
+  } else if (/\botp\b/.test(blob)) {
+    intent = 'Verify user identity securely during authentication or password reset.';
+  } else if (/admin|administrator/.test(blob)) {
+    intent = 'Allow administrators to manage catalog/operations within authorized boundaries.';
+  }
+
+  return fact(intent, 'INFERRED', source);
+}
+
+function q(
+  category: ReviewQuestionDraft['category'],
+  priority: ReviewQuestionDraft['priority'],
+  question: string,
+  reason: string,
+  blocking: boolean,
+): ReviewQuestionDraft {
+  return {
+    category,
+    priority,
+    question,
+    reason,
+    blocking,
+    fingerprint: questionBucket(question),
+  };
 }
 
 /**
@@ -144,7 +192,10 @@ export function analyzeRequirement(
   const functional = emptyFunctional();
   const questions: ReviewQuestionDraft[] = [];
 
-  business.intent = inferIntent(req);
+  const { primaryType, secondaryType } = classifyRequirementTypes(req);
+  const businessImpact = computeBusinessImpact(req);
+
+  business.intent = buildBusinessIntent(req);
   business.actors = detectActors(blob, source);
   business.rules = [
     ...extractConfirmedRules(req),
@@ -153,43 +204,53 @@ export function analyzeRequirement(
 
   // --- Domain heuristics: gaps → questions (never invent confirmed rules) ---
 
-  // Registration / unique email
   if (/register|registration|create an account/.test(blob)) {
-    business.outcomes.push(
-      fact('User account creation', 'INFERRED', source),
+    business.outcomes.push(fact('User account creation', 'INFERRED', source));
+    business.preconditions.push(
+      fact('Valid registration information must be provided', 'INFERRED', source),
     );
     if (!/unique|already registered|existing email/.test(blob)) {
-      questions.push({
-        category: 'BUSINESS_RULE',
-        priority: 'HIGH',
-        question: 'Must email addresses be unique across user accounts?',
-        reason: 'Registration behavior depends on uniqueness, which is not stated.',
-        blocking: false,
-      });
+      questions.push(
+        q(
+          'BUSINESS_RULE',
+          'HIGH',
+          'Must email addresses be unique across user accounts?',
+          'Registration behavior depends on uniqueness, which is not stated.',
+          false,
+        ),
+      );
+    } else {
+      business.rules.push(
+        fact('Email addresses must be unique', 'CONFIRMED', source),
+      );
     }
-    if (!/redirect|login page|confirmation/.test(blob)) {
-      questions.push({
-        category: 'BUSINESS_OUTCOME',
-        priority: 'MEDIUM',
-        question:
+    if (!/redirect|login page|confirmation|auto-?login/.test(blob)) {
+      questions.push(
+        q(
+          'BUSINESS_OUTCOME',
+          'MEDIUM',
           'What should happen after successful registration (redirect, confirmation, auto-login)?',
-        reason: 'Post-registration business outcome is not fully defined.',
-        blocking: false,
-      });
+          'Post-registration business outcome is not fully defined.',
+          false,
+        ),
+      );
     }
   }
 
-  // Login
   if (/\blogin\b|\bsign in\b/.test(blob) && !/invalid|error/.test(blob)) {
+    business.preconditions.push(
+      fact('User must have an existing account', 'INFERRED', source),
+    );
     if (!/lock|attempt|retry/.test(blob)) {
-      questions.push({
-        category: 'BUSINESS_RULE',
-        priority: 'HIGH',
-        question:
+      questions.push(
+        q(
+          'BUSINESS_RULE',
+          'HIGH',
           'How many failed login attempts are allowed before the account is locked or delayed?',
-        reason: 'Failed authentication policy is not defined.',
-        blocking: false,
-      });
+          'Failed authentication policy is not defined.',
+          false,
+        ),
+      );
     }
   }
   if (/invalid/.test(blob) && /credential|login|error/.test(blob)) {
@@ -197,107 +258,173 @@ export function analyzeRequirement(
       fact('Invalid credentials produce an error response', 'CONFIRMED', source),
     );
     if (!/message|display|show/.test(blob)) {
-      questions.push({
-        category: 'ERROR_HANDLING',
-        priority: 'MEDIUM',
-        question: 'What error message should appear for invalid login credentials?',
-        reason: 'Error presentation is not specified.',
-        blocking: false,
-      });
+      questions.push(
+        q(
+          'ERROR_HANDLING',
+          'LOW',
+          'What error message should appear for invalid login credentials?',
+          'Error presentation is not specified (cosmetic/functional refinement).',
+          false,
+        ),
+      );
     }
   }
 
-  // OTP / password reset
   if (/\botp\b|password reset|reset.*password/.test(blob)) {
-    business.flow.push(
-      fact('Password reset / OTP flow', 'INFERRED', source),
-    );
+    business.flow.push(fact('Password reset / OTP flow', 'INFERRED', source));
     if (/expire|expiry|valid for|minutes/.test(blob)) {
-      business.rules.push(
-        fact(req.description, 'CONFIRMED', source),
-      );
+      business.rules.push(fact(req.description, 'CONFIRMED', source));
     } else if (/\botp\b/.test(blob)) {
-      questions.push({
-        category: 'BUSINESS_RULE',
-        priority: 'HIGH',
-        question: 'How long is the OTP valid, and what happens after it expires?',
-        reason: 'OTP validity window is not defined.',
-        blocking: true,
-      });
+      questions.push(
+        q(
+          'BUSINESS_RULE',
+          'HIGH',
+          'How long is the OTP valid, and what happens after it expires?',
+          'OTP validity window is not defined.',
+          false,
+        ),
+      );
     }
     if (/\botp\b/.test(blob) && !/attempt|tries|retry/.test(blob)) {
-      questions.push({
-        category: 'BUSINESS_RULE',
-        priority: 'HIGH',
-        question: 'How many invalid OTP attempts are allowed?',
-        reason: 'OTP attempt limit is not defined.',
-        blocking: false,
-      });
+      questions.push(
+        q(
+          'BUSINESS_RULE',
+          'HIGH',
+          'How many invalid OTP attempts are allowed?',
+          'OTP attempt limit is not defined.',
+          false,
+        ),
+      );
     }
     if (/\botp\b/.test(blob) && !/resend|send again/.test(blob)) {
-      questions.push({
-        category: 'BUSINESS_FLOW',
-        priority: 'MEDIUM',
-        question: 'Can the user request a new OTP (resend), and are there limits?',
-        reason: 'OTP resend policy is not defined.',
-        blocking: false,
-      });
-    }
-    if (/enter.*otp|otp entry/.test(blob) || /otp/.test(req.title.toLowerCase())) {
-      questions.push({
-        category: 'INPUT',
-        priority: 'MEDIUM',
-        question: 'Where does the user enter the OTP, and what validation applies?',
-        reason: 'OTP input location/validation is not fully specified.',
-        blocking: false,
-      });
+      questions.push(
+        q(
+          'BUSINESS_FLOW',
+          'MEDIUM',
+          'Can the user request a new OTP (resend), and are there limits?',
+          'OTP resend policy is not defined.',
+          false,
+        ),
+      );
     }
   }
 
-  // Cart / stock — never invent stock policy; ask when ambiguous
-  if (/cart|add product|add to cart|out of stock|\bstock\b/.test(blob)) {
-    if (/stock|available|availability/.test(blob) && !/cannot add|prevent.*cart|out of stock cannot/.test(blob)) {
-      questions.push({
-        category: 'BUSINESS_RULE',
-        priority: 'HIGH',
-        question:
+  // Stock / cart
+  if (/out of stock|cannot be purchased|inventory/.test(blob)) {
+    if (/cannot|must not|not allow|prevent/.test(blob)) {
+      business.rules.push(
+        fact(
+          'Out-of-stock products cannot be purchased (from source)',
+          'CONFIRMED',
+          source,
+        ),
+      );
+    } else {
+      questions.push(
+        q(
+          'BUSINESS_RULE',
+          'HIGH',
           'Can an out-of-stock product be added to the cart, and what happens at checkout if stock changes?',
-        reason: 'Stock availability decisions affect purchase behavior and are not defined.',
-        blocking: false,
-      });
+          'Stock availability decisions affect purchase behavior and are not defined.',
+          false,
+        ),
+      );
+    }
+  } else if (/cart|add to cart/.test(blob) && /stock|available/.test(blob)) {
+    questions.push(
+      q(
+        'BUSINESS_RULE',
+        'HIGH',
+        'Can an out-of-stock product be added to the cart, and what happens at checkout if stock changes?',
+        'Stock availability decisions affect purchase behavior and are not defined.',
+        false,
+      ),
+    );
+  }
+
+  if (/checkout|proceed to checkout/.test(blob)) {
+    business.preconditions.push(
+      fact('Cart should contain purchasable items', 'INFERRED', source),
+    );
+    if (!/logged in|login|authenticated/.test(blob)) {
+      questions.push(
+        q(
+          'PRECONDITION',
+          'HIGH',
+          'Must the user be logged in before checkout?',
+          'Checkout authentication precondition is not defined.',
+          false,
+        ),
+      );
+    }
+    if (!/stock|inventory|availability/.test(blob)) {
+      questions.push(
+        q(
+          'EXCEPTION',
+          'CRITICAL',
+          'What happens if inventory changes (becomes unavailable) during checkout?',
+          'Inventory race during checkout is a critical business risk and is not defined.',
+          true,
+        ),
+      );
     }
   }
 
-  // Payment
-  if (/payment|checkout|pay/.test(blob)) {
+  // Payment — only escalate CRITICAL on payment processing / failure / success
+  const isPaymentCore =
+    /\bpayment\b/.test(blob) &&
+    /\b(fail|failure|success|successful|process|handling|gateway)\b/.test(blob);
+  if (isPaymentCore || (/\bpayment\b/.test(blob) && /order/.test(blob))) {
     business.states.push(
       fact('Payment states are not fully defined in source', 'MISSING', source),
     );
-    questions.push({
-      category: 'EXCEPTION',
-      priority: 'CRITICAL',
-      question:
-        'What should happen if payment succeeds but order creation fails?',
-      reason:
-        'Payment/order consistency is a critical business exception and is not defined.',
-      blocking: true,
-    });
-    if (!/retry|try again/.test(blob) && /fail|failure|failed/.test(blob)) {
-      questions.push({
-        category: 'BUSINESS_FLOW',
-        priority: 'HIGH',
-        question: 'Can the customer retry a failed payment, and how many times?',
-        reason: 'Payment retry policy is not defined.',
-        blocking: false,
-      });
-    } else if (/payment/.test(blob) && !/fail|success|retry/.test(blob)) {
-      questions.push({
-        category: 'EXCEPTION',
-        priority: 'HIGH',
-        question: 'What happens when payment fails (notification, retry, order state)?',
-        reason: 'Payment failure business outcome is not defined.',
-        blocking: true,
-      });
+    business.exceptions.push(
+      fact('Payment/order consistency exception may apply', 'MISSING', source),
+    );
+    if (!/payment succeeds.*order|order creation fails|partial/.test(blob)) {
+      questions.push(
+        q(
+          'EXCEPTION',
+          'CRITICAL',
+          'What should happen if payment succeeds but order creation fails?',
+          'Payment/order consistency is a critical business exception and is not defined.',
+          true,
+        ),
+      );
+    }
+    if (/fail|failure|failed/.test(blob)) {
+      if (!/retry|try again/.test(blob)) {
+        questions.push(
+          q(
+            'BUSINESS_FLOW',
+            'HIGH',
+            'Can the customer retry a failed payment, and how many times?',
+            'Payment retry policy is not defined.',
+            false,
+          ),
+        );
+      }
+      if (!/order.*(not|never)|do not create|must not create/.test(blob)) {
+        questions.push(
+          q(
+            'EXCEPTION',
+            'CRITICAL',
+            'What should happen when payment fails (order state, notification, retry)?',
+            'Payment failure business outcome is not defined.',
+            true,
+          ),
+        );
+      }
+    } else if (!/fail|success|retry/.test(blob) && /\bpayment\b/.test(blob)) {
+      questions.push(
+        q(
+          'EXCEPTION',
+          'HIGH',
+          'What happens when payment fails (notification, retry, order state)?',
+          'Payment failure business outcome is not defined.',
+          false,
+        ),
+      );
     }
     if (/credit|debit|method/.test(blob)) {
       functional.inputs.push(
@@ -306,70 +433,86 @@ export function analyzeRequirement(
     }
   }
 
-  // Order cancel
   if (/cancel.*order|order.*cancel/.test(blob)) {
-    questions.push({
-      category: 'STATE',
-      priority: 'CRITICAL',
-      question: 'Which order statuses allow cancellation?',
-      reason:
-        'Cancellation eligibility depends on order status, which is not defined.',
-      blocking: true,
-    });
-    business.states.push(
-      fact('Order statuses for cancellation are undefined', 'MISSING', source),
-    );
+    if (!/pending|confirmed|shipped|status/.test(blob) || !/only|until|when/.test(blob)) {
+      questions.push(
+        q(
+          'STATE',
+          'CRITICAL',
+          'Which order statuses allow cancellation?',
+          'Cancellation eligibility depends on order status, which is not defined.',
+          true,
+        ),
+      );
+      business.states.push(
+        fact('Order statuses for cancellation are undefined', 'MISSING', source),
+      );
+      business.transitions.push(
+        fact('Cancel transitions by status are undefined', 'MISSING', source),
+      );
+    } else {
+      business.rules.push(fact(req.description, 'CONFIRMED', source));
+    }
   }
 
-  // Reviews
-  if (/review|rating/.test(blob)) {
+  if (/review|rating/.test(blob) && !/admin/.test(blob)) {
     if (/purchased|only users who/.test(blob)) {
       business.rules.push(fact(req.description, 'CONFIRMED', source));
     } else {
-      questions.push({
-        category: 'BUSINESS_RULE',
-        priority: 'HIGH',
-        question:
+      questions.push(
+        q(
+          'BUSINESS_RULE',
+          'HIGH',
           'Who is allowed to submit a product review (e.g. only purchasers)?',
-        reason: 'Review eligibility is a core business rule and is not defined.',
-        blocking: false,
-      });
-    }
-    if (!/multiple|edit|delete|one review/.test(blob)) {
-      questions.push({
-        category: 'BUSINESS_RULE',
-        priority: 'MEDIUM',
-        question:
-          'Can a user submit multiple reviews, edit a review, or delete a review?',
-        reason: 'Review lifecycle rules are not defined.',
-        blocking: false,
-      });
+          'Review eligibility is a core business rule and is not defined.',
+          false,
+        ),
+      );
     }
   }
 
-  // Admin permissions
   if (/admin|administrator/.test(blob)) {
     business.permissions.push(
       fact('Administrator capability referenced', 'CONFIRMED', source),
     );
+    business.actors.push(fact('Administrator', 'CONFIRMED', source));
     if (!/normal user|cannot access|only admin/.test(blob)) {
-      questions.push({
-        category: 'ROLE_PERMISSION',
-        priority: 'HIGH',
-        question:
+      questions.push(
+        q(
+          'ROLE_PERMISSION',
+          'HIGH',
           'Can non-administrator users access product administration features?',
-        reason: 'Role permission boundary is not explicitly stated.',
-        blocking: false,
-      });
+          'Role permission boundary is not explicitly stated.',
+          false,
+        ),
+      );
     }
   }
 
-  // Profile / email change
+  if (/access control|another user'?s|own orders?/.test(blob)) {
+    if (/cannot|must not|only.*(own|their)/.test(blob)) {
+      business.rules.push(fact(req.description, 'CONFIRMED', source));
+      business.permissions.push(
+        fact('Users may only access their own orders/data', 'CONFIRMED', source),
+      );
+    } else {
+      questions.push(
+        q(
+          'ROLE_PERMISSION',
+          'CRITICAL',
+          "Can a user access another user's order?",
+          'Order access control is a critical business rule and is not defined.',
+          true,
+        ),
+      );
+    }
+  }
+
   if (/profile|email address/.test(blob) && /cannot|must not|not be allowed|change/.test(blob)) {
     business.rules.push(fact(req.description, 'CONFIRMED', source));
   }
 
-  // --- Functional layer ---
+  // --- Functional layer (never overrides critical business gaps) ---
   if (/\b(enter|input|email|password|otp|search|quantity)\b/.test(blob)) {
     functional.inputs.push(
       fact('User input is required for this behavior', 'INFERRED', source),
@@ -379,14 +522,16 @@ export function analyzeRequirement(
     for (const ac of req.acceptanceCriteria ?? []) {
       functional.validations.push(fact(ac, 'CONFIRMED', source));
     }
-  } else if (req.type === 'FUNCTIONAL') {
-    questions.push({
-      category: 'VALIDATION',
-      priority: 'LOW',
-      question: `Are there explicit validation or acceptance criteria for "${req.title}"?`,
-      reason: 'No acceptance criteria were provided in the source.',
-      blocking: false,
-    });
+  } else if (primaryType === 'FUNCTIONAL') {
+    questions.push(
+      q(
+        'VALIDATION',
+        'LOW',
+        `Are there explicit validation or acceptance criteria for "${req.title}"?`,
+        'No acceptance criteria were provided in the source.',
+        false,
+      ),
+    );
   }
 
   if (/redirect|navigate|login page|confirmation/.test(blob)) {
@@ -403,42 +548,74 @@ export function analyzeRequirement(
     functional.failureBehavior.push(
       fact('Failure / error path referenced', 'CONFIRMED', source),
     );
-  } else if (req.type === 'FUNCTIONAL' && /login|payment|otp|register/.test(blob)) {
-    questions.push({
-      category: 'ERROR_HANDLING',
-      priority: 'MEDIUM',
-      question: `What is the expected failure behavior for "${req.title}"?`,
-      reason: 'Failure handling is not described in the source.',
-      blocking: false,
-    });
+  } else if (
+    primaryType === 'FUNCTIONAL' &&
+    /login|payment|otp|register/.test(blob)
+  ) {
+    questions.push(
+      q(
+        'ERROR_HANDLING',
+        'MEDIUM',
+        `What is the expected failure behavior for "${req.title}"?`,
+        'Failure handling is not described in the source.',
+        false,
+      ),
+    );
   }
 
-  // Deduplicate questions by text
+  // Deduplicate locally
   const seenQ = new Set<string>();
-  const uniqueQuestions = questions.filter((q) => {
-    const k = q.question.toLowerCase();
+  const uniqueQuestions = questions.filter((draft) => {
+    const k = draft.fingerprint || questionBucket(draft.question);
+    draft.fingerprint = k;
     if (seenQ.has(k)) return false;
+    // Also skip if exists in project-level texts
+    if (
+      (req.existingQuestionTexts ?? []).some(
+        (t) => questionBucket(t) === k,
+      )
+    ) {
+      return false;
+    }
     seenQ.add(k);
     return true;
   });
 
-  // Sort: business categories + CRITICAL/HIGH first
   uniqueQuestions.sort((a, b) => {
     const rank = (p: string) =>
       p === 'CRITICAL' ? 0 : p === 'HIGH' ? 1 : p === 'MEDIUM' ? 2 : 3;
     const br = rank(a.priority) - rank(b.priority);
     if (br !== 0) return br;
-    const ba = a.category.startsWith('BUSINESS') || a.category === 'ACTOR' || a.category === 'STATE' || a.category === 'EXCEPTION' || a.category === 'PRECONDITION' || a.category === 'ROLE_PERMISSION' || a.category === 'STATE_TRANSITION'
+    const ba = [
+      'BUSINESS_RULE',
+      'EXCEPTION',
+      'STATE',
+      'ROLE_PERMISSION',
+      'PRECONDITION',
+      'STATE_TRANSITION',
+      'BUSINESS_FLOW',
+      'BUSINESS_OUTCOME',
+      'ACTOR',
+    ].includes(a.category)
       ? 0
       : 1;
-    const bb = b.category.startsWith('BUSINESS') || b.category === 'ACTOR' || b.category === 'STATE' || b.category === 'EXCEPTION' || b.category === 'PRECONDITION' || b.category === 'ROLE_PERMISSION' || b.category === 'STATE_TRANSITION'
+    const bb = [
+      'BUSINESS_RULE',
+      'EXCEPTION',
+      'STATE',
+      'ROLE_PERMISSION',
+      'PRECONDITION',
+      'STATE_TRANSITION',
+      'BUSINESS_FLOW',
+      'BUSINESS_OUTCOME',
+      'ACTOR',
+    ].includes(b.category)
       ? 0
       : 1;
     return ba - bb;
   });
 
-  // Cap noise: keep top 8 per requirement (smart reduction)
-  const capped = uniqueQuestions.slice(0, 8);
+  const capped = uniqueQuestions.slice(0, 6);
 
   const confirmedFunctional =
     functional.validations.length +
@@ -447,15 +624,20 @@ export function analyzeRequirement(
     functional.inputs.length;
   let functionalCompleteness: RequirementAnalysisResult['functionalCompleteness'] =
     'PARTIAL';
-  if (confirmedFunctional >= 3 && !capped.some((q) => q.category === 'ERROR_HANDLING' && q.priority !== 'LOW')) {
+  if (
+    confirmedFunctional >= 3 &&
+    !capped.some((x) => x.category === 'ERROR_HANDLING' && x.priority !== 'LOW')
+  ) {
     functionalCompleteness = 'COMPLETE';
   }
-  if (confirmedFunctional === 0 && req.type === 'FUNCTIONAL') {
+  if (confirmedFunctional === 0 && primaryType === 'FUNCTIONAL') {
     functionalCompleteness = 'INCOMPLETE';
   }
-  if (req.type === 'NON_FUNCTIONAL' || req.type === 'BUSINESS_RULE') {
+  if (primaryType === 'NON_FUNCTIONAL' || primaryType === 'BUSINESS_RULE') {
     functionalCompleteness =
-      confirmedFunctional > 0 || business.rules.length > 0 ? 'COMPLETE' : 'PARTIAL';
+      confirmedFunctional > 0 || business.rules.length > 0
+        ? 'COMPLETE'
+        : 'PARTIAL';
   }
 
   const { businessReadiness, reviewStatus } = deriveStatuses({
@@ -464,12 +646,16 @@ export function analyzeRequirement(
   });
 
   const readinessScore = computeReadinessScore(
-    capped.map((q) => ({
-      priority: q.priority,
-      category: q.category,
-      blocking: q.blocking,
+    capped.map((x) => ({
+      priority: x.priority,
+      category: x.category,
+      blocking: x.blocking,
     })),
   );
+
+  const intentSource = business.intent
+    ? factStatusToIntentSource(business.intent.status)
+    : 'AI_INFERRED';
 
   return {
     businessReview: business,
@@ -479,6 +665,11 @@ export function analyzeRequirement(
     functionalCompleteness,
     reviewStatus,
     readinessScore,
+    primaryType,
+    secondaryType,
+    businessImpact,
+    intentSource,
+    businessIntentText: business.intent?.text ?? null,
   };
 }
 
@@ -501,21 +692,47 @@ export function interpretAnswer(opts: {
     ),
   ];
 
-  // Status-list derivation for cancellation-style questions
   if (/which order statuses|statuses allow/i.test(opts.question)) {
     const allowed = answer
-      .split(/,| and /i)
-      .map((s) => s.trim())
-      .filter(Boolean);
+      .split(/,| and |;/i)
+      .map((s) => s.replace(/\b(only|not|except)\b/gi, '').trim())
+      .filter((s) => s.length > 1 && s.length < 40);
     for (const status of allowed) {
+      if (/shipped|delivered|cancelled|refunded|pending|confirmed|processing/i.test(status)) {
+        facts.push(
+          fact(
+            `Orders may be cancelled when status is ${status}.`,
+            'DERIVED_FROM_USER_ANSWER',
+            'user-answer',
+          ),
+        );
+      }
+    }
+    if (/not shipped|until shipment|before ship/i.test(answer)) {
       facts.push(
         fact(
-          `Orders may be cancelled when status is ${status}.`,
+          'Orders cannot be cancelled after shipment.',
           'DERIVED_FROM_USER_ANSWER',
           'user-answer',
         ),
       );
     }
+  }
+
+  if (/payment fails|payment fail/i.test(opts.question)) {
+    facts.push(
+      fact(`Payment failure handling: ${answer}`, 'DERIVED_FROM_USER_ANSWER', 'user-answer'),
+    );
+  }
+
+  if (/payment succeeds but order/i.test(opts.question)) {
+    facts.push(
+      fact(
+        `Payment/order consistency rule: ${answer}`,
+        'DERIVED_FROM_USER_ANSWER',
+        'user-answer',
+      ),
+    );
   }
 
   return facts;
