@@ -1199,9 +1199,14 @@ export default function ProjectWorkspacePage() {
   const breadcrumbTail =
     tab === 'overview'
       ? null
-      : view === 'detail' && selected
-        ? 'Detail'
-        : 'Requirements';
+      : tab === 'stlc'
+        ? (
+            workflowSteps.find((s) => s.state === 'active')?.label ??
+            'Current phase'
+          ).replace(/^\d+\.\s*/, '')
+        : view === 'detail' && selected
+          ? 'Detail'
+          : 'Requirements';
   const progressPct = Math.min(
     100,
     Math.round(
