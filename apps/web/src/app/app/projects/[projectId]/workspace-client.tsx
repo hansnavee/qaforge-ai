@@ -115,6 +115,9 @@ type ExtractedRequirement = {
     businessOutcome: string;
     channel?: string | null;
     crudOp?: string | null;
+    confidence?: number | null;
+    polarity?: string | null;
+    uncertain?: boolean | null;
   } | null;
   featureGroup?: {
     id: string;
@@ -274,6 +277,9 @@ type FeatureGroupView = {
       businessOutcome: string;
       channel?: string | null;
       crudOp?: string | null;
+      confidence?: number | null;
+      polarity?: string | null;
+      uncertain?: boolean | null;
     } | null;
   }>;
 };
@@ -387,6 +393,7 @@ type ProjectDetail = {
   analysisEngine?: string | null;
   requirementsApprovedAt?: string | null;
   requirementsApprovedBy?: string | null;
+  qaSignedOffAt?: string | null;
   stlcStage?: string | null;
   staleRequirementCount?: number;
   requirementCount?: number;  extractedRequirementCount?: number;
@@ -1248,7 +1255,17 @@ export default function ProjectWorkspacePage() {
       </div>
 
       <Card className="space-y-3">
-        <h2 className="text-sm font-medium">QA Workflow</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-medium">QA Workflow</h2>
+          <span className="text-xs text-muted">
+            STLC:{' '}
+            {(
+              reviewSummaryQuery.data?.stlcStage ??
+              project.stlcStage ??
+              'REQUIREMENTS'
+            ).toString()}
+          </span>
+        </div>
         <div className="flex flex-wrap gap-2">
           {workflowSteps.map((step) => (
             <span
@@ -1272,7 +1289,27 @@ export default function ProjectWorkspacePage() {
           ))}
         </div>
 
-        {analysisStatus === 'COMPLETED' || requirementsApproved ? (
+        {(reviewSummaryQuery.data?.stlcStage ?? project.stlcStage) ===
+          'DONE' || project.status === 'STLC_COMPLETE' ? (
+          <div className="rounded-lg border border-success/30 bg-success/10 p-3 space-y-2">
+            <div className="text-sm font-medium text-success">
+              STLC complete
+            </div>
+            <p className="text-sm text-muted">
+              All stages signed off
+              {project.qaSignedOffAt
+                ? ` · ${formatDate(project.qaSignedOffAt)}`
+                : ''}
+              . Open the latest execution to review evidence and download the
+              pack.
+            </p>
+            <Link href="/app/executions">
+              <Button size="sm" variant="secondary">
+                Open executions
+              </Button>
+            </Link>
+          </div>
+        ) : analysisStatus === 'COMPLETED' || requirementsApproved ? (
           <div className="rounded-lg border border-border bg-panel/40 p-3 space-y-2">
             <div className="text-sm font-medium">
               Stage 1 → 2 handoff
