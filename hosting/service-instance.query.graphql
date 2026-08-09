@@ -1,0 +1,12 @@
+query($environmentId: String!, $serviceId: String!) {
+  serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+    serviceId
+    builder
+    dockerfilePath
+    watchPatterns
+    rootDirectory
+    railwayConfigFile
+    startCommand
+    healthcheckPath
+  }
+}

@@ -1,15 +1,23 @@
+# Config path for API service: hosting/railway.api.toml
+# Service must have GitHub source connected to branch `master`.
+# (CLI-only `railway up` uploads do NOT auto-deploy later GitHub pushes.)
+
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "docker/api.Dockerfile"
+# Repo-root anchored watch paths (Railway evaluates from /)
 watchPatterns = [
-  "apps/api/**",
-  "packages/shared/**",
-  "packages/database/**",
-  "packages/agent-sdk/**",
-  "docker/api.Dockerfile",
-  "docker/api-entrypoint.sh",
-  "package.json",
-  "pnpm-lock.yaml"
+  "/apps/api/**",
+  "/packages/shared/**",
+  "/packages/database/**",
+  "/packages/agent-sdk/**",
+  "/packages/report-engine/**",
+  "/docker/api.Dockerfile",
+  "/docker/api-entrypoint.sh",
+  "/hosting/railway.api.toml",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml"
 ]
 
 [deploy]
@@ -17,7 +25,3 @@ healthcheckPath = "/api/v1/health"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
-
-[variables]
-PORT = "4000"
-NODE_ENV = "production"

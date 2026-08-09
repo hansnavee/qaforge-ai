@@ -34,8 +34,9 @@ Estimated time: **20–30 minutes**.
 
 1. https://railway.app → **New Project** → **Deploy from GitHub** → `hansnavee/qaforge-ai`  
 2. Add service settings:
+   - **Config file:** `hosting/railway.api.toml`
    - **Dockerfile path:** `docker/api.Dockerfile`
-   - Or paste config from [`deploy/railway.api.toml`](railway.api.toml) into the service’s `railway.toml` (repo root for that service), or set Dockerfile path in the UI
+   - **Branch:** `master` (must be set — CLI-only `railway up` uploads do **not** auto-deploy later GitHub pushes)
 3. **Variables** (API service):
 
 ```env
@@ -60,8 +61,9 @@ On first boot the entrypoint runs `prisma db push` automatically.
 
 ## 4. Railway — Worker service
 
-1. Same GitHub repo → **Add service** → Dockerfile `docker/worker.Dockerfile`  
-2. Variables:
+1. Same GitHub repo → **Add service** → config `hosting/railway.worker.toml` (Dockerfile `docker/worker.Dockerfile`)  
+2. Connect GitHub source with branch **`master`** (required for auto-deploy)  
+3. Variables:
 
 ```env
 DATABASE_URL=<same neon>
@@ -72,9 +74,9 @@ OPENROUTER_API_KEY=   # optional; mock LLM used when empty
 NODE_ENV=production
 ```
 
-3. Give the worker **at least 2GB RAM** if the plan allows (Playwright). On tiny free instances, runs may OOM — still OK for API/UI testing.
+4. Give the worker **at least 2GB RAM** if the plan allows (Playwright). On tiny free instances, runs may OOM — still OK for API/UI testing.
 
-Config reference: [`deploy/railway.worker.toml`](railway.worker.toml)
+Config reference: [`hosting/railway.worker.toml`](../hosting/railway.worker.toml)
 
 ---
 
@@ -112,17 +114,26 @@ API health: `https://YOUR-API.up.railway.app/api/v1/health` → `{"status":"ok",
 
 | Symptom | Fix |
 |---------|-----|
+| GitHub push does not update Railway API | Service was last deployed via CLI upload without GitHub branch. Reconnect: `railway service source connect --repo hansnavee/qaforge-ai --branch master --service api` (same for `worker`). Set config file to `hosting/railway.api.toml`. |
 | CORS / auth cookie errors | `NEXT_PUBLIC_APP_URL` on API must match Vercel URL exactly (https, no trailing slash) |
 | Queue jobs never run | Worker not deployed or `REDIS_URL` mismatch |
 | Prisma SSL errors | Add `?sslmode=require` to Neon URL |
 | Worker crashes | Increase Railway memory; keep `BROWSER_HEADLESS=true` |
 | Cold starts | Free/trial services sleep — wait 30–60s on first request |
 
+### GitHub Actions backup deploy
+
+Workflow: [`.github/workflows/deploy-railway.yml`](../.github/workflows/deploy-railway.yml)
+
+1. Create a Railway token at https://railway.app/account/tokens  
+2. Add GitHub secret `RAILWAY_TOKEN`  
+3. Pushes that touch API/worker paths (or manual **Run workflow**) call `railway up`
+
 ---
 
 ## Env template
 
-See [`deploy/.env.production.example`](.env.production.example).
+See [`hosting/.env.production.example`](../hosting/.env.production.example).
 
 ---
 

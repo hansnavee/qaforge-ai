@@ -1,18 +1,19 @@
+# Config path for worker service: hosting/railway.worker.toml
+# Service must have GitHub source connected to branch `master`.
+
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "docker/worker.Dockerfile"
 watchPatterns = [
-  "apps/worker/**",
-  "packages/**",
-  "docker/worker.Dockerfile",
-  "package.json",
-  "pnpm-lock.yaml"
+  "/apps/worker/**",
+  "/packages/**",
+  "/docker/worker.Dockerfile",
+  "/hosting/railway.worker.toml",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml"
 ]
 
 [deploy]
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
-
-[variables]
-NODE_ENV = "production"
-BROWSER_HEADLESS = "true"
