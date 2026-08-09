@@ -48,12 +48,25 @@ export async function publishEvent(event: AgentEvent): Promise<void> {
   await client.expire(key, 60 * 60 * 24);
 }
 
+export class ExecutionCancelledError extends Error {
+  constructor(executionId: string) {
+    super(`Execution ${executionId} was cancelled`);
+    this.name = 'ExecutionCancelledError';
+  }
+}
+
 export async function waitForContinueSignal(
   executionId: string,
   timeoutMs = 30 * 60 * 1000,
 ): Promise<void> {
   const redis = getRedis();
   const flagKey = `execution:${executionId}:continue-flag`;
+  const cancelKey = `execution:${executionId}:cancel-flag`;
+
+  // Cancel wins over continue
+  if (await redis.getdel(cancelKey)) {
+    throw new ExecutionCancelledError(executionId);
+  }
 
   // Consume durable flag first (handles approve-before-subscribe races)
   const preexisting = await redis.getdel(flagKey);
@@ -64,7 +77,7 @@ export async function waitForContinueSignal(
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    const finish = () => {
+    const finishOk = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -73,6 +86,17 @@ export async function waitForContinueSignal(
       void sub.unsubscribe(channel).finally(() => {
         sub.disconnect();
         resolve();
+      });
+    };
+    const finishCancel = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      void redis.del(cancelKey).catch(() => undefined);
+      void sub.unsubscribe(channel).finally(() => {
+        sub.disconnect();
+        reject(new ExecutionCancelledError(executionId));
       });
     };
 
@@ -88,8 +112,11 @@ export async function waitForContinueSignal(
 
     // Poll durable flag in case publish landed between getdel and subscribe
     const poll = setInterval(() => {
+      void redis.getdel(cancelKey).then((v) => {
+        if (v) finishCancel();
+      });
       void redis.getdel(flagKey).then((v) => {
-        if (v) finish();
+        if (v) finishOk();
       });
     }, 1000);
 
@@ -106,13 +133,17 @@ export async function waitForContinueSignal(
 
     sub.on('message', (ch: string, message: string) => {
       if (ch !== channel) return;
+      if (message.includes('"cancel":true')) {
+        finishCancel();
+        return;
+      }
       // Accept plain "continue" or JSON payloads that include continue/executionId
       if (
         message === 'continue' ||
         message.includes('continue') ||
         message.includes(executionId)
       ) {
-        finish();
+        finishOk();
       }
     });
   });

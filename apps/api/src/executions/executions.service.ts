@@ -242,6 +242,47 @@ export class ExecutionsService {
     return updated;
   }
 
+  async cancel(user: SessionUser, orgId: string, executionId: string) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (
+      execution.status === ExecutionStatus.COMPLETED ||
+      execution.status === ExecutionStatus.CANCELLED
+    ) {
+      return execution;
+    }
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.CANCELLED,
+        finishedAt: new Date(),
+        errorSummary: 'Cancelled by user — freeing worker for other STLC runs',
+      },
+    });
+
+    await this.queue.publishCancel(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'execution.cancelled',
+      phase: execution.phase,
+      message: 'Execution cancelled by user',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'execution.cancel',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId, fromStatus: execution.status },
+    });
+
+    return updated;
+  }
+
   async approveTestDesign(
     user: SessionUser,
     orgId: string,

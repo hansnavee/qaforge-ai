@@ -153,6 +153,15 @@ export class ExecutionsController {
     return this.executions.continueAfterLogin(user, orgId, executionId);
   }
 
+  @Post('orgs/:orgId/executions/:executionId/cancel')
+  cancel(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.cancel(user, orgId, executionId);
+  }
+
   @Get('orgs/:orgId/executions/:executionId/events')
   events(
     @CurrentUser() user: SessionUser,

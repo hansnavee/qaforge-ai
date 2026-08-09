@@ -11,6 +11,7 @@ import { BrowserSessionManager } from '@qaforge/browser-session';
 import { buildZipPackage } from '@qaforge/report-engine';
 import { createAgentContext, putBinaryArtifact } from './context.js';
 import {
+  ExecutionCancelledError,
   getRedis,
   publishClarificationQuestions,
   waitForClarifySignal,
@@ -1599,6 +1600,18 @@ export async function runStlcExecution(executionId: string): Promise<void> {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    if (err instanceof ExecutionCancelledError) {
+      await setExecution(executionId, {
+        status: ExecutionStatus.CANCELLED,
+        errorSummary: message,
+        finishedAt: new Date(),
+      });
+      await ctx.emit({
+        type: 'stlc.cancelled',
+        message,
+      });
+      return;
+    }
     await setExecution(executionId, {
       status: ExecutionStatus.FAILED,
       errorSummary: message,

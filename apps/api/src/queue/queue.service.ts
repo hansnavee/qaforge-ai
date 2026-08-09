@@ -86,6 +86,24 @@ export class QueueService implements OnModuleInit {
     );
   }
 
+  async publishCancel(executionId: string) {
+    if (!this.pub) return;
+    await this.pub.set(
+      `execution:${executionId}:cancel-flag`,
+      '1',
+      'EX',
+      60 * 60,
+    );
+    await this.pub.publish(
+      `execution:${executionId}:continue`,
+      JSON.stringify({
+        executionId,
+        cancel: true,
+        at: new Date().toISOString(),
+      }),
+    );
+  }
+
   async publishClarify(
     executionId: string,
     payload: {
