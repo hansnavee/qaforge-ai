@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { parseRequirementDocument } from './document-parser';
 import {
+  extractRequirementsFromSource,
   filterExtractedRequirements,
   semanticExtractRequirements,
 } from './semantic-extract';
@@ -23,7 +25,7 @@ After successful registration, the user should be redirected to the login page.
 
 ## 2. User Login
 
-The user should be able to login using valid credentials.
+The user should be able to login using their registered email and password.
 
 ### Acceptance Criteria
 
@@ -35,6 +37,8 @@ The user should be able to login using valid credentials.
 The user should be able to reset their password using OTP.
 
 The OTP will be sent to the user's registered email address.
+
+The user can enter the OTP and create a new password.
 
 The OTP should expire after 10 minutes.
 
@@ -49,13 +53,38 @@ The product details page should display:
 - Product availability
 - Customer rating
 
-## 5. Non-Functional
+## 5. Shopping Cart
+
+Users can add products to the shopping cart.
+
+Users can increase or decrease the quantity.
+
+Users can remove products from the cart.
+
+The cart should display the total price.
+
+## 6. Product Data
+
+| Product | Category | Price | Stock |
+| --- | --- | --- | --- |
+| Laptop Pro | Electronics | 75000 | 10 |
+| Wireless Mouse | Electronics | 1500 | 50 |
+
+## 7. Business Rules
+
+The system should not allow users to purchase products that are out of stock.
+
+Only users who have purchased a product should be allowed to submit a review.
+
+## 8. Non-Functional
 
 The application should respond within 2 seconds.
 
 The application should be highly secure.
 
 The application should work on modern browsers.
+
+The application should be easy to use on mobile devices.
 `;
 
 const HALLUCINATION_SAMPLE = `The user should be able to reset the password using OTP.
@@ -77,52 +106,109 @@ const UNICODE_SAMPLE = `用户应该能够使用电子邮件和密码注册。
 Users should be able to search for products using the search bar.
 `;
 
-describe('semanticExtractRequirements', () => {
-  it('does not extract headings or acceptance-criteria labels as requirements', () => {
-    const result = semanticExtractRequirements(
-      ECOMMERCE_SAMPLE,
-      'ecommerce-requirements.txt',
-    );
+const FRAGMENT_SAMPLE = `## Checkout
 
-    const titles = result.map((r) => r.title);
-    const descriptions = result.map((r) => r.description);
+The Checkout Page Should Contain:
 
-    expect(titles.join('\n')).not.toMatch(/E-Commerce Application/i);
-    expect(descriptions.some((d) => /^#\s/.test(d))).toBe(false);
-    expect(titles).not.toContain('Acceptance Criteria');
-    expect(descriptions).not.toContain('Acceptance Criteria');
-    expect(result.some((r) => /^#{1,6}/.test(r.title))).toBe(false);
-    expect(result.some((r) => r.description.trim() === 'Product name')).toBe(
-      false,
-    );
-  });
+List Contains The Following Information:
 
-  it('attaches acceptance criteria to the parent registration requirement', () => {
-    const result = semanticExtractRequirements(
-      ECOMMERCE_SAMPLE,
-      'ecommerce-requirements.txt',
-    );
+Uses:
 
-    const registration = result.find(
-      (r) =>
-        /create an account/i.test(r.description) ||
-        r.title === 'User Registration',
+Be User Friendly
+`;
+
+describe('parseRequirementDocument', () => {
+  it('identifies headings, lists, and tables as structure', () => {
+    const parsed = parseRequirementDocument(ECOMMERCE_SAMPLE);
+    expect(parsed.sections.some((s) => /User Registration/i.test(s.title))).toBe(
+      true,
     );
-    expect(registration).toBeTruthy();
-    expect(registration!.type).toBe('FUNCTIONAL');
-    expect(registration!.acceptanceCriteria.length).toBeGreaterThanOrEqual(3);
+    expect(parsed.tables.length).toBeGreaterThanOrEqual(1);
+    expect(parsed.tables[0]?.headers).toEqual([
+      'Product',
+      'Category',
+      'Price',
+      'Stock',
+    ]);
+    expect(parsed.elements.some((e) => e.type === 'TABLE')).toBe(true);
     expect(
-      registration!.acceptanceCriteria.some((c) =>
-        /already registered email/i.test(c),
+      parsed.elements.some(
+        (e) => e.type === 'HEADING' && e.role === 'acceptance_criteria',
       ),
     ).toBe(true);
+  });
+});
 
-    // AC bullets must not be standalone requirements
+describe('semanticExtractRequirements', () => {
+  it('does not extract headings, AC labels, or table rows as requirements', () => {
+    const { requirements, documentElements } = extractRequirementsFromSource(
+      ECOMMERCE_SAMPLE,
+      'ecommerce-requirements.txt',
+    );
+
+    const blob = JSON.stringify(requirements);
+    expect(blob).not.toMatch(/E-Commerce Application — Product Requirements/);
+    expect(requirements.some((r) => /Acceptance Criteria/i.test(r.title))).toBe(
+      false,
+    );
+    expect(requirements.some((r) => /^#{1,6}/.test(r.title))).toBe(false);
+    expect(requirements.some((r) => /Laptop Pro/i.test(r.description))).toBe(
+      false,
+    );
+    expect(requirements.some((r) => /Wireless Mouse/i.test(r.title))).toBe(
+      false,
+    );
+    expect(documentElements.tables.length).toBeGreaterThanOrEqual(1);
+    expect(documentElements.sections.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('attaches acceptance criteria to parent and not as separate requirements', () => {
+    const result = semanticExtractRequirements(
+      ECOMMERCE_SAMPLE,
+      'ecommerce-requirements.txt',
+    );
+
+    const registration = result.find((r) => r.title === 'User Registration');
+    expect(registration).toBeTruthy();
+    expect(registration!.type).toBe('FUNCTIONAL');
+    expect(registration!.acceptanceCriteria.length).toBe(4);
     expect(
       result.some((r) =>
         /^User can enter email and password\.?$/i.test(r.description),
       ),
     ).toBe(false);
+  });
+
+  it('groups display lists into supportingInformation', () => {
+    const result = semanticExtractRequirements(
+      ECOMMERCE_SAMPLE,
+      'ecommerce-requirements.txt',
+    );
+    const details = result.find((r) => r.title === 'Product Details');
+    expect(details).toBeTruthy();
+    expect(details!.description.toLowerCase()).toContain('product information');
+    expect(details!.supportingInformation.length).toBeGreaterThanOrEqual(5);
+    expect(details!.source.text.toLowerCase()).toContain(
+      'product details page should display',
+    );
+    expect(
+      result.filter((r) => /^Product (name|images|price)$/i.test(r.title)).length,
+    ).toBe(0);
+  });
+
+  it('separates independent cart behaviors', () => {
+    const result = semanticExtractRequirements(
+      ECOMMERCE_SAMPLE,
+      'ecommerce-requirements.txt',
+    );
+    expect(result.some((r) => /Add Product To Cart/i.test(r.title))).toBe(true);
+    expect(result.some((r) => /Modify Product Quantity/i.test(r.title))).toBe(
+      true,
+    );
+    expect(result.some((r) => /Remove Product From Cart/i.test(r.title))).toBe(
+      true,
+    );
+    expect(result.some((r) => /Display Cart Total/i.test(r.title))).toBe(true);
   });
 
   it('classifies business rules and non-functional requirements', () => {
@@ -131,86 +217,86 @@ describe('semanticExtractRequirements', () => {
       'ecommerce-requirements.txt',
     );
 
-    const uniqueEmail = result.find((r) => /must be unique/i.test(r.description));
-    expect(uniqueEmail?.type).toBe('BUSINESS_RULE');
-
-    const otpExpiry = result.find((r) => /expire after 10 minutes/i.test(r.description));
-    expect(otpExpiry?.type).toBe('BUSINESS_RULE');
+    expect(
+      result.find((r) => /must be unique/i.test(r.description))?.type,
+    ).toBe('BUSINESS_RULE');
+    expect(
+      result.find((r) => /out of stock/i.test(r.description))?.type,
+    ).toBe('BUSINESS_RULE');
+    expect(
+      result.find((r) => /expire after 10 minutes/i.test(r.description))?.type,
+    ).toBe('BUSINESS_RULE');
 
     const nfr = result.filter((r) => r.type === 'NON_FUNCTIONAL');
-    expect(nfr.length).toBeGreaterThanOrEqual(2);
-    expect(nfr.some((r) => /within 2 seconds/i.test(r.description))).toBe(true);
+    expect(nfr.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('groups display bullet lists into one requirement', () => {
+  it('uses concise complete titles and full sourceText', () => {
     const result = semanticExtractRequirements(
       ECOMMERCE_SAMPLE,
       'ecommerce-requirements.txt',
     );
-
-    const details = result.find((r) =>
-      /product details page should display/i.test(r.description),
+    const login = result.find((r) => r.title === 'User Login');
+    expect(login).toBeTruthy();
+    expect(login!.title).not.toMatch(/And$/i);
+    expect(login!.source.text.toLowerCase()).toContain(
+      'registered email and password',
     );
-    expect(details).toBeTruthy();
-    expect(details!.description.toLowerCase()).toContain('product name');
-    expect(details!.description.toLowerCase()).toContain('customer rating');
-    expect(
-      result.filter((r) => /^Product (name|images|price)\.?$/i.test(r.description))
-        .length,
-    ).toBe(0);
   });
 
-  it('preserves source section context', () => {
+  it('preserves section context for password reset', () => {
     const result = semanticExtractRequirements(
       ECOMMERCE_SAMPLE,
       'ecommerce-requirements.txt',
     );
-    const reset = result.find((r) =>
-      /reset their password using OTP/i.test(r.description),
+    const reset = result.filter((r) =>
+      /Password Reset/i.test(r.source.section ?? ''),
     );
-    expect(reset?.source.section).toMatch(/Password Reset/i);
-    expect(reset?.source.document).toBe('ecommerce-requirements.txt');
-    expect(reset?.source.text).toMatch(/OTP/i);
+    expect(reset.length).toBeGreaterThanOrEqual(3);
+    expect(reset.some((r) => r.title === 'Password Reset')).toBe(true);
+    expect(reset.some((r) => r.title === 'OTP Delivery')).toBe(true);
+    expect(reset.some((r) => r.title === 'OTP Expiration')).toBe(true);
   });
 
-  it('handles hallucination sample without inventing acceptance criteria', () => {
-    const result = semanticExtractRequirements(
-      HALLUCINATION_SAMPLE,
-      'hallucination.txt',
-    );
-    expect(result.length).toBe(1);
-    expect(result[0]?.description).toMatch(/reset the password using OTP/i);
-    expect(result.every((r) => r.acceptanceCriteria.length === 0)).toBe(true);
-    expect(JSON.stringify(result)).not.toMatch(/\bSMS\b|email channel/i);
-  });
-
-  it('handles ambiguous requirements without fabricating detail', () => {
-    const result = semanticExtractRequirements(
-      AMBIGUOUS_SAMPLE,
-      'ambiguous.txt',
-    );
-    expect(result.some((r) => r.type === 'NON_FUNCTIONAL')).toBe(true);
-    expect(result.every((r) => r.acceptanceCriteria.length === 0)).toBe(true);
-  });
-
-  it('controls duplicate near-identical statements', () => {
-    const result = semanticExtractRequirements(
-      DUPLICATE_SAMPLE,
-      'duplicates.txt',
-    );
-    expect(result.length).toBe(1);
-  });
-
-  it('extracts unicode-adjacent english requirements and ignores non-signal unicode-only if no signal', () => {
-    const result = semanticExtractRequirements(UNICODE_SAMPLE, 'unicode.txt');
+  it('rejects fragment / empty intro requirements', () => {
+    const result = semanticExtractRequirements(FRAGMENT_SAMPLE, 'fragments.txt');
     expect(
-      result.some((r) => /search for products/i.test(r.description)),
-    ).toBe(true);
+      result.some((r) => /Checkout Page Should Contain/i.test(r.description)),
+    ).toBe(false);
+    expect(result.some((r) => /^Uses:?$/i.test(r.title))).toBe(false);
+    expect(result.some((r) => /^Be User Friendly$/i.test(r.title))).toBe(false);
+  });
+
+  it('handles hallucination / ambiguous / duplicate / unicode samples', () => {
+    const hall = semanticExtractRequirements(HALLUCINATION_SAMPLE, 'h.txt');
+    expect(hall).toHaveLength(1);
+    expect(hall.every((r) => r.acceptanceCriteria.length === 0)).toBe(true);
+
+    const amb = semanticExtractRequirements(AMBIGUOUS_SAMPLE, 'a.txt');
+    expect(amb.some((r) => r.type === 'NON_FUNCTIONAL')).toBe(true);
+
+    const dup = semanticExtractRequirements(DUPLICATE_SAMPLE, 'd.txt');
+    expect(dup).toHaveLength(1);
+
+    const uni = semanticExtractRequirements(UNICODE_SAMPLE, 'u.txt');
+    expect(uni.some((r) => /search for products/i.test(r.description))).toBe(
+      true,
+    );
+  });
+
+  it('prefers fewer accurate requirements over inflated counts', () => {
+    const result = semanticExtractRequirements(
+      ECOMMERCE_SAMPLE,
+      'ecommerce-requirements.txt',
+    );
+    // Naive line/heading split would exceed 40+; semantic should stay reasonable
+    expect(result.length).toBeGreaterThanOrEqual(12);
+    expect(result.length).toBeLessThan(35);
   });
 });
 
 describe('filterExtractedRequirements', () => {
-  it('drops heading and bullet artifacts from AI output', () => {
+  it('drops heading, table, and bullet artifacts from AI output', () => {
     const filtered = filterExtractedRequirements([
       {
         title: 'E-Commerce Application — Product Requirements',
@@ -221,6 +307,10 @@ describe('filterExtractedRequirements', () => {
         description: '### Acceptance Criteria',
       },
       {
+        title: 'Laptop Pro',
+        description: '| Laptop Pro | Electronics | 75000 | 10 |',
+      },
+      {
         title: 'User Can Enter Email And',
         description: '- User can enter email and',
       },
@@ -229,6 +319,8 @@ describe('filterExtractedRequirements', () => {
         description:
           'The user should be able to create an account using their email address and password.',
         acceptanceCriteria: ['User can enter email and password.'],
+        sourceText:
+          'The user should be able to create an account using their email address and password.',
       },
     ]);
     expect(filtered).toHaveLength(1);

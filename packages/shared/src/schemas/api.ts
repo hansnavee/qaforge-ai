@@ -62,11 +62,36 @@ export const extractedRequirementSchema = z.object({
   acceptanceCriteria: z.array(z.string()).default([]),
   businessRules: z.array(z.string()).default([]),
   dependencies: z.array(z.string()).default([]),
+  supportingInformation: z.array(z.string()).default([]),
   source: extractedRequirementSourceSchema.optional().nullable(),
+  sourceText: z.string().optional().nullable(),
+  section: z.string().optional().nullable(),
+});
+
+export const extractionTableSchema = z.object({
+  type: z.literal('TABLE_DATA').optional(),
+  section: z.string().nullable().optional(),
+  headers: z.array(z.string()),
+  rows: z.array(z.array(z.string())),
 });
 
 export const extractionAiResponseSchema = z.object({
   requirements: z.array(extractedRequirementSchema).min(1),
+  documentElements: z
+    .object({
+      sections: z
+        .array(
+          z.object({
+            type: z.literal('SECTION').optional(),
+            title: z.string(),
+            level: z.number().int().optional(),
+          }),
+        )
+        .optional()
+        .default([]),
+      tables: z.array(extractionTableSchema).optional().default([]),
+    })
+    .optional(),
 });
 
 export type ExtractionAiResponse = z.infer<typeof extractionAiResponseSchema>;

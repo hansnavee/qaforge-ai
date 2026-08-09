@@ -1,4 +1,4 @@
-import { semanticExtractRequirements } from '@qaforge/shared';
+import { extractRequirementsFromSource } from '@qaforge/shared';
 import type { LlmClient } from '../types.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -42,17 +42,36 @@ function mockExtractFromPrompt(prompt: string): unknown | null {
   const docMatch = prompt.match(/Source document name:\s*(.+)/i);
   const document = docMatch?.[1]?.trim() || 'source';
 
-  const requirements = semanticExtractRequirements(source, document);
-  if (!requirements.length) return { requirements: [] };
-  return { requirements };
+  // Prefer structured parsed-document prompt when present
+  if (prompt.includes('"elements"') && prompt.includes('Parsed document')) {
+    // Reconstruct source-ish extraction from baseline pipeline via original paragraphs
+    // Mock still runs full source extract when """ block present; else empty.
+  }
+
+  const extracted = extractRequirementsFromSource(source, document);
+  if (!extracted.requirements.length) {
+    return {
+      requirements: [],
+      documentElements: extracted.documentElements,
+    };
+  }
+  return {
+    requirements: extracted.requirements.map((r) => ({
+      ...r,
+      section: r.source.section,
+      sourceText: r.source.text,
+    })),
+    documentElements: extracted.documentElements,
+  };
 }
 
 function mockJsonForPrompt(haystack: string, prompt = ''): unknown {
-  // Piece 2 extraction — semantic extraction (not line-splitting)
+  // Piece 2 extraction — parser + semantic extraction (not line-splitting)
   if (
     haystack.includes('requirementkey') ||
     haystack.includes('do not invent') ||
     haystack.includes('semantic') ||
+    haystack.includes('parsed document') ||
     haystack.includes('individual requirements')
   ) {
     return mockExtractFromPrompt(prompt) ?? { requirements: [] };

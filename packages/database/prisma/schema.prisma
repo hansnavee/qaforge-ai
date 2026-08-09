@@ -126,6 +126,8 @@ model RequirementDocument {
   sourceType      String   @default("UPLOAD") // UPLOAD | PASTE
   originalContent String?  @db.Text
   parsedText      String?  @db.Text
+  /// Parsed structure: sections + tables (not requirements)
+  documentStructure Json?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @default(now()) @updatedAt
   project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -152,6 +154,7 @@ model Requirement {
   acceptanceCriteria   Json?
   businessRules        Json?
   dependencies         Json?
+  supportingInformation Json?
   possibleDuplicateOf  String?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @default(now()) @updatedAt

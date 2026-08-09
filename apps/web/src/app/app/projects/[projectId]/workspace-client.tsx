@@ -36,6 +36,7 @@ type ExtractedRequirement = {
   acceptanceCriteria: string[];
   businessRules: string[];
   dependencies: string[];
+  supportingInformation?: string[];
   possibleDuplicateOf?: string | null;
 };
 
@@ -459,6 +460,14 @@ export default function ProjectWorkspacePage() {
               </div>
               <p className="mt-1 whitespace-pre-wrap text-muted">
                 {emptyField(selected.acceptanceCriteria)}
+              </p>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted">
+                Supporting Information
+              </div>
+              <p className="mt-1 whitespace-pre-wrap text-muted">
+                {emptyField(selected.supportingInformation)}
               </p>
             </div>
             <div>

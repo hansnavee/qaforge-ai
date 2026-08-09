@@ -52,14 +52,23 @@ describe('@qaforge/shared schemas', () => {
           acceptanceCriteria: [],
           businessRules: [],
           dependencies: [],
+          supportingInformation: [],
+          sourceText:
+            'User should be able to login using valid credentials.',
+          section: 'User Login',
           source: {
             document: 'pasted-requirements.txt',
             text: 'User should be able to login using valid credentials.',
           },
         },
       ],
+      documentElements: {
+        sections: [{ type: 'SECTION', title: 'User Login', level: 2 }],
+        tables: [],
+      },
     });
     expect(parsed.requirements[0].requirementKey).toBe('REQ-001');
+    expect(parsed.requirements[0].supportingInformation).toEqual([]);
   });
 
   it('exposes plan limits', () => {

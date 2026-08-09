@@ -8,9 +8,11 @@ import { prisma } from '@qaforge/database';
 import {
   Role,
   extractionAiResponseSchema,
+  extractRequirementsFromSource,
   filterExtractedRequirements,
-  semanticExtractRequirements,
+  parseRequirementDocument,
   type ExtractedRequirementInput,
+  type ExtractionResult,
 } from '@qaforge/shared';
 import { AuditService } from '../common/audit.service';
 import type { SessionUser } from '../auth/auth';
@@ -19,6 +21,8 @@ import { OrgsService } from '../orgs/orgs.service';
 function normalizeText(value: string): string {
   return value
     .toLowerCase()
+    .replace(/\b(the|a|an)\b/g, ' ')
+    .replace(/\busers\b/g, 'user')
     .replace(/\s+/g, ' ')
     .replace(/[^\w\s]/g, '')
     .trim();
@@ -44,9 +48,9 @@ function flagDuplicates(
 }
 
 function toExtractedInput(
-  items: ReturnType<typeof semanticExtractRequirements>,
+  result: ExtractionResult,
 ): ExtractedRequirementInput[] {
-  return items.map((r) => ({
+  return result.requirements.map((r) => ({
     requirementKey: r.requirementKey,
     title: r.title,
     description: r.description,
@@ -55,7 +59,10 @@ function toExtractedInput(
     acceptanceCriteria: r.acceptanceCriteria,
     businessRules: r.businessRules,
     dependencies: r.dependencies,
+    supportingInformation: r.supportingInformation,
     source: r.source,
+    sourceText: r.source.text,
+    section: r.source.section,
   }));
 }
 
@@ -101,6 +108,7 @@ export class RequirementExtractionService {
     acceptanceCriteria: unknown;
     businessRules: unknown;
     dependencies: unknown;
+    supportingInformation?: unknown;
     possibleDuplicateOf: string | null;
     createdAt: Date;
     updatedAt: Date;
@@ -125,6 +133,7 @@ export class RequirementExtractionService {
       acceptanceCriteria: asStringArray(row.acceptanceCriteria),
       businessRules: asStringArray(row.businessRules),
       dependencies: asStringArray(row.dependencies),
+      supportingInformation: asStringArray(row.supportingInformation),
       possibleDuplicateOf: row.possibleDuplicateOf,
       sourceDocumentName: row.sourceDocument?.filename ?? null,
       createdAt: row.createdAt,
@@ -187,13 +196,22 @@ export class RequirementExtractionService {
       orderBy: { requirementKey: 'asc' },
     });
 
-    let parsed = await this.extractSemantically(sourceText, doc.filename);
+    const { requirements: parsed, documentElements } =
+      await this.extractPipeline(sourceText, doc.filename);
 
     if (!parsed.length) {
       throw new BadRequestException(
         'No clear requirements were detected. Please check the document or paste the requirements manually.',
       );
     }
+
+    // Persist parsed structure (sections/tables) on the source document
+    await prisma.requirementDocument.update({
+      where: { id: doc.id },
+      data: {
+        documentStructure: documentElements as object,
+      },
+    });
 
     const assigned = this.assignStableKeys(parsed, existing);
     const duplicateFlags = flagDuplicates(assigned);
@@ -208,11 +226,12 @@ export class RequirementExtractionService {
         status: 'EXTRACTED',
         sourceDocumentId: doc.id,
         sourcePage: item.source?.page ?? null,
-        sourceSection: item.source?.section ?? null,
-        sourceText: item.source?.text ?? item.description,
+        sourceSection: item.section ?? item.source?.section ?? null,
+        sourceText: item.sourceText ?? item.source?.text ?? item.description,
         acceptanceCriteria: item.acceptanceCriteria,
         businessRules: item.businessRules,
         dependencies: item.dependencies,
+        supportingInformation: item.supportingInformation ?? [],
         possibleDuplicateOf: duplicateFlags.get(item.requirementKey) ?? null,
       };
 
@@ -240,6 +259,8 @@ export class RequirementExtractionService {
       nonFunctional: saved.filter((r) => r.type === 'NON_FUNCTIONAL').length,
       businessRules: saved.filter((r) => r.type === 'BUSINESS_RULE').length,
       possibleDuplicates: saved.filter((r) => r.possibleDuplicateOf).length,
+      tables: documentElements.tables.length,
+      sections: documentElements.sections.length,
       sourceDocument: doc.filename,
     };
 
@@ -256,42 +277,63 @@ export class RequirementExtractionService {
       ok: true,
       summary,
       requirements: saved,
+      documentElements,
     };
   }
 
   /**
-   * Prefer live LLM semantic extraction when available; always validate/filter.
-   * Fall back to deterministic semantic extractor (never line-splitting).
+   * Parser → AI (optional) → normalize → validate.
+   * Deterministic semantic extract is the reliable baseline.
    */
-  private async extractSemantically(
+  private async extractPipeline(
     sourceText: string,
     documentName: string,
-  ): Promise<ExtractedRequirementInput[]> {
-    const fallback = () =>
-      toExtractedInput(semanticExtractRequirements(sourceText, documentName));
+  ): Promise<{
+    requirements: ExtractedRequirementInput[];
+    documentElements: ExtractionResult['documentElements'];
+  }> {
+    const parsedDoc = parseRequirementDocument(sourceText);
+    const baseline = extractRequirementsFromSource(sourceText, documentName);
+    const fallbackReqs = filterExtractedRequirements(
+      toExtractedInput(baseline),
+    );
 
     try {
-      const fromLlm = await this.callLlm(sourceText, documentName);
+      const fromLlm = await this.callLlm(parsedDoc, documentName);
       const filtered = filterExtractedRequirements(fromLlm).map((r) => ({
         ...r,
+        supportingInformation: r.supportingInformation ?? [],
         source: {
           document: r.source?.document || documentName,
           page: r.source?.page ?? null,
-          section: r.source?.section ?? null,
-          text: r.source?.text || r.description,
+          section: r.section ?? r.source?.section ?? null,
+          text: r.sourceText || r.source?.text || r.description,
         },
+        sourceText: r.sourceText || r.source?.text || r.description,
       }));
 
-      // If the model still produced mostly junk, use deterministic semantic extract
       if (
         filtered.length === 0 ||
         filtered.length < Math.max(1, Math.floor(fromLlm.length * 0.4))
       ) {
-        return fallback();
+        return {
+          requirements: fallbackReqs,
+          documentElements: baseline.documentElements,
+        };
       }
-      return filtered;
+
+      return {
+        requirements: filtered,
+        documentElements: {
+          sections: baseline.documentElements.sections,
+          tables: baseline.documentElements.tables,
+        },
+      };
     } catch {
-      return fallback();
+      return {
+        requirements: fallbackReqs,
+        documentElements: baseline.documentElements,
+      };
     }
   }
 
@@ -317,7 +359,9 @@ export class RequirementExtractionService {
       }, 0) + 1;
 
     return incoming.map((item) => {
-      const sourceKey = normalizeText(item.source?.text || item.description);
+      const sourceKey = normalizeText(
+        item.sourceText || item.source?.text || item.description,
+      );
       let key = bySource.get(sourceKey);
 
       if (!key) {
@@ -344,49 +388,59 @@ export class RequirementExtractionService {
   }
 
   private async callLlm(
-    sourceText: string,
+    parsedDoc: ReturnType<typeof parseRequirementDocument>,
     documentName: string,
   ): Promise<ExtractedRequirementInput[]> {
+    const structured = JSON.stringify(
+      {
+        document: documentName,
+        elements: parsedDoc.elements,
+      },
+      null,
+      2,
+    ).slice(0, 60_000);
+
     const llm = await this.llm.complete({
-      system: `You perform SEMANTIC software requirement extraction into JSON.
+      system: `You perform SEMANTIC software requirement extraction from a PARSED document.
 
-Core rules:
-- Extract requirements based on semantic meaning, NOT document formatting or line boundaries.
-- Document titles, markdown headings (# ## ###), numbered section titles, and "Acceptance Criteria" labels are NOT requirements. Use them only as source.section context.
-- Do NOT create a requirement for each bullet. Bullets under an explicit Acceptance Criteria heading belong in acceptanceCriteria of the parent requirement.
-- When a statement says a page should display/include items followed by a bullet list, create ONE requirement and fold the items into the description (do not invent extra fields).
-- Only populate acceptanceCriteria / businessRules / dependencies when explicitly present in the source. Never invent them.
-- Classify type as FUNCTIONAL, NON_FUNCTIONAL, or BUSINESS_RULE using meaning (unique/must/expire → BUSINESS_RULE; performance/security/browsers/usability → NON_FUNCTIONAL; user/system capabilities → FUNCTIONAL).
-- Every requirement must have a meaningful title and description describing behavior, a rule, or a constraint.
-- requirementKey format: REQ-001, REQ-002, ...
-- Keep descriptions faithful to the source. Do not invent OTP channels, password rules, expiry, or other assumptions.`,
-      prompt: `Source document name: ${documentName}
+The input is already structured into HEADING, PARAGRAPH, LIST, and TABLE elements.
 
-Original requirement text:
-"""
-${sourceText.slice(0, 40_000)}
-"""
+Hard rules:
+- HEADING elements are NEVER requirements. Use section headings only as section context.
+- Acceptance Criteria headings and their LIST items become acceptanceCriteria on the parent requirement.
+- TABLE elements are NEVER requirements. Ignore table headers and rows.
+- Do NOT create a requirement per bullet. LIST items under display/contain intros become supportingInformation.
+- Separate clearly independent behaviors into distinct requirements.
+- Only populate acceptanceCriteria / businessRules / dependencies / supportingInformation when present in source.
+- Never invent information.
+- Classify FUNCTIONAL | NON_FUNCTIONAL | BUSINESS_RULE correctly.
+- Titles must be concise and complete (e.g. "User Login"), never truncated mid-phrase.
+- sourceText must be the full original statement, never truncated.
+- requirementKey format: REQ-001, REQ-002, ...`,
+      prompt: `Parsed document JSON:
+${structured}
 
 Return JSON only:
 {
   "requirements": [
     {
       "requirementKey": "REQ-001",
-      "title": "short title",
-      "description": "faithful requirement statement",
+      "title": "User Registration",
+      "description": "full meaningful description",
       "type": "FUNCTIONAL",
       "priority": null,
+      "section": "User Registration",
       "acceptanceCriteria": [],
       "businessRules": [],
       "dependencies": [],
-      "source": {
-        "document": "${documentName}",
-        "page": null,
-        "section": "section heading if any",
-        "text": "exact source snippet for this requirement"
-      }
+      "supportingInformation": [],
+      "sourceText": "exact full source statement"
     }
-  ]
+  ],
+  "documentElements": {
+    "sections": [],
+    "tables": []
+  }
 }`,
       json: true,
       model: 'fast',
@@ -406,12 +460,14 @@ Return JSON only:
 
     return validated.data.requirements.map((r) => ({
       ...r,
+      supportingInformation: r.supportingInformation ?? [],
       source: {
-        document: r.source?.document || documentName,
-        page: r.source?.page ?? null,
-        section: r.source?.section ?? null,
-        text: r.source?.text || r.description,
+        document: documentName,
+        page: null,
+        section: r.section ?? r.source?.section ?? null,
+        text: r.sourceText || r.source?.text || r.description,
       },
+      sourceText: r.sourceText || r.source?.text || r.description,
     }));
   }
 }
