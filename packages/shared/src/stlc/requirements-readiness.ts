@@ -89,7 +89,8 @@ export function evaluateRequirementsReadiness(
 
   const canApprove = blockers.length === 0;
   const approved = Boolean(input.requirementsApprovedAt);
-  const canStartPlanning = canApprove && approved;
+  // Once approved, Planning can always start (soft blockers must not freeze CTA).
+  const canStartPlanning = approved;
 
   return {
     canApprove,

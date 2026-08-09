@@ -206,6 +206,19 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
   const doneCount = phases.filter((p) => p.status === 'ACCEPTED').length;
   const prevPhase = phases.find((p) => p.index === stepNum - 1);
   const nextPhase = phases.find((p) => p.index === stepNum + 1);
+  const latestExecutionId = phasesQuery.data?.latestExecutionId ?? null;
+  const latestExecutionStatus =
+    phasesQuery.data?.latestExecutionStatus ?? null;
+  const awaitingAi =
+    Boolean(latestExecutionId) &&
+    (detail?.status === 'RUNNING' ||
+      latestExecutionStatus === 'QUEUED' ||
+      latestExecutionStatus === 'PENDING' ||
+      latestExecutionStatus === 'RUNNING');
+  const waitingToStart =
+    (selected === 'PLANNING' || selected === 'DESIGN') &&
+    !latestExecutionId &&
+    detail?.status !== 'ACCEPTED';
 
   async function download(format: string) {
     const orgId = await getDefaultOrgId();
@@ -263,7 +276,16 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
 
         {!detail ? (
           <p className="mt-6 text-sm text-muted">Loading this step…</p>
-        ) : detail.status === 'RUNNING' ? (
+        ) : waitingToStart ? (
+          <div className="mt-6 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm">
+            <p className="font-medium text-fg">Ready to start Test Planning</p>
+            <p className="mt-1 text-muted">
+              Click <span className="text-fg">Continue to Test Planning</span>{' '}
+              above. AI will generate the strategy and design test cases, then
+              unlock Test Design for edit/delete review.
+            </p>
+          </div>
+        ) : awaitingAi || detail.status === 'RUNNING' ? (
           <div className="mt-6 space-y-3">
             <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm">
               {selected === 'PLANNING' || selected === 'DESIGN' ? (

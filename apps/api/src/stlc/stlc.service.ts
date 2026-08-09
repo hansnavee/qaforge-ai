@@ -163,7 +163,15 @@ export class StlcService {
     const docs = (project.stlcPhaseDocs ?? {}) as StlcPhaseDocsMap;
     const latest = await this.latestExecution(projectId);
     const requirementsApproved = Boolean(project.requirementsApprovedAt);
-    const activePhaseId = this.resolveActivePhaseId(latest);
+    let activePhaseId = this.resolveActivePhaseId(latest);
+    // Requirements approved but STLC not started yet → keep Planning current.
+    if (
+      !activePhaseId &&
+      requirementsApproved &&
+      (project.stlcStage === 'PLANNING' || project.stlcStage === 'REQUIREMENTS')
+    ) {
+      activePhaseId = 'PLANNING';
+    }
 
     const phases = listPhaseSummaries(
       project.stlcStage,
@@ -171,7 +179,7 @@ export class StlcService {
       requirementsApproved,
     ).map((p) => {
       const def = getStlcPhase(p.id);
-      const status = this.reconcilePhaseStatus({
+      let status = this.reconcilePhaseStatus({
         phaseId: p.id,
         phaseIndex: p.index,
         baseStatus: p.status,
@@ -179,6 +187,12 @@ export class StlcService {
         latestPhase: latest?.phase,
         requirementsApproved,
       });
+      // Stage pointer alone is not an AI run — avoid fake "RUNNING".
+      if (!latest && status === 'RUNNING') {
+        status = p.id === 'PLANNING' && requirementsApproved
+          ? 'READY_FOR_REVIEW'
+          : 'LOCKED';
+      }
       return {
         ...p,
         status,
@@ -217,7 +231,7 @@ export class StlcService {
       Boolean(project.requirementsApprovedAt),
     );
     const summary = summaries.find((s) => s.id === def.id)!;
-    const status = this.reconcilePhaseStatus({
+    let status = this.reconcilePhaseStatus({
       phaseId: def.id,
       phaseIndex: def.index,
       baseStatus: summary.status,
@@ -225,6 +239,12 @@ export class StlcService {
       latestPhase: latest?.phase,
       requirementsApproved: Boolean(project.requirementsApprovedAt),
     });
+    if (!latest && status === 'RUNNING') {
+      status =
+        def.id === 'PLANNING' && project.requirementsApprovedAt
+          ? 'READY_FOR_REVIEW'
+          : 'LOCKED';
+    }
 
     const isActiveGate = Boolean(
       latest && AWAIT_TO_PHASE[latest.status] === def.id,

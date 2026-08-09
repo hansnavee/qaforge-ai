@@ -192,17 +192,12 @@ export class Phase1Service {
       openQuestions,
     });
 
-    if (!readiness.canStartPlanning) {
+    // After Stage 1 Accept, always allow starting Planning. Soft readiness
+    // blockers (stale flags, etc.) must not silently block the handoff CTA.
+    if (!readiness.approved) {
       throw new BadRequestException({
-        message: readiness.approved
-          ? 'Requirements are no longer ready for Test Planning'
-          : 'Approve Step 2 requirements before starting Test Planning',
-        blockers: readiness.approved
-          ? readiness.blockers
-          : [
-              'Requirements not approved',
-              ...readiness.blockers,
-            ],
+        message: 'Approve Step 2 requirements before starting Test Planning',
+        blockers: ['Requirements not approved', ...readiness.blockers],
         counts: readiness.counts,
       });
     }

@@ -40,6 +40,17 @@ describe('evaluateRequirementsReadiness', () => {
     expect(r.canStartPlanning).toBe(true);
   });
 
+  it('allows start planning after approve even with soft blockers', () => {
+    const r = evaluateRequirementsReadiness({
+      analysisStatus: 'RUNNING',
+      staleRequirementCount: 2,
+      requirements: baseReqs,
+      requirementsApprovedAt: new Date().toISOString(),
+    });
+    expect(r.canApprove).toBe(false);
+    expect(r.canStartPlanning).toBe(true);
+  });
+
   it('blocks on CRITICAL blocking open questions', () => {
     const r = evaluateRequirementsReadiness({
       analysisStatus: 'COMPLETED',

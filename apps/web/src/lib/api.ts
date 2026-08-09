@@ -16,6 +16,15 @@ function errorMessage(data: unknown, fallback: string): string {
   const msg = (data as { message?: unknown }).message;
   if (typeof msg === 'string') return msg;
   if (Array.isArray(msg)) return msg.map(String).join(', ');
+  if (msg && typeof msg === 'object') {
+    const nested = msg as { message?: unknown; blockers?: unknown };
+    const parts: string[] = [];
+    if (typeof nested.message === 'string') parts.push(nested.message);
+    if (Array.isArray(nested.blockers) && nested.blockers.length) {
+      parts.push(nested.blockers.map(String).join('; '));
+    }
+    if (parts.length) return parts.join(' — ');
+  }
   return fallback;
 }
 

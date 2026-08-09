@@ -1067,18 +1067,30 @@ export default function ProjectWorkspacePage() {
         },
       );
     },
+    onMutate: () => {
+      // Navigate immediately so the click always feels responsive.
+      router.replace('?tab=stlc&phase=PLANNING', { scroll: false });
+    },
     onSuccess: async (execution) => {
       await invalidateReviewQueries();
       void queryClient.invalidateQueries({ queryKey: ['stlc-phases', projectId] });
       void queryClient.invalidateQueries({ queryKey: ['test-cases', projectId] });
-      // Stay in the workspace wizard — AI strategy + design unlock Design here.
-      const phase =
-        execution?.status === 'AWAITING_DESIGN_APPROVAL' ||
-        execution?.phase === 'TEST_DESIGN'
-          ? 'DESIGN'
-          : execution?.status === 'AWAITING_PLAN_APPROVAL'
-            ? 'PLANNING'
-            : 'PLANNING';
+      const status = execution?.status ?? '';
+      const phaseName = execution?.phase ?? '';
+      let phase = 'PLANNING';
+      if (
+        status === 'AWAITING_DESIGN_APPROVAL' ||
+        phaseName === 'TEST_DESIGN'
+      ) {
+        phase = 'DESIGN';
+      } else if (
+        status === 'AWAITING_ENV_APPROVAL' ||
+        phaseName === 'ENVIRONMENT'
+      ) {
+        phase = 'ENVIRONMENT';
+      } else if (status === 'AWAITING_PLAN_APPROVAL') {
+        phase = 'PLANNING';
+      }
       router.replace(`?tab=stlc&phase=${phase}`, { scroll: false });
     },
   });
@@ -1381,14 +1393,11 @@ export default function ProjectWorkspacePage() {
                     <Button
                       size="sm"
                       onClick={() => startPlanningMutation.mutate()}
-                      disabled={
-                        !stlcHandoff?.canStartPlanning ||
-                        startPlanningMutation.isPending
-                      }
+                      disabled={startPlanningMutation.isPending}
                     >
                       {startPlanningMutation.isPending
                         ? 'Starting…'
-                        : 'Generate strategy & test cases'}
+                        : 'Continue to Test Planning'}
                     </Button>
                     <Button
                       size="sm"
@@ -1404,6 +1413,13 @@ export default function ProjectWorkspacePage() {
                   </>
                 )}
               </div>
+
+              {requirementsApproved ? (
+                <p className="mt-3 text-xs text-muted">
+                  Continues AI Test Planning: generates the strategy, designs
+                  documented test cases, then unlocks Test Design for review.
+                </p>
+              ) : null}
 
               {!requirementsApproved &&
               handoffBlockers.length > 0 &&
