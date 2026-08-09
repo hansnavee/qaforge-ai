@@ -84,24 +84,58 @@ export class StlcService {
     );
   }
 
+  private reconcilePhaseStatus(opts: {
+    phaseId: string;
+    phaseIndex: number;
+    baseStatus: string;
+    latestStatus?: string | null;
+    requirementsApproved: boolean;
+  }): string {
+    const activeId = opts.latestStatus
+      ? AWAIT_TO_PHASE[opts.latestStatus]
+      : undefined;
+    const activeIdx = activeId
+      ? (getStlcPhase(activeId)?.index ?? 0)
+      : 0;
+
+    if (opts.phaseId === 'REQUIREMENTS') {
+      return opts.requirementsApproved || opts.baseStatus === 'ACCEPTED'
+        ? 'ACCEPTED'
+        : opts.baseStatus;
+    }
+
+    // Execution gate is the source of truth for the current open step.
+    if (activeId) {
+      if (opts.phaseId === activeId) return 'READY_FOR_REVIEW';
+      if (opts.phaseIndex < activeIdx) return 'ACCEPTED';
+      if (opts.phaseIndex > activeIdx) return 'LOCKED';
+    }
+
+    return opts.baseStatus;
+  }
+
   async listPhases(user: SessionUser, orgId: string, projectId: string) {
     const project = await this.loadProject(user.id, orgId, projectId);
     const docs = (project.stlcPhaseDocs ?? {}) as StlcPhaseDocsMap;
     const latest = await this.latestExecution(projectId);
+    const requirementsApproved = Boolean(project.requirementsApprovedAt);
+    const activePhaseId = latest
+      ? AWAIT_TO_PHASE[latest.status] ?? null
+      : null;
+
     const phases = listPhaseSummaries(
       project.stlcStage,
       docs,
-      Boolean(project.requirementsApprovedAt),
+      requirementsApproved,
     ).map((p) => {
       const def = getStlcPhase(p.id);
-      let status = p.status;
-      if (
-        latest &&
-        AWAIT_TO_PHASE[latest.status] === p.id &&
-        status !== 'ACCEPTED'
-      ) {
-        status = 'READY_FOR_REVIEW';
-      }
+      const status = this.reconcilePhaseStatus({
+        phaseId: p.id,
+        phaseIndex: p.index,
+        baseStatus: p.status,
+        latestStatus: latest?.status,
+        requirementsApproved,
+      });
       return {
         ...p,
         status,
@@ -116,6 +150,7 @@ export class StlcService {
       stlcStage: project.stlcStage,
       latestExecutionId: latest?.id ?? null,
       latestExecutionStatus: latest?.status ?? null,
+      currentPhaseId: activePhaseId,
       phases,
     };
   }
@@ -139,21 +174,22 @@ export class StlcService {
       Boolean(project.requirementsApprovedAt),
     );
     const summary = summaries.find((s) => s.id === def.id)!;
-    let status = summary.status;
-    if (
-      latest &&
-      AWAIT_TO_PHASE[latest.status] === def.id &&
-      status !== 'ACCEPTED'
-    ) {
-      status = 'READY_FOR_REVIEW';
-    }
+    const status = this.reconcilePhaseStatus({
+      phaseId: def.id,
+      phaseIndex: def.index,
+      baseStatus: summary.status,
+      latestStatus: latest?.status,
+      requirementsApproved: Boolean(project.requirementsApprovedAt),
+    });
 
-    const canEdit = status === 'READY_FOR_REVIEW';
+    const isActiveGate = Boolean(
+      latest && AWAIT_TO_PHASE[latest.status] === def.id,
+    );
+    const canEdit = status === 'READY_FOR_REVIEW' && isActiveGate;
     const canAccept =
-      canEdit &&
-      (def.id === 'REQUIREMENTS'
-        ? !project.requirementsApprovedAt
-        : Boolean(latest && AWAIT_TO_PHASE[latest.status] === def.id));
+      def.id === 'REQUIREMENTS'
+        ? !project.requirementsApprovedAt && status === 'READY_FOR_REVIEW'
+        : isActiveGate;
 
     return {
       phaseId: def.id,

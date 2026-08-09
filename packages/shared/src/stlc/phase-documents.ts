@@ -167,7 +167,15 @@ export function listPhaseSummaries(
         status = 'READY_FOR_REVIEW';
       }
     } else if (stored?.status) {
-      status = stored.status;
+      // Stored READY_FOR_REVIEW becomes stale after the run moves on —
+      // once stage advances past this phase, treat it as accepted.
+      if (p.index < stageIdx && stored.status !== 'FAILED') {
+        status = 'ACCEPTED';
+      } else if (p.index > stageIdx) {
+        status = 'LOCKED';
+      } else {
+        status = stored.status;
+      }
     } else if (p.index < stageIdx) {
       status = 'ACCEPTED';
     } else if (p.index === stageIdx) {

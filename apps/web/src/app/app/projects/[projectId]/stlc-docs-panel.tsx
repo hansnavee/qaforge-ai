@@ -87,33 +87,39 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
         phases: PhaseSummary[];
         stlcStage: string;
         latestExecutionId: string | null;
+        latestExecutionStatus: string | null;
+        currentPhaseId: string | null;
       }>(`/api/v1/orgs/${orgId}/projects/${projectId}/stlc/phases`);
     },
     refetchInterval: 4000,
   });
 
   const phases = phasesQuery.data?.phases ?? [];
+  const currentPhaseId = phasesQuery.data?.currentPhaseId ?? null;
 
-  /** Only the current phase — never mix locked/future steps into the view. */
+  /** Only the active gate phase — ignore stale READY docs from earlier steps. */
   const currentPhase = useMemo(() => {
-    if (phaseParam) {
-      const requested = phases.find((p) => p.id === phaseParam);
-      if (requested && requested.status !== 'LOCKED') return requested;
+    if (currentPhaseId) {
+      const active = phases.find((p) => p.id === currentPhaseId);
+      if (active) return active;
     }
+    const yourTurn = phases.find((p) => p.status === 'READY_FOR_REVIEW');
+    if (yourTurn) return yourTurn;
     return (
-      phases.find((p) => p.status === 'READY_FOR_REVIEW') ??
       phases.find((p) => p.status === 'RUNNING') ??
       phases.find((p) => p.status === 'FAILED') ??
       [...phases].reverse().find((p) => p.status === 'ACCEPTED') ??
       phases[0] ??
       null
     );
-  }, [phases, phaseParam]);
+  }, [phases, currentPhaseId]);
 
   const selected = currentPhase?.id ?? 'PLANNING';
 
   useEffect(() => {
     if (!currentPhase) return;
+    // Always keep the URL on the active gate so users don't get stuck on an
+    // older step with Accept disabled.
     if (phaseParam !== currentPhase.id) {
       router.replace(`?tab=stlc&phase=${currentPhase.id}`, { scroll: false });
     }

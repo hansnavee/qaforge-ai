@@ -1069,7 +1069,7 @@ export default function ProjectWorkspacePage() {
     },
     onSuccess: async (execution) => {
       await invalidateReviewQueries();
-      void qc.invalidateQueries({ queryKey: ['stlc-phases', projectId] });
+      void queryClient.invalidateQueries({ queryKey: ['stlc-phases', projectId] });
       if (!execution?.id) return;
       // If a run is already waiting for Approve, open that execution — not a stuck INIT job.
       if (execution.status?.startsWith('AWAITING_')) {
