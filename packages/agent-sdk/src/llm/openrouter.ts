@@ -99,7 +99,88 @@ function mockStructuredSemanticsFromPrompt(prompt: string): unknown {
   }
 }
 
+function mockAiFeatureGroupsFromPrompt(prompt: string): unknown {
+  try {
+    const jsonMatch = prompt.match(/Requirements:\s*(\[[\s\S]*\])/i);
+    const rows = jsonMatch
+      ? (JSON.parse(jsonMatch[1]!) as Array<Record<string, unknown>>)
+      : [];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const shared = require('@qaforge/shared') as typeof import('@qaforge/shared');
+    const drafts = shared.groupRequirementsIntoFeatures(
+      rows.map((r) => ({
+        requirementKey: String(r.requirementKey ?? ''),
+        title: String(r.title ?? ''),
+        description: String(r.description ?? ''),
+        sourceText: (r.sourceText as string | null) ?? null,
+        sourceSection: null,
+        type: (r.type as string | null) ?? null,
+      })),
+    );
+    return {
+      features: drafts.map((d) => ({
+        name: d.name,
+        businessArea: d.businessArea,
+        businessCapability: d.businessCapability,
+        businessIntent: d.businessIntent,
+        requirementKeys: d.requirementKeys,
+      })),
+    };
+  } catch {
+    return { features: [] };
+  }
+}
+
+function mockAiRequirementIntelligenceFromPrompt(prompt: string): unknown {
+  try {
+    const jsonMatch = prompt.match(/Requirements:\s*(\[[\s\S]*\])/i);
+    const rows = jsonMatch
+      ? (JSON.parse(jsonMatch[1]!) as Array<Record<string, unknown>>)
+      : [];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const shared = require('@qaforge/shared') as typeof import('@qaforge/shared');
+    return {
+      requirements: rows.map((r) => {
+        const analysis = shared.analyzeRequirement({
+          requirementKey: String(r.requirementKey ?? ''),
+          title: String(r.title ?? ''),
+          description: String(r.description ?? ''),
+          type: String(r.type ?? 'FUNCTIONAL'),
+          sourceText: (r.sourceText as string | null) ?? null,
+        });
+        return {
+          requirementKey: r.requirementKey,
+          businessIntent: analysis.businessIntentText,
+          businessImpact: analysis.businessImpact,
+          primaryType: analysis.primaryType,
+          secondaryType: analysis.secondaryType,
+          missingInformation: [],
+          questions: analysis.questions,
+          confidence: 0.82,
+        };
+      }),
+    };
+  } catch {
+    return { requirements: [] };
+  }
+}
+
 function mockJsonForPrompt(haystack: string, prompt = ''): unknown {
+  // Step 2.6 AI review intelligence — feature grouping
+  if (
+    haystack.includes('grouping software requirements') ||
+    haystack.includes('group these requirements by business capability')
+  ) {
+    return mockAiFeatureGroupsFromPrompt(prompt);
+  }
+  // Step 2.6 AI review intelligence — per-requirement analysis
+  if (
+    haystack.includes('test readiness') ||
+    haystack.includes('analyze each requirement for test-readiness')
+  ) {
+    return mockAiRequirementIntelligenceFromPrompt(prompt);
+  }
+
   // Step 2.5 structured semantic extraction
   if (
     haystack.includes('structured semantics') ||

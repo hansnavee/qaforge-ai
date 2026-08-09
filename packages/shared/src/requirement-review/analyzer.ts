@@ -239,10 +239,23 @@ export function analyzeRequirement(
     sourceText: req.sourceText,
     structured,
   });
-  const actor = structured.actor || semantic.actor;
-  const entity = structured.object || semantic.entity;
-  const action = structured.action || semantic.action;
-  const capability = structured.capability || semantic.capability;
+  // Treat placeholder structured fields as empty so profile entities can win
+  const actor =
+    structured.actor && structured.actor !== 'unspecified'
+      ? structured.actor
+      : semantic.actor;
+  const entity =
+    structured.object && structured.object !== 'general'
+      ? structured.object
+      : semantic.entity;
+  const action =
+    structured.action && structured.action !== 'unspecified'
+      ? structured.action
+      : semantic.action;
+  const capability =
+    structured.capability && structured.capability !== 'general'
+      ? structured.capability
+      : semantic.capability;
   business.semantic = {
     actor,
     entity,

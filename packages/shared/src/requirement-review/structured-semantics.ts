@@ -300,7 +300,7 @@ export function structuredSemanticsCompatibleWithText(
 
   const actionEvidence: Record<string, RegExp> = {
     create: /\b(create|add|register|sign[\s-]?up|submit|associated)\b/,
-    update: /\b(update|edit|modify|change|increase|decrease)\b/,
+    update: /\b(update|edit|modify|change|increase|decrease|manage|management)\b/,
     delete: /\b(delete|remove)\b/,
     read: /\b(view|open|display|show|access|see)\b/,
     search: /\b(search|find)\b/,
@@ -330,6 +330,10 @@ export function structuredSemanticsCompatibleWithText(
           /\b(unique|only|associated|one account|single account)\b/.test(
             evidence,
           )) ||
+        (capability === 'product_administration' &&
+          (action === 'update' || action === 'create') &&
+          /\bproducts?\b/.test(evidence) &&
+          /\b(manage|management|administrators?|admins?)\b/.test(evidence)) ||
         ((capability === 'mobile_usability' ||
           capability === 'browser_compatibility' ||
           capability === 'application_performance' ||

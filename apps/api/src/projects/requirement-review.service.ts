@@ -20,11 +20,13 @@ import {
   groupRequirementsIntoFeatures,
   interpretAnswer,
   isTruncatedTitle,
+  mergeAiIntoAnalysis,
   titleAgreesWithBody,
   questionBucket,
   summarizeFeature,
   SEMANTIC_ANALYSIS_ENGINE,
   SEMANTIC_ANALYSIS_VERSION,
+  type AiRequirementIntelligence,
   type BusinessReviewPayload,
   type FunctionalReviewPayload,
   type RequirementRelationship,
@@ -37,6 +39,10 @@ import { AuditService } from '../common/audit.service';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
 import { extractStructuredSemanticsBatch } from './structured-semantic-extract';
+import {
+  extractAiFeatureGroups,
+  extractAiRequirementIntelligence,
+} from './ai-review-intelligence-extract';
 
 function asStringArray(v: unknown): string[] {
   return Array.isArray(v) ? v.map(String) : [];
@@ -59,6 +65,10 @@ export class RequirementReviewService {
   private readonly llm = new OpenRouterLlmClient();
   /** Per-run structured semantics (LLM + heuristic), keyed by requirementKey */
   private structuredByKey = new Map<string, StructuredRequirementSemantics>();
+  /** Per-run AI review intelligence (intent/impact/questions), keyed by requirementKey */
+  private aiIntelByKey = new Map<string, AiRequirementIntelligence>();
+  /** True when feature groups came from AI (skip ecommerce FEATURE_DEPENDENCY_EDGES) */
+  private usedAiFeatureGrouping = false;
 
   constructor(
     private readonly orgs: OrgsService,
@@ -212,16 +222,35 @@ export class RequirementReviewService {
       }
     }
 
-    // Feature grouping by business capability (Area → Feature → Requirements)
-    const featureDrafts = groupRequirementsIntoFeatures(
-      requirements.map((r) => ({
-        requirementKey: r.requirementKey,
-        title: r.title,
-        description: r.description,
-        sourceSection: r.sourceSection,
-        sourceText: r.sourceText,
-      })),
+    // Feature grouping — AI-first (domain-agnostic), heuristic fallback
+    const groupable = requirements.map((r) => ({
+      requirementKey: r.requirementKey,
+      title: r.title,
+      description: r.description,
+      sourceSection: r.sourceSection,
+      sourceText: r.sourceText,
+      type: r.type,
+    }));
+    const aiFeatureDrafts = await extractAiFeatureGroups({
+      requirements: groupable,
+      llm: this.llm,
+      logger: this.logger,
+    });
+    this.usedAiFeatureGrouping = !!aiFeatureDrafts?.length;
+    const featureDrafts =
+      aiFeatureDrafts ?? groupRequirementsIntoFeatures(groupable);
+    this.logger.log(
+      `Feature grouping: ${featureDrafts.length} features via ${
+        this.usedAiFeatureGrouping ? 'AI' : 'heuristic fallback'
+      }`,
     );
+
+    // AI requirement intelligence (intent / impact / gaps / questions)
+    this.aiIntelByKey = await extractAiRequirementIntelligence({
+      requirements: groupable,
+      llm: this.llm,
+      logger: this.logger,
+    });
 
     const featureIdByKey = new Map<string, string>();
     const featureNameToId = new Map<string, string>();
@@ -257,41 +286,44 @@ export class RequirementReviewService {
       }
     }
 
-    // Cross-feature journey relationships (DEPENDS_ON) — do not merge features
+    // Legacy ecommerce journey edges — only when heuristic feature names are used.
+    // AI grouping is domain-agnostic and must not depend on static feature catalogs.
     const keyToId = new Map(requirements.map((r) => [r.requirementKey, r.id]));
-    for (const [fromName, toName] of FEATURE_DEPENDENCY_EDGES) {
-      const fromFeatureId = featureNameToId.get(fromName);
-      const toFeatureId = featureNameToId.get(toName);
-      if (!fromFeatureId || !toFeatureId) continue;
-      const fromKeys = featureNameToReqKeys.get(fromName) ?? [];
-      const toKeys = featureNameToReqKeys.get(toName) ?? [];
-      const fromReqId = keyToId.get(fromKeys[0] ?? '');
-      const toReqId = keyToId.get(toKeys[0] ?? '');
-      await prisma.featureGroup.update({
-        where: { id: fromFeatureId },
-        data: {
-          analysis: {
-            dependsOn: [toName],
-            affects: [],
-            relatedTo: [],
-          },
-        },
-      });
-      if (fromReqId && toReqId) {
-        try {
-          await prisma.requirementRelation.create({
-            data: {
-              projectId,
-              fromRequirementId: fromReqId,
-              toRequirementId: toReqId,
-              relationType: 'DEPENDS_ON',
-              confidence: 0.9,
-              source: 'REVIEW',
-              detail: `${fromName} DEPENDS_ON ${toName}`,
+    if (!this.usedAiFeatureGrouping) {
+      for (const [fromName, toName] of FEATURE_DEPENDENCY_EDGES) {
+        const fromFeatureId = featureNameToId.get(fromName);
+        const toFeatureId = featureNameToId.get(toName);
+        if (!fromFeatureId || !toFeatureId) continue;
+        const fromKeys = featureNameToReqKeys.get(fromName) ?? [];
+        const toKeys = featureNameToReqKeys.get(toName) ?? [];
+        const fromReqId = keyToId.get(fromKeys[0] ?? '');
+        const toReqId = keyToId.get(toKeys[0] ?? '');
+        await prisma.featureGroup.update({
+          where: { id: fromFeatureId },
+          data: {
+            analysis: {
+              dependsOn: [toName],
+              affects: [],
+              relatedTo: [],
             },
-          });
-        } catch {
-          // unique — ignore
+          },
+        });
+        if (fromReqId && toReqId) {
+          try {
+            await prisma.requirementRelation.create({
+              data: {
+                projectId,
+                fromRequirementId: fromReqId,
+                toRequirementId: toReqId,
+                relationType: 'DEPENDS_ON',
+                confidence: 0.9,
+                source: 'REVIEW',
+                detail: `${fromName} DEPENDS_ON ${toName}`,
+              },
+            });
+          } catch {
+            // unique — ignore
+          }
         }
       }
     }
@@ -561,6 +593,12 @@ export class RequirementReviewService {
               (s) => s.uncertain || s.confidence < 0.85,
             ).length,
             llmEnabled: Boolean(process.env.OPENROUTER_API_KEY),
+          },
+          aiReviewIntelligence: {
+            llmEnabled: Boolean(process.env.OPENROUTER_API_KEY),
+            featureGrouping: this.usedAiFeatureGrouping ? 'ai' : 'heuristic',
+            requirementIntelligenceAccepted: this.aiIntelByKey.size,
+            requirementIntelligenceTotal: requirements.length,
           },
         },
       },
@@ -1335,7 +1373,7 @@ export class RequirementReviewService {
       (r) => r.status === 'DERIVED_FROM_USER_ANSWER',
     );
 
-    const analysis = analyzeRequirement({
+    const heuristicAnalysis = analyzeRequirement({
       requirementKey: req.requirementKey,
       title: req.title,
       description: req.description,
@@ -1349,6 +1387,11 @@ export class RequirementReviewService {
       existingQuestionTexts,
       structured: this.structuredByKey.get(req.requirementKey) ?? null,
     });
+    // AI overlay for intent / impact / gaps / questions (domain-agnostic)
+    const analysis = mergeAiIntoAnalysis(
+      heuristicAnalysis,
+      this.aiIntelByKey.get(req.requirementKey) ?? null,
+    );
 
     const projectQs = await prisma.requirementQuestion.findMany({
       where: {

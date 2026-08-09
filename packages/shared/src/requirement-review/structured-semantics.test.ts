@@ -90,14 +90,29 @@ describe('structured semantic extraction', () => {
   });
 
   it('Admin Product Management → product_catalog (not general)', () => {
-    const s = extractStructuredSemanticsHeuristic({
+    const input = {
       requirementKey: 'REQ-049',
       title: 'Admin Product Management',
       description: 'Only administrators can manage products.',
-    });
+    };
+    const s = extractStructuredSemanticsHeuristic(input);
     expect(s.object).toBe('product_catalog');
     expect(s.capability).toBe('product_administration');
     expect(s.action).not.toBe('unspecified');
+    const resolved = resolveStructuredSemantics(input, {
+      actor: 'administrator',
+      action: 'unspecified',
+      object: 'general',
+      condition: null,
+      polarity: 'REQUIRED',
+      requirementType: 'BUSINESS_RULE',
+      capability: 'general',
+      confidence: 0.99,
+      uncertain: false,
+      source: 'llm',
+    });
+    expect(resolved.object).toBe('product_catalog');
+    expect(resolved.capability).toBe('product_administration');
   });
 
   it('LLM general placeholders do not override heuristic domain entities', () => {

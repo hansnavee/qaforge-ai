@@ -9,3 +9,4 @@ export * from './normalized-requirement.js';
 export * from './duplicates.js';
 export * from './relationships.js';
 export * from './question-utils.js';
+export * from './ai-review-intelligence.js';
