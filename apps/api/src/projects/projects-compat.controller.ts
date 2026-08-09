@@ -180,6 +180,15 @@ export class ProjectsCompatController {
     );
   }
 
+  @Post(':projectId/clear-requirements')
+  async clearRequirements(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.extraction.clearAllRequirements(user, orgId, projectId);
+  }
+
   @Get(':projectId/extraction-debug')
   async extractionDebug(
     @CurrentUser() user: SessionUser,

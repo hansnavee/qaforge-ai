@@ -632,6 +632,93 @@ export class RequirementExtractionService {
     };
   }
 
+  /**
+   * Wipe extracted requirements, source docs, review artifacts, and Stage 1–10
+   * approval stamps so the project can start STLC Requirements fresh.
+   */
+  async clearAllRequirements(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+  ) {
+    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
+
+    const before = await prisma.requirement.count({ where: { projectId } });
+    const docsBefore = await prisma.requirementDocument.count({
+      where: { projectId },
+    });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.requirementRelation.deleteMany({ where: { projectId } });
+      await tx.requirementConflict.deleteMany({ where: { projectId } });
+      await tx.requirementQuestion.deleteMany({ where: { projectId } });
+      await tx.requirement.deleteMany({ where: { projectId } });
+      await tx.featureGroup.deleteMany({ where: { projectId } });
+      await tx.requirementDocument.deleteMany({ where: { projectId } });
+      await tx.projectRequirementSnapshot.deleteMany({ where: { projectId } });
+      await tx.clarificationRound.deleteMany({ where: { projectId } });
+      await tx.project.update({
+        where: { id: projectId },
+        data: {
+          status: 'DRAFT',
+          analysisStatus: 'NOT_STARTED',
+          analysisStartedAt: null,
+          analysisCompletedAt: null,
+          analysisError: null,
+          analysisId: null,
+          analysisVersion: null,
+          analysisEngine: null,
+          analysisMeta: null as never,
+          staleRequirementCount: 0,
+          requirementText: null,
+          requirementsApprovedAt: null,
+          requirementsApprovedBy: null,
+          testPlanApprovedAt: null,
+          testPlanApprovedBy: null,
+          testDesignApprovedAt: null,
+          testDesignApprovedBy: null,
+          environmentApprovedAt: null,
+          environmentApprovedBy: null,
+          testDataApprovedAt: null,
+          testDataApprovedBy: null,
+          testExecutionApprovedAt: null,
+          testExecutionApprovedBy: null,
+          defectsApprovedAt: null,
+          defectsApprovedBy: null,
+          regressionApprovedAt: null,
+          regressionApprovedBy: null,
+          automationApprovedAt: null,
+          automationApprovedBy: null,
+          reportApprovedAt: null,
+          reportApprovedBy: null,
+          qaSignedOffAt: null,
+          qaSignedOffBy: null,
+          stlcPhaseDocs: null as never,
+          stlcStage: 'REQUIREMENTS',
+        },
+      });
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'requirements.clear',
+      resource: 'project',
+      resourceId: projectId,
+      metadata: { requirementsRemoved: before, documentsRemoved: docsBefore },
+    });
+
+    return {
+      ok: true,
+      removed: {
+        requirements: before,
+        documents: docsBefore,
+      },
+      stlcStage: 'REQUIREMENTS',
+      analysisStatus: 'NOT_STARTED',
+    };
+  }
+
   private async markProjectAnalysisStale(projectId: string) {
     const staleCount = await prisma.requirement.count({
       where: { projectId, analysisStale: true },

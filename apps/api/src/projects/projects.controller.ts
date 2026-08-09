@@ -145,6 +145,15 @@ export class ProjectsController {
     );
   }
 
+  @Post(':projectId/clear-requirements')
+  clearRequirements(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.extraction.clearAllRequirements(user, orgId, projectId);
+  }
+
   @Get(':projectId/extracted-requirements')
   listExtracted(
     @CurrentUser() user: SessionUser,
