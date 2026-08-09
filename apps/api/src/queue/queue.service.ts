@@ -94,14 +94,22 @@ export class QueueService implements OnModuleInit {
     },
   ) {
     if (!this.pub) return;
+    const body = {
+      executionId,
+      skip: Boolean(payload.skip),
+      answers: payload.answers ?? {},
+      at: new Date().toISOString(),
+    };
+    // Durable payload so skip/answers are not lost before the worker subscribes
+    await this.pub.set(
+      `execution:${executionId}:clarify-flag`,
+      JSON.stringify(body),
+      'EX',
+      60 * 60,
+    );
     await this.pub.publish(
       `execution:${executionId}:clarify`,
-      JSON.stringify({
-        executionId,
-        skip: Boolean(payload.skip),
-        answers: payload.answers ?? {},
-        at: new Date().toISOString(),
-      }),
+      JSON.stringify(body),
     );
   }
 

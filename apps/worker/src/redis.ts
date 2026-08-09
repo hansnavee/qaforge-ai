@@ -118,24 +118,75 @@ export async function waitForContinueSignal(
   });
 }
 
+function parseClarifyPayload(
+  executionId: string,
+  message: string,
+): ClarifySignalPayload {
+  try {
+    const parsed = JSON.parse(message) as ClarifySignalPayload;
+    return {
+      executionId,
+      skip: Boolean(parsed.skip),
+      answers:
+        parsed.answers && typeof parsed.answers === 'object'
+          ? parsed.answers
+          : {},
+      at: parsed.at,
+    };
+  } catch {
+    return { executionId, skip: true, answers: {} };
+  }
+}
+
 export async function waitForClarifySignal(
   executionId: string,
   timeoutMs = 30 * 60 * 1000,
 ): Promise<ClarifySignalPayload> {
+  const redis = getRedis();
+  const flagKey = `execution:${executionId}:clarify-flag`;
+
+  const preexisting = await redis.getdel(flagKey);
+  if (preexisting) return parseClarifyPayload(executionId, preexisting);
+
   const sub = getSubRedis().duplicate();
   const channel = clarifyChannel(executionId);
 
   return new Promise<ClarifySignalPayload>((resolve, reject) => {
+    let settled = false;
+    const finish = (payload: ClarifySignalPayload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      void redis.del(flagKey).catch(() => undefined);
+      void sub.unsubscribe(channel).finally(() => {
+        sub.disconnect();
+        resolve(payload);
+      });
+    };
+
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
       void sub.unsubscribe(channel).finally(() => {
         sub.disconnect();
         reject(new Error(`Timed out waiting for clarification on ${channel}`));
       });
     }, timeoutMs);
 
+    const poll = setInterval(() => {
+      void redis.getdel(flagKey).then((v) => {
+        if (v) finish(parseClarifyPayload(executionId, v));
+      });
+    }, 1000);
+
     void sub.subscribe(channel, (err: Error | null | undefined) => {
       if (err) {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
+        clearInterval(poll);
         sub.disconnect();
         reject(err);
       }
@@ -143,30 +194,7 @@ export async function waitForClarifySignal(
 
     sub.on('message', (ch: string, message: string) => {
       if (ch !== channel) return;
-      clearTimeout(timer);
-      let payload: ClarifySignalPayload = {
-        executionId,
-        skip: false,
-        answers: {},
-      };
-      try {
-        const parsed = JSON.parse(message) as ClarifySignalPayload;
-        payload = {
-          executionId,
-          skip: Boolean(parsed.skip),
-          answers:
-            parsed.answers && typeof parsed.answers === 'object'
-              ? parsed.answers
-              : {},
-          at: parsed.at,
-        };
-      } catch {
-        payload = { executionId, skip: true, answers: {} };
-      }
-      void sub.unsubscribe(channel).finally(() => {
-        sub.disconnect();
-        resolve(payload);
-      });
+      finish(parseClarifyPayload(executionId, message));
     });
   });
 }
