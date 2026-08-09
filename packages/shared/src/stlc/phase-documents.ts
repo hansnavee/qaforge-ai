@@ -144,10 +144,16 @@ export function listPhaseSummaries(
   approvedAt?: string | null;
 }> {
   const stageUpper = (stage ?? 'REQUIREMENTS').toUpperCase();
-  const stageIdx =
+  let stageIdx =
     stageUpper === 'DONE'
       ? 99
       : (STLC_PHASES.find((p) => p.id === stageUpper)?.index ?? 1);
+
+  // Requirements Accept unlocks Planning even if stage pointer lagged.
+  if (requirementsApproved && stageUpper === 'REQUIREMENTS') {
+    stageIdx =
+      STLC_PHASES.find((p) => p.id === 'PLANNING')?.index ?? stageIdx;
+  }
 
   return STLC_PHASES.map((p) => {
     const stored = docs?.[p.id];
@@ -165,6 +171,7 @@ export function listPhaseSummaries(
     } else if (p.index < stageIdx) {
       status = 'ACCEPTED';
     } else if (p.index === stageIdx) {
+      // Current phase unlocked — worker may still be preparing docs
       status = 'RUNNING';
     }
     return {

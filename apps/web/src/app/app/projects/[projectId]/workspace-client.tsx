@@ -474,18 +474,25 @@ function buildWorkflow(opts: {
     },
   };
 
+  // After requirements Accept, Planning is the next active stage even if
+  // stlcStage still says REQUIREMENTS (older API rows).
+  let effectiveIdx = stageIdx;
+  if (opts.requirementsApproved && stage === 'REQUIREMENTS') {
+    effectiveIdx = STLC_WORKFLOW_ORDER.indexOf('PLANNING');
+  }
+
   return STLC_WORKFLOW_ORDER.map((id, index) => {
     const meta = labels[id] ?? { label: id, agent: 'AI Agent' };
     let state: WorkflowState = 'locked';
     if (id === 'REQUIREMENTS') {
       state = opts.requirementsApproved
         ? 'done'
-        : index <= stageIdx
+        : index <= effectiveIdx
           ? 'active'
           : 'locked';
-    } else if (index < stageIdx || stage === 'DONE') {
+    } else if (index < effectiveIdx || stage === 'DONE') {
       state = 'done';
-    } else if (index === stageIdx) {
+    } else if (index === effectiveIdx) {
       state = 'active';
     }
     return { id: id.toLowerCase(), label: meta.label, state, agent: meta.agent };

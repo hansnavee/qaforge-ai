@@ -861,8 +861,8 @@ export class RequirementReviewService {
       data: {
         requirementsApprovedAt: approvedAt,
         requirementsApprovedBy: user.id,
-        // Stay on REQUIREMENTS until planning is started; approval unlocks next stage
-        stlcStage: 'REQUIREMENTS',
+        // Unlock Test Planning in workflow / STLC Docs after Stage 1 Accept
+        stlcStage: 'PLANNING',
         status: 'REQUIREMENTS_APPROVED',
       },
     });
