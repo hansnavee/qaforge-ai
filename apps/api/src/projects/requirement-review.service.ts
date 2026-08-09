@@ -342,24 +342,32 @@ export class RequirementReviewService {
       );
       const related = rels.find(
         (r) =>
-          r.relationship === 'RELATED' || r.relationship === 'PRECEDES',
+          r.relationship === 'RELATED' ||
+          r.relationship === 'SEQUENTIAL' ||
+          r.relationship === 'PRECEDES' ||
+          r.relationship === 'BUSINESS_RULE_CONSTRAINT' ||
+          r.relationship === 'CONFLICT' ||
+          r.relationship === 'CONFLICTS_WITH' ||
+          r.relationship === 'DEPENDS_ON',
+      );
+      // Persist only positive relationships (missing edge = independent)
+      const positiveRels = rels.filter(
+        (r) => r.relationship !== 'NOT_DUPLICATE',
       );
 
       await prisma.requirement.update({
         where: { id: reqId },
         data: {
-          relationships: rels as object[],
+          relationships: positiveRels as object[],
           possibleDuplicateOf: dupLike?.targetRequirementId ?? null,
           duplicateSimilarity: null,
           duplicateKind: dupLike
             ? dupLike.relationship
             : related
-              ? 'RELATED'
-              : rels.some((r) => r.relationship === 'NOT_DUPLICATE')
-                ? 'NOT_DUPLICATE'
-                : null,
+              ? related.relationship
+              : null,
           duplicateReason:
-            dupLike?.reason ?? related?.reason ?? rels[0]?.reason ?? null,
+            dupLike?.reason ?? related?.reason ?? positiveRels[0]?.reason ?? null,
         },
       });
     }

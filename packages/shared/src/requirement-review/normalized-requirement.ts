@@ -35,6 +35,8 @@ export type NormalizedRequirement = {
     | 'Ready for test design';
   /** Flow step index when known (lower precedes higher). */
   flowStep: number | null;
+  /** True when this requirement primarily expresses a constraint / BR. */
+  isBusinessRule: boolean;
 };
 
 export type NormalizeInput = SemanticComparable & {
@@ -49,8 +51,10 @@ export const BUSINESS_FLOW_STEPS: string[] = [
   'user_registration',
   'user_login',
   'password_reset',
+  'otp_delivery',
   'product_search',
   'product_search_results',
+  'product_filtering',
   'product_details',
   'product_discovery',
   'shopping_cart',
@@ -58,9 +62,12 @@ export const BUSINESS_FLOW_STEPS: string[] = [
   'payment',
   'order_confirmation',
   'order_history',
+  'order_details',
   'order_access',
+  'order_management',
   'product_administration',
   'inventory',
+  'inventory_update',
 ];
 
 function mapType(t?: string | null): NormalizedRequirement['type'] {
@@ -88,6 +95,17 @@ function mapStatus(
   return 'Review recommended';
 }
 
+function detectBusinessRule(
+  text: string,
+  type: NormalizedRequirement['type'],
+): boolean {
+  if (type === 'Business Rule') return true;
+  const t = text.toLowerCase();
+  return /\b(must|cannot|can only|only users?|only administrators?|must be unique|must not|should not|out of stock.*cannot|cannot be purchased|expire|not be allowed|forbidden)\b/.test(
+    t,
+  );
+}
+
 function refineSubFeature(
   text: string,
   capability: string,
@@ -104,9 +122,12 @@ function refineSubFeature(
   if (/search result/.test(t) || /from search/.test(t)) return 'search_results';
   if (/search bar|\bsearch\b/.test(t) && !/result|detail|select/.test(t))
     return 'search';
+  // Product details only when the viewed entity is a product
   if (
     !isAdmin &&
-    /product detail|view (its )?details|view product/.test(t)
+    entity === 'product' &&
+    (/product detail|view product|product page/.test(t) ||
+      (/view (its )?details/.test(t) && /\bproduct/.test(t)))
   ) {
     return 'product_details';
   }
@@ -122,6 +143,10 @@ function refineSubFeature(
   return null;
 }
 
+/**
+ * Entity-first capability refinement.
+ * Never use bare "view details" to force product_details.
+ */
 function refineCapability(
   text: string,
   profileCapability: string,
@@ -130,10 +155,29 @@ function refineCapability(
 ): string {
   const t = text.toLowerCase();
   const isAdmin = /\b(administrators?|admins?|managers?)\b/.test(t);
-  if (entity === 'product_catalog' || (isAdmin && /product/.test(t) && !/cart/.test(t))) {
+
+  // Entity-first: orders before product phrasing
+  if (entity === 'order') {
+    if (/history|past orders|previous orders|my orders/.test(t))
+      return 'order_history';
+    if (/access|another user|own orders?/.test(t)) return 'order_access';
+    return 'order_details';
+  }
+  if (entity === 'order_confirmation') return 'order_confirmation';
+  if (entity === 'cart_item' || action === 'add_to') return 'shopping_cart';
+  if (entity === 'checkout') return 'checkout';
+  if (entity === 'payment') return 'payment';
+  if (entity === 'inventory') {
+    if (/update|edit|modify|change/.test(t) && isAdmin) return 'inventory_update';
+    return 'inventory';
+  }
+  if (
+    entity === 'product_catalog' ||
+    (isAdmin && /product/.test(t) && !/cart/.test(t) && !/inventory|stock/.test(t))
+  ) {
     return 'product_administration';
   }
-  if (entity === 'inventory') return 'inventory';
+
   if (/search result|select a product from search|from search results/.test(t)) {
     return 'product_search_results';
   }
@@ -157,28 +201,36 @@ function refineCapability(
   ) {
     return 'password_reset';
   }
-  // OTP delivery only — do not remap order-confirmation email notify actions
   if (/\botp\b/.test(t) && /sent|send|email|deliver|notify/.test(t)) {
     return 'otp_delivery';
+  }
+  if (/\b(register|registration|sign up|create an account)\b/.test(t)) {
+    return 'user_registration';
+  }
+  if (/\b(login|sign in)\b/.test(t) && !/\bregister/.test(t)) {
+    return 'user_login';
   }
   if (
     /\b(access_control|administrative functionality|administrator permissions)\b/.test(
       t,
     ) ||
-    profileCapability === 'access_control'
+    profileCapability === 'access_control' ||
+    (/\bnormal users?\b/.test(t) && /administrator/.test(t))
   ) {
     return 'access_control';
   }
+  // Product details — require product entity (or explicit product wording)
   if (
     !isAdmin &&
-    (/product detail|view (its )?details|view product/.test(t) ||
-      entity === 'product')
+    (entity === 'product' || /\bproduct\b/.test(t)) &&
+    (/product detail|view product|product page/.test(t) ||
+      (/view (its )?details/.test(t) && /\bproduct\b/.test(t)))
   ) {
-    if (/detail|view/.test(t)) return 'product_details';
+    return 'product_details';
   }
-  if (entity === 'cart_item' || action === 'add_to') return 'shopping_cart';
-  if (entity === 'order_confirmation') return 'order_confirmation';
-  if (entity === 'order') return 'order_management';
+  if (profileCapability === 'order_details' || profileCapability === 'order_history') {
+    return profileCapability;
+  }
   return profileCapability;
 }
 
@@ -188,15 +240,17 @@ function flowStepFor(capability: string, subFeature: string | null): number | nu
     const idx = BUSINESS_FLOW_STEPS.indexOf(key);
     if (idx >= 0) return idx;
   }
-  // fuzzy: product_search_results after product_search
   if (capability.includes('search_results')) {
     return BUSINESS_FLOW_STEPS.indexOf('product_search_results');
   }
-  if (capability.includes('search')) {
+  if (capability.includes('search') && !capability.includes('order')) {
     return BUSINESS_FLOW_STEPS.indexOf('product_search');
   }
-  if (capability.includes('detail')) {
+  if (capability === 'product_details') {
     return BUSINESS_FLOW_STEPS.indexOf('product_details');
+  }
+  if (capability.includes('order_details')) {
+    return BUSINESS_FLOW_STEPS.indexOf('order_details');
   }
   if (capability.includes('cart')) {
     return BUSINESS_FLOW_STEPS.indexOf('shopping_cart');
@@ -210,6 +264,7 @@ function flowStepFor(capability: string, subFeature: string | null): number | nu
 export function normalizeRequirement(input: NormalizeInput): NormalizedRequirement {
   const profile = buildSemanticProfile(input);
   const text = `${input.title}\n${input.description}\n${input.sourceText ?? ''}`;
+  const type = mapType(input.type);
   const capability = refineCapability(
     text,
     profile.capability,
@@ -243,10 +298,11 @@ export function normalizeRequirement(input: NormalizeInput): NormalizedRequireme
     crudOp: profile.crudOp,
     preconditions: profile.preconditions,
     businessRules: input.businessRules ?? [],
-    type: mapType(input.type),
+    type,
     businessImpact: mapImpact(input.businessImpact),
     reviewStatus: mapStatus(input.reviewStatus),
     flowStep: flowStepFor(capability, subFeature),
+    isBusinessRule: detectBusinessRule(text, type),
   };
 }
 
@@ -265,12 +321,17 @@ export function sameCapability(
   return a.capability === b.capability;
 }
 
+/** True only when both share a coherent business workflow family. */
 export function capabilityFamily(
   a: NormalizedRequirement,
   b: NormalizedRequirement,
 ): boolean {
   if (a.capability === b.capability) return true;
-  const admin = new Set(['product_administration', 'inventory']);
+  const admin = new Set([
+    'product_administration',
+    'inventory',
+    'inventory_update',
+  ]);
   if (admin.has(a.capability) && admin.has(b.capability)) return true;
   const discovery = new Set([
     'product_search',
@@ -280,11 +341,41 @@ export function capabilityFamily(
     'product_discovery',
   ]);
   if (discovery.has(a.capability) && discovery.has(b.capability)) return true;
-  const auth = new Set(['password_reset', 'otp_delivery', 'user_login']);
+  const auth = new Set([
+    'user_registration',
+    'user_login',
+    'password_reset',
+    'otp_delivery',
+  ]);
   if (auth.has(a.capability) && auth.has(b.capability)) return true;
   if (a.capability === 'access_control' && b.capability === 'access_control')
     return true;
-  const confirm = new Set(['order_confirmation']);
-  if (confirm.has(a.capability) && confirm.has(b.capability)) return true;
+  const purchase = new Set([
+    'shopping_cart',
+    'checkout',
+    'payment',
+    'order_confirmation',
+  ]);
+  if (purchase.has(a.capability) && purchase.has(b.capability)) return true;
+  const order = new Set([
+    'order_history',
+    'order_details',
+    'order_access',
+    'order_management',
+    'order_confirmation',
+  ]);
+  if (order.has(a.capability) && order.has(b.capability)) return true;
   return false;
+}
+
+/** Adjacent workflow steps eligible for SEQUENTIAL (not merely same feature). */
+export function areSequentialCapabilities(
+  a: NormalizedRequirement,
+  b: NormalizedRequirement,
+): boolean {
+  if (a.flowStep == null || b.flowStep == null) return false;
+  if (a.flowStep === b.flowStep) return false;
+  if (!capabilityFamily(a, b)) return false;
+  // Must be nearby in the same family chain (not just same area)
+  return Math.abs(a.flowStep - b.flowStep) <= 3;
 }

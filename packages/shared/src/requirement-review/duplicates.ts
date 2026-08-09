@@ -1,7 +1,7 @@
 /**
- * Semantic duplicate / related detection (Piece 2.2).
- * Works on NormalizedRequirement — never uses similarity as the primary rule.
- * Never deletes or merges requirements.
+ * Semantic relationship detection (Step 2 / Piece 2.4).
+ * Evidence-based — never uses similarity as the primary rule.
+ * Default = INDEPENDENT (no edge). Never persist NOT_DUPLICATE spam.
  */
 
 import type {
@@ -10,11 +10,13 @@ import type {
   RelationType,
   RequirementRelationship,
 } from './types.js';
+import { PERSISTABLE_RELATIONSHIPS } from './types.js';
 import {
   buildSemanticProfile,
   type SemanticComparable,
 } from './semantic-profile.js';
 import {
+  areSequentialCapabilities,
   capabilityFamily,
   normalizeRequirement,
   sameActor,
@@ -51,6 +53,17 @@ function tokenOverlap(a: string, b: string): number {
     'that',
     'this',
     'able',
+    'user',
+    'users',
+    'product',
+    'order',
+    'system',
+    'page',
+    'data',
+    'information',
+    'application',
+    'admin',
+    'administrator',
   ]);
   const tok = (s: string) =>
     new Set(
@@ -76,8 +89,15 @@ export function jaccardSimilarity(a: string, b: string): number {
 export type SemanticRelationDraft = {
   requirementKeyA: string;
   requirementKeyB: string;
-  kind: DuplicateKind | 'PRECEDES' | 'DEPENDS_ON' | 'NOT_RELATED';
-  relationType: RelationType | 'PRECEDES';
+  kind:
+    | DuplicateKind
+    | 'SEQUENTIAL'
+    | 'BUSINESS_RULE_CONSTRAINT'
+    | 'CONFLICT'
+    | 'PRECEDES'
+    | 'DEPENDS_ON'
+    | 'NOT_RELATED';
+  relationType: RelationType | 'PRECEDES' | 'SEQUENTIAL' | 'BUSINESS_RULE_CONSTRAINT';
   reason: string;
   recommendation: string;
   /** Internal only — never primary UI signal */
@@ -114,23 +134,6 @@ function pairResult(
   };
 }
 
-function differentBusinessMeaning(
-  a: NormalizedRequirement,
-  b: NormalizedRequirement,
-): boolean {
-  if (!sameActor(a, b) && (!sameEntity(a, b) || a.capability !== b.capability)) {
-    return true;
-  }
-  if (a.businessOutcome !== b.businessOutcome && a.capability !== b.capability) {
-    return true;
-  }
-  // Cart vs catalog is always different meaning
-  const entities = new Set([a.entity[0], b.entity[0]]);
-  if (entities.has('cart_item') && entities.has('product_catalog')) return true;
-  if (entities.has('cart_item') && entities.has('product')) return true;
-  return false;
-}
-
 function opposingPolarity(a: NormalizedRequirement, b: NormalizedRequirement): boolean {
   const ta = `${a.title}\n${a.originalText}`.toLowerCase();
   const tb = `${b.title}\n${b.originalText}`.toLowerCase();
@@ -153,7 +156,6 @@ function substantiallySameBehavior(
   if (!sameCapability(a, b)) return false;
   if (a.businessOutcome !== b.businessOutcome) return false;
   if (opposingPolarity(a, b)) return false;
-  // Channel/context must agree (including unspecified vs specified)
   const chA = a.channel ?? null;
   const chB = b.channel ?? null;
   if (chA !== chB) return false;
@@ -167,7 +169,6 @@ function substantiallySameBehavior(
   ) {
     return false;
   }
-  // Prefer not to hard-duplicate when confirmation channel is unknown on both
   if (
     a.capability === 'order_confirmation' &&
     !a.channel &&
@@ -180,43 +181,165 @@ function substantiallySameBehavior(
   return true;
 }
 
+function isAdminInventoryCap(c: string): boolean {
+  return (
+    c === 'product_administration' ||
+    c === 'inventory' ||
+    c === 'inventory_update'
+  );
+}
+
+function isPurchaseConstrainedCap(c: string): boolean {
+  return (
+    c === 'shopping_cart' ||
+    c === 'checkout' ||
+    c === 'payment' ||
+    c === 'product_details'
+  );
+}
+
+function isInventoryConstraint(n: NormalizedRequirement): boolean {
+  return (
+    n.isBusinessRule &&
+    (n.capability === 'inventory' ||
+      n.entity[0] === 'inventory' ||
+      /unavailable_purchase_blocked/.test(n.businessOutcome) ||
+      /out of stock|cannot be purchased/.test(n.originalText.toLowerCase()))
+  );
+}
+
+function isUniquenessRule(n: NormalizedRequirement): boolean {
+  const t = n.originalText.toLowerCase();
+  return (
+    (/unique/.test(t) && /email/.test(t)) ||
+    (/email/.test(t) && /only.*(one|single).*account|one account/.test(t))
+  );
+}
+
+function isAccessControlPair(
+  a: NormalizedRequirement,
+  b: NormalizedRequirement,
+): boolean {
+  const caps = new Set([a.capability, b.capability]);
+  if (caps.has('access_control')) return true;
+  const ta = a.originalText.toLowerCase();
+  const tb = b.originalText.toLowerCase();
+  const adminAccess =
+    /administrative functionality|administrator permissions|admin(istrator)? access/.test(
+      ta,
+    ) ||
+    /administrative functionality|administrator permissions|admin(istrator)? access/.test(
+      tb,
+    );
+  return adminAccess && opposingPolarity(a, b);
+}
+
+/**
+ * Evidence-based classifier.
+ * Priority: DUPLICATE → BR_CONSTRAINT → CONFLICT → SEQUENTIAL → RELATED → null
+ */
 function classifyNormalized(
   a: NormalizedRequirement,
   b: NormalizedRequirement,
 ): SemanticRelationDraft | null {
-  // 0) Opposing allow/deny rules are never duplicates
-  if (opposingPolarity(a, b)) {
+  // 1) True DUPLICATE
+  if (substantiallySameBehavior(a, b)) {
     return pairResult(a, b, {
-      kind: 'NOT_DUPLICATE',
-      relationType: 'RELATED_TO',
+      kind: 'DUPLICATE',
+      relationType: 'DUPLICATE_OF',
       reason:
-        'Opposite business polarity (allow vs deny / should vs should not). Related access-control concerns, not the same requirement.',
+        'Actor, entity, action, capability, business outcome, and context align — substantially the same business behavior.',
+      showConfidence: true,
     });
   }
 
-  // 0b) Password reset vs OTP delivery — related auth steps, not duplicates
+  // Near-duplicate uniqueness statements (email unique ↔ one account)
+  if (isUniquenessRule(a) && isUniquenessRule(b)) {
+    return pairResult(a, b, {
+      kind: 'DUPLICATE',
+      relationType: 'DUPLICATE_OF',
+      reason:
+        'Both express the same uniqueness constraint: one email address per user account.',
+      showConfidence: true,
+    });
+  }
+
+  // 2) BUSINESS_RULE_CONSTRAINT
+  if (isInventoryConstraint(a) && isPurchaseConstrainedCap(b.capability)) {
+    return pairResult(a, b, {
+      kind: 'BUSINESS_RULE_CONSTRAINT',
+      relationType: 'BUSINESS_RULE_CONSTRAINT',
+      reason: `${a.title} constrains purchase behavior in ${b.title}.`,
+    });
+  }
+  if (isInventoryConstraint(b) && isPurchaseConstrainedCap(a.capability)) {
+    return pairResult(b, a, {
+      kind: 'BUSINESS_RULE_CONSTRAINT',
+      relationType: 'BUSINESS_RULE_CONSTRAINT',
+      reason: `${b.title} constrains purchase behavior in ${a.title}.`,
+    });
+  }
   if (
-    (a.capability === 'password_reset' && b.capability === 'otp_delivery') ||
-    (b.capability === 'password_reset' && a.capability === 'otp_delivery') ||
-    (a.capability === 'password_reset' &&
-      b.capability === 'password_reset' &&
-      a.action[0] !== b.action[0])
+    (isUniquenessRule(a) && b.capability === 'user_registration') ||
+    (isUniquenessRule(b) && a.capability === 'user_registration')
   ) {
+    const rule = isUniquenessRule(a) ? a : b;
+    const target = isUniquenessRule(a) ? b : a;
+    return pairResult(rule, target, {
+      kind: 'BUSINESS_RULE_CONSTRAINT',
+      relationType: 'BUSINESS_RULE_CONSTRAINT',
+      reason: `${rule.title} constrains ${target.title} (account identity).`,
+    });
+  }
+  // Payment failure BR constraining order creation / confirmation
+  {
+    const pay = a.capability === 'payment' ? a : b.capability === 'payment' ? b : null;
+    const other = pay === a ? b : pay === b ? a : null;
+    if (
+      pay &&
+      other &&
+      /fail|not create|must not create/.test(pay.originalText.toLowerCase()) &&
+      (other.capability === 'order_confirmation' ||
+        /order (creation|creat|placed|place)|must not create.*order|order must not/.test(
+          other.originalText.toLowerCase(),
+        ))
+    ) {
+      return pairResult(pay, other, {
+        kind: 'BUSINESS_RULE_CONSTRAINT',
+        relationType: 'BUSINESS_RULE_CONSTRAINT',
+        reason: `${pay.title} constrains order creation behavior in ${other.title}.`,
+      });
+    }
+  }
+
+  // 3) CONFLICT — opposing polarity on same access-control / capability concern
+  if (
+    opposingPolarity(a, b) &&
+    (sameCapability(a, b) || isAccessControlPair(a, b))
+  ) {
+    if (isAccessControlPair(a, b)) {
+      // Complementary access rules — RELATED, not spam CONFLICT
+      return pairResult(a, b, {
+        kind: 'RELATED',
+        relationType: 'RELATED_TO',
+        reason:
+          'Complementary access-control rules (admin allow vs non-admin deny) for the same administrative boundary.',
+      });
+    }
     return pairResult(a, b, {
-      kind: 'RELATED',
-      relationType: 'RELATED_TO',
+      kind: 'CONFLICT',
+      relationType: 'CONFLICTS_WITH',
       reason:
-        'Related authentication/password-recovery steps (for example reset vs OTP delivery), not the same business behavior.',
+        'Opposite business polarity on the same capability — review for conflict.',
     });
   }
 
-  // 0c) Search vs filter — related discovery, not duplicates
+  // 4) RELATED peers that must NOT be misclassified as SEQUENTIAL
+  // 4a) Search vs filter — parallel discovery tools
   if (
     (a.capability === 'product_search' &&
       b.capability === 'product_filtering') ||
-    (b.capability === 'product_search' && a.capability === 'product_filtering') ||
-    (a.action[0] === 'search' && b.action[0] === 'filter') ||
-    (a.action[0] === 'filter' && b.action[0] === 'search')
+    (b.capability === 'product_search' && a.capability === 'product_filtering')
   ) {
     return pairResult(a, b, {
       kind: 'RELATED',
@@ -226,56 +349,118 @@ function classifyNormalized(
     });
   }
 
-  // 1) Clear NOT_DUPLICATE — different business meaning (do not flag as possible dup)
-  if (differentBusinessMeaning(a, b)) {
-    // Still emit NOT_DUPLICATE when actors/capabilities clearly clash (for tests/API)
-    if (
-      (!sameActor(a, b) && a.capability !== b.capability) ||
-      (a.entity[0] === 'cart_item' && b.entity[0] === 'product_catalog') ||
-      (b.entity[0] === 'cart_item' && a.entity[0] === 'product_catalog')
-    ) {
-      return pairResult(a, b, {
-        kind: 'NOT_DUPLICATE',
-        relationType: 'RELATED_TO',
-        reason: [
-          !sameActor(a, b)
-            ? `Different actor: ${a.actor[0]} vs ${b.actor[0]}`
-            : null,
-          a.entity[0] !== b.entity[0]
-            ? `Different entity: ${a.entity[0]} vs ${b.entity[0]}`
-            : null,
-          a.action[0] !== b.action[0]
-            ? `Different action: ${a.action[0]} vs ${b.action[0]}`
-            : null,
-          a.capability !== b.capability
-            ? `Different capability: ${a.capability} vs ${b.capability}`
-            : null,
-          a.businessOutcome !== b.businessOutcome
-            ? `Different business outcome: ${a.businessOutcome} vs ${b.businessOutcome}`
-            : null,
-        ]
-          .filter(Boolean)
-          .join('\n'),
+  // 4b) Password reset ↔ OTP delivery — related recovery steps
+  if (
+    (a.capability === 'password_reset' && b.capability === 'otp_delivery') ||
+    (b.capability === 'password_reset' && a.capability === 'otp_delivery')
+  ) {
+    return pairResult(a, b, {
+      kind: 'RELATED',
+      relationType: 'RELATED_TO',
+      reason:
+        'Related authentication/password-recovery steps (reset vs OTP delivery), not the same business behavior.',
+    });
+  }
+
+  // 5) SEQUENTIAL — only explicit workflow adjacency (not same-feature alone)
+  // Registration → login
+  if (
+    (a.capability === 'user_registration' && b.capability === 'user_login') ||
+    (b.capability === 'user_registration' && a.capability === 'user_login')
+  ) {
+    const from = a.capability === 'user_registration' ? a : b;
+    const to = a.capability === 'user_registration' ? b : a;
+    return pairResult(from, to, {
+      kind: 'SEQUENTIAL',
+      relationType: 'SEQUENTIAL',
+      reason: 'Registration precedes login in the account lifecycle.',
+    });
+  }
+
+  // Discovery: search → results → details
+  const discoveryChain = [
+    'product_search',
+    'product_search_results',
+    'product_details',
+  ] as const;
+  {
+    const ia = discoveryChain.indexOf(
+      a.capability as (typeof discoveryChain)[number],
+    );
+    const ib = discoveryChain.indexOf(
+      b.capability as (typeof discoveryChain)[number],
+    );
+    if (ia >= 0 && ib >= 0 && ia !== ib) {
+      const [from, to] = ia < ib ? [a, b] : [b, a];
+      return pairResult(from, to, {
+        kind: 'SEQUENTIAL',
+        relationType: 'SEQUENTIAL',
+        reason: `${from.title} precedes ${to.title} in product discovery.`,
       });
     }
   }
 
-  // 2) Business flow — sequential capabilities → RELATED + PRECEDES
+  // Purchase chain: cart → checkout → payment → confirmation
+  const purchaseChain = [
+    'shopping_cart',
+    'checkout',
+    'payment',
+    'order_confirmation',
+  ] as const;
+  {
+    const ia = purchaseChain.indexOf(
+      a.capability as (typeof purchaseChain)[number],
+    );
+    const ib = purchaseChain.indexOf(
+      b.capability as (typeof purchaseChain)[number],
+    );
+    if (ia >= 0 && ib >= 0 && ia !== ib && Math.abs(ia - ib) <= 2) {
+      const [from, to] = ia < ib ? [a, b] : [b, a];
+      return pairResult(from, to, {
+        kind: 'SEQUENTIAL',
+        relationType: 'SEQUENTIAL',
+        reason: `${from.title} precedes ${to.title} in the purchase workflow.`,
+      });
+    }
+  }
+
+  // Order history → open/view order details
   if (
-    a.flowStep != null &&
-    b.flowStep != null &&
-    a.flowStep !== b.flowStep &&
-    capabilityFamily(a, b)
+    (a.capability === 'order_history' && b.capability === 'order_details') ||
+    (b.capability === 'order_history' && a.capability === 'order_details')
   ) {
-    const [from, to] = a.flowStep < b.flowStep ? [a, b] : [b, a];
+    const from = a.capability === 'order_history' ? a : b;
+    const to = a.capability === 'order_history' ? b : a;
     return pairResult(from, to, {
-      kind: 'RELATED',
-      relationType: 'PRECEDES',
-      reason: `${from.title} precedes ${to.title} in the same business flow (${from.capability} → ${to.capability}). Sequential requirements are related, not duplicates.`,
+      kind: 'SEQUENTIAL',
+      relationType: 'SEQUENTIAL',
+      reason: 'Order history precedes opening an order to view details.',
     });
   }
 
-  // 3) Same confirmation capability, different channel/sub-feature → RELATED
+  // Generic flowStep sequential only for remaining same-family adjacent pairs
+  // (excludes filter/OTP which were handled as RELATED above)
+  if (areSequentialCapabilities(a, b)) {
+    const [from, to] = a.flowStep! < b.flowStep! ? [a, b] : [b, a];
+    const skip =
+      from.capability === 'product_filtering' ||
+      to.capability === 'product_filtering' ||
+      from.capability === 'otp_delivery' ||
+      to.capability === 'otp_delivery' ||
+      from.capability === 'password_reset' ||
+      to.capability === 'password_reset';
+    if (!skip && Math.abs(from.flowStep! - to.flowStep!) === 1) {
+      return pairResult(from, to, {
+        kind: 'SEQUENTIAL',
+        relationType: 'SEQUENTIAL',
+        reason: `${from.title} precedes ${to.title} in the business workflow (${from.capability} → ${to.capability}).`,
+      });
+    }
+  }
+
+  // 6) RELATED — evidence required (never a fallback)
+
+  // 5c) Order confirmation page ↔ email
   if (
     a.capability === 'order_confirmation' &&
     b.capability === 'order_confirmation' &&
@@ -285,11 +470,9 @@ function classifyNormalized(
       kind: 'RELATED',
       relationType: 'RELATED_TO',
       reason:
-        'Same order-confirmation business event, but different delivery channels/sub-features (for example page vs email).',
+        'Same order-confirmation business event, different delivery channels/sub-features (page vs email).',
     });
   }
-
-  // Uncertain same confirmation titles without channel proof → RELATED (prefer uncertainty)
   if (
     a.capability === 'order_confirmation' &&
     b.capability === 'order_confirmation' &&
@@ -299,42 +482,27 @@ function classifyNormalized(
       kind: 'RELATED',
       relationType: 'RELATED_TO',
       reason:
-        'Both relate to order confirmation. Context/channel is not certain enough to treat as the same requirement.',
+        'Both relate to order confirmation. Context/channel differs enough that they are related, not duplicates.',
     });
   }
 
-  // 4) CRUD / inventory ops in same admin family → RELATED (never duplicate)
-  const adminFamily =
-    a.capability === 'product_administration' ||
-    b.capability === 'product_administration' ||
-    a.capability === 'inventory' ||
-    b.capability === 'inventory' ||
-    a.entity[0] === 'product_catalog' ||
-    b.entity[0] === 'product_catalog' ||
-    a.entity[0] === 'inventory' ||
-    b.entity[0] === 'inventory';
+  // 5d) Admin/inventory CRUD peers — BOTH sides must be admin/inventory
   if (
+    isAdminInventoryCap(a.capability) &&
+    isAdminInventoryCap(b.capability) &&
     sameActor(a, b) &&
-    adminFamily &&
     (a.crudOp !== b.crudOp ||
       a.entity[0] !== b.entity[0] ||
-      a.subFeature !== b.subFeature ||
-      a.businessOutcome !== b.businessOutcome ||
-      a.capability !== b.capability)
+      a.capability !== b.capability ||
+      a.businessOutcome !== b.businessOutcome)
   ) {
     return pairResult(a, b, {
       kind: 'RELATED',
       relationType: 'RELATED_TO',
       reason: [
-        'Same administration/product domain and actor, but different business operations.',
+        'Same administration/inventory capability family with different CRUD/operations.',
         a.crudOp && b.crudOp && a.crudOp !== b.crudOp
           ? `CRUD: ${a.crudOp} vs ${b.crudOp}`
-          : null,
-        a.entity[0] !== b.entity[0]
-          ? `Entity: ${a.entity[0]} vs ${b.entity[0]}`
-          : null,
-        a.businessOutcome !== b.businessOutcome
-          ? `Outcome: ${a.businessOutcome} vs ${b.businessOutcome}`
           : null,
       ]
         .filter(Boolean)
@@ -348,54 +516,62 @@ function classifyNormalized(
     });
   }
 
-  // Order confirmation vs order details/history — RELATED, not duplicate
-  const orderEntities = new Set(['order', 'order_confirmation', 'order_item']);
+  // 5e) Order confirmation vs order details/history — RELATED when both order-domain
+  const orderCaps = new Set([
+    'order_confirmation',
+    'order_details',
+    'order_history',
+    'order_access',
+    'order_management',
+  ]);
   if (
-    orderEntities.has(a.entity[0] ?? '') &&
-    orderEntities.has(b.entity[0] ?? '') &&
-    a.entity[0] !== b.entity[0]
+    orderCaps.has(a.capability) &&
+    orderCaps.has(b.capability) &&
+    a.capability !== b.capability
+  ) {
+    // history↔details already SEQUENTIAL; confirmation↔details RELATED
+    if (
+      !(
+        (a.capability === 'order_history' && b.capability === 'order_details') ||
+        (b.capability === 'order_history' && a.capability === 'order_details')
+      )
+    ) {
+      return pairResult(a, b, {
+        kind: 'RELATED',
+        relationType: 'RELATED_TO',
+        reason:
+          'Related order-domain capabilities (confirmation / history / details / access), not duplicates.',
+      });
+    }
+  }
+
+  // 5f) Same entity + same actor + different actions, but only for strong entities
+  const strongEntities = new Set([
+    'product_catalog',
+    'inventory',
+    'cart_item',
+    'order',
+    'order_confirmation',
+    'payment',
+    'user_account',
+  ]);
+  if (
+    sameEntity(a, b) &&
+    sameActor(a, b) &&
+    a.action[0] !== b.action[0] &&
+    strongEntities.has(a.entity[0] ?? '') &&
+    capabilityFamily(a, b)
   ) {
     return pairResult(a, b, {
       kind: 'RELATED',
       relationType: 'RELATED_TO',
       reason:
-        'Both present order/product information, but in different contexts (for example confirmation page vs order details/history). Prefer RELATED over a false duplicate.',
+        'Same actor and entity within the same capability family, different actions — related operations, not duplicates.',
+      sameFeatureDifferentOps: true,
     });
   }
 
-  // 5) Discovery flow: search ↔ results ↔ details → RELATED
-  if (capabilityFamily(a, b) && a.capability !== b.capability) {
-    const discovery = new Set([
-      'product_search',
-      'product_search_results',
-      'product_details',
-      'product_discovery',
-    ]);
-    if (discovery.has(a.capability) && discovery.has(b.capability)) {
-      const [from, to] =
-        (a.flowStep ?? 99) <= (b.flowStep ?? 99) ? [a, b] : [b, a];
-      return pairResult(from, to, {
-        kind: 'RELATED',
-        relationType: 'PRECEDES',
-        reason:
-          'Related steps in product discovery (search → results → details). Not duplicates.',
-      });
-    }
-  }
-
-  // 6) True DUPLICATE — only when business meaning is substantially identical
-  if (substantiallySameBehavior(a, b)) {
-    return pairResult(a, b, {
-      kind: 'DUPLICATE',
-      relationType: 'DUPLICATE_OF',
-      reason:
-        'Actor, entity, action, capability, business outcome, and context align — substantially the same business behavior.',
-      showConfidence: true,
-    });
-  }
-
-  // 7) POSSIBLE_DUPLICATE — semantic dims mostly align, outcome/context uncertain
-  //    (NOT based on text similarity thresholds)
+  // 5g) POSSIBLE_DUPLICATE — semantic dims mostly align, outcome uncertain
   if (
     sameActor(a, b) &&
     sameEntity(a, b) &&
@@ -407,27 +583,18 @@ function classifyNormalized(
       kind: 'POSSIBLE_DUPLICATE',
       relationType: 'OVERLAPS',
       reason:
-        'Actor, entity, action, and capability align, but business outcome/context is not certain. Prefer review over a false duplicate.',
+        'Actor, entity, action, and capability align, but business outcome/context is not certain.',
       showConfidence: false,
     });
   }
 
-  // 8) Same entity, different ops → RELATED
-  if (sameEntity(a, b) && sameActor(a, b) && a.action[0] !== b.action[0]) {
-    return pairResult(a, b, {
-      kind: 'RELATED',
-      relationType: 'RELATED_TO',
-      reason:
-        'Same actor and entity, but different actions/outcomes — related operations, not duplicates.',
-      sameFeatureDifferentOps: true,
-    });
-  }
-
+  // 6) INDEPENDENT — no edge
   return null;
 }
 
 /**
  * Pairwise semantic scan using normalized requirements.
+ * Only returns meaningful positive relationships.
  */
 export function detectSemanticRelations(
   requirements: DupComparable[],
@@ -441,6 +608,8 @@ export function detectSemanticRelations(
       const right = normalized[j]!;
       const classified = classifyNormalized(left, right);
       if (!classified) continue;
+      if (classified.kind === 'NOT_DUPLICATE' || classified.kind === 'NOT_RELATED')
+        continue;
       out.push(classified);
     }
   }
@@ -449,18 +618,23 @@ export function detectSemanticRelations(
     const rank = (k: string) =>
       k === 'DUPLICATE'
         ? 0
-        : k === 'POSSIBLE_DUPLICATE'
+        : k === 'BUSINESS_RULE_CONSTRAINT'
           ? 1
-          : k === 'RELATED' || k === 'PRECEDES'
+          : k === 'CONFLICT'
             ? 2
-            : 3;
+            : k === 'SEQUENTIAL' || k === 'PRECEDES'
+              ? 3
+              : k === 'POSSIBLE_DUPLICATE'
+                ? 4
+                : k === 'RELATED'
+                  ? 5
+                  : 6;
     return rank(x.kind) - rank(y.kind);
   });
 }
 
 /**
  * Back-compat wrapper used by API — maps to DuplicatePair shape.
- * Similarity is retained only as an internal field.
  */
 export function detectDuplicatePairs(
   requirements: DupComparable[],
@@ -470,15 +644,25 @@ export function detectDuplicatePairs(
     requirementKeyB: r.requirementKeyB,
     similarity: r.similarity,
     kind:
-      r.kind === 'PRECEDES' || r.kind === 'DEPENDS_ON' || r.kind === 'NOT_RELATED'
-        ? 'RELATED'
+      r.kind === 'SEQUENTIAL' ||
+      r.kind === 'PRECEDES' ||
+      r.kind === 'DEPENDS_ON' ||
+      r.kind === 'BUSINESS_RULE_CONSTRAINT' ||
+      r.kind === 'CONFLICT'
+        ? r.kind === 'BUSINESS_RULE_CONSTRAINT'
+          ? 'BUSINESS_RULE_CONSTRAINT'
+          : r.kind === 'CONFLICT'
+            ? 'CONFLICT'
+            : r.kind === 'SEQUENTIAL' || r.kind === 'PRECEDES'
+              ? 'SEQUENTIAL'
+              : 'RELATED'
         : (r.kind as DuplicateKind),
     recommendation: r.recommendation,
     reason: r.reason,
     showConfidence: r.showConfidence && r.kind === 'DUPLICATE',
     sameFeatureDifferentOps: r.sameFeatureDifferentOps,
     suggestedFeatureSplit: r.suggestedFeatureSplit,
-    relationType: r.relationType,
+    relationType: r.relationType as RelationType,
   }));
 }
 
@@ -486,7 +670,14 @@ export function detectDuplicatePairs(
 export function analyzeRelationship(
   a: DupComparable,
   b: DupComparable,
-): DuplicateKind | 'PRECEDES' | 'DEPENDS_ON' | 'NOT_RELATED' {
+):
+  | DuplicateKind
+  | 'SEQUENTIAL'
+  | 'BUSINESS_RULE_CONSTRAINT'
+  | 'CONFLICT'
+  | 'PRECEDES'
+  | 'DEPENDS_ON'
+  | 'NOT_RELATED' {
   const hit = detectSemanticRelations([a, b])[0];
   return hit?.kind ?? 'NOT_RELATED';
 }
@@ -500,7 +691,30 @@ function semanticDims(a: NormalizedRequirement, b: NormalizedRequirement) {
     outcomeMatch: a.businessOutcome === b.businessOutcome,
     contextMatch:
       (a.channel ?? a.subFeature ?? null) === (b.channel ?? b.subFeature ?? null),
+    workflowRelation: areSequentialCapabilities(a, b),
+    businessRuleMatch: a.isBusinessRule || b.isBusinessRule,
   };
+}
+
+function toCanonicalKind(
+  d: SemanticRelationDraft,
+): RequirementRelationship['relationship'] | null {
+  if (d.kind === 'NOT_DUPLICATE' || d.kind === 'NOT_RELATED') return null;
+  if (d.kind === 'SEQUENTIAL' || d.relationType === 'SEQUENTIAL')
+    return 'SEQUENTIAL';
+  if (d.relationType === 'PRECEDES' || d.kind === 'PRECEDES') return 'SEQUENTIAL';
+  if (
+    d.kind === 'BUSINESS_RULE_CONSTRAINT' ||
+    d.relationType === 'BUSINESS_RULE_CONSTRAINT'
+  )
+    return 'BUSINESS_RULE_CONSTRAINT';
+  if (d.kind === 'CONFLICT' || d.relationType === 'CONFLICTS_WITH')
+    return 'CONFLICT';
+  if (d.kind === 'DEPENDS_ON') return 'DEPENDS_ON';
+  if (d.kind === 'DUPLICATE') return 'DUPLICATE';
+  if (d.kind === 'POSSIBLE_DUPLICATE') return 'POSSIBLE_DUPLICATE';
+  if (d.kind === 'RELATED') return 'RELATED';
+  return null;
 }
 
 /** Convert semantic draft pairs into canonical RequirementRelationship rows. */
@@ -514,28 +728,24 @@ export function toCanonicalRelationships(
   const out: RequirementRelationship[] = [];
 
   for (const d of drafts) {
-    if (d.kind === 'NOT_RELATED') continue;
+    const relationship = toCanonicalKind(d);
+    if (!relationship) continue;
+    if (!PERSISTABLE_RELATIONSHIPS.has(relationship)) continue;
+    if (relationship === 'NOT_DUPLICATE') continue;
+
     const na = normalized.get(d.requirementKeyA);
     const nb = normalized.get(d.requirementKeyB);
-    const relationship: RequirementRelationship['relationship'] =
-      d.relationType === 'PRECEDES' || d.kind === 'PRECEDES'
-        ? 'PRECEDES'
-        : d.kind === 'DEPENDS_ON'
-          ? 'DEPENDS_ON'
-          : (d.kind as RequirementRelationship['relationship']);
 
     out.push({
       sourceRequirementId: d.requirementKeyA,
       targetRequirementId: d.requirementKeyB,
       relationship,
       reason: d.reason,
-      // confidence only for true duplicates as optional supporting evidence
       confidence:
         d.kind === 'DUPLICATE' && d.showConfidence
           ? Math.min(100, Math.max(d.similarity, 90)) / 100
           : undefined,
-      semanticAnalysis:
-        na && nb ? semanticDims(na, nb) : undefined,
+      semanticAnalysis: na && nb ? semanticDims(na, nb) : undefined,
     });
   }
   return out;

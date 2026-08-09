@@ -139,13 +139,21 @@ export function generateSemanticTitle(
   if (/\bcheckout\b/.test(d) && /\b(mandatory|required|contain|information|fields?)\b/.test(d)) {
     return 'Checkout Required Fields';
   }
+  if (
+    /\bopen (an? )?order\b/.test(d) ||
+    (/\border\b/.test(d) && /\bview\b/.test(d) && /\bdetails?\b/.test(d))
+  ) {
+    return 'View Order Details';
+  }
   if (/\border\b/.test(d) && /\b(creat|placed|place)\b/.test(d) && !/\bfail|not\b/.test(d)) {
     return 'Order Creation';
   }
   if (/\border confirmation|confirmation (email|message|page)\b/.test(d)) {
     return 'Order Confirmation';
   }
-  if (/\border history\b/.test(d)) return 'Order History';
+  if (/\border history\b/.test(d) || /\bprevious orders\b/.test(d) || /\bpast orders\b/.test(d)) {
+    return 'Order History';
+  }
   if (/\bown orders\b/.test(d) || (/\border\b/.test(d) && /\b(only|own|access)\b/.test(d))) {
     return 'Order Access Control';
   }
@@ -171,6 +179,9 @@ export function generateSemanticTitle(
   // Profile
   if (/\bprofile\b/.test(d) && /\b(cannot|must not|not be allowed).*\bemail\b/.test(d)) {
     return 'Profile Update Restrictions';
+  }
+  if (/\bprofile\b/.test(d) && /\b(contain|display|show|include)\b/.test(d)) {
+    return 'User Profile Information';
   }
   if (/\bprofile\b/.test(d) && /\b(update|edit|manage)\b/.test(d)) return 'Profile Update';
 

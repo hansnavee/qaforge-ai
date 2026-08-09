@@ -258,21 +258,51 @@ type FeatureGroupView = {
   }>;
 };
 
+function relationshipLabel(kind: string): string {
+  switch (kind) {
+    case 'DUPLICATE':
+      return 'DUPLICATE';
+    case 'POSSIBLE_DUPLICATE':
+      return 'POSSIBLE DUPLICATE';
+    case 'BUSINESS_RULE_CONSTRAINT':
+      return 'BUSINESS RULE CONSTRAINT';
+    case 'SEQUENTIAL':
+    case 'PRECEDES':
+      return 'SEQUENTIAL';
+    case 'CONFLICT':
+    case 'CONFLICTS_WITH':
+      return 'CONFLICT';
+    case 'DEPENDS_ON':
+      return 'DEPENDENCY';
+    case 'RELATED':
+      return 'RELATED';
+    default:
+      return kind.replace(/_/g, ' ');
+  }
+}
+
 function primaryRelationship(
   rels?: ExtractedRequirement['relationships'],
 ) {
   if (!rels?.length) return null;
+  // Missing edge = independent; ignore legacy NOT_DUPLICATE noise
+  const positive = rels.filter((r) => r.relationship !== 'NOT_DUPLICATE');
+  if (!positive.length) return null;
   const rank = (r: string) =>
     r === 'DUPLICATE'
       ? 0
-      : r === 'POSSIBLE_DUPLICATE'
+      : r === 'BUSINESS_RULE_CONSTRAINT'
         ? 1
-        : r === 'RELATED' || r === 'PRECEDES'
+        : r === 'CONFLICT' || r === 'CONFLICTS_WITH'
           ? 2
-          : r === 'NOT_DUPLICATE'
+          : r === 'SEQUENTIAL' || r === 'PRECEDES'
             ? 3
-            : 4;
-  return [...rels].sort(
+            : r === 'POSSIBLE_DUPLICATE'
+              ? 4
+              : r === 'RELATED' || r === 'DEPENDS_ON'
+                ? 5
+                : 6;
+  return [...positive].sort(
     (a, b) => rank(a.relationship) - rank(b.relationship),
   )[0]!;
 }
@@ -967,7 +997,7 @@ export default function ProjectWorkspacePage() {
   };
   const analysisIsStaleEngine =
     Boolean(reviewSummaryQuery.data?.reviewed) &&
-    (reviewSummaryQuery.data?.analysisVersion !== '2.3' ||
+    (reviewSummaryQuery.data?.analysisVersion !== '2.4' ||
       reviewSummaryQuery.data?.analysisEngine !==
         'semantic-requirement-review');
   const openEditProject = () => {
@@ -1106,7 +1136,7 @@ export default function ProjectWorkspacePage() {
 
       {analysisIsStaleEngine ? (
         <Card className="border-warning/40 bg-warning/10 p-3 text-sm">
-          Legacy analysis detected (missing engine v2.3). Stale “Possible
+          Legacy analysis detected (missing engine v2.4). Stale “Possible
           duplicate (N%)” data can still appear until you run a fresh semantic
           analysis.
           <Button
@@ -1361,7 +1391,7 @@ export default function ProjectWorkspacePage() {
           {analysisIsStaleEngine ? (
             <p className="text-sm text-warning">
               Analysis engine is outdated or missing. Run Fresh Analysis to
-              activate semantic relationship detection (v2.3).
+              activate semantic relationship detection (v2.4).
             </p>
           ) : null}
           {analysisStatus === 'STALE' ? (
@@ -2005,26 +2035,10 @@ export default function ProjectWorkspacePage() {
                                         r.relationships,
                                       );
                                       if (!rel) return null;
-                                      if (rel.relationship === 'NOT_DUPLICATE') {
-                                        return (
-                                          <div className="mt-2 text-xs text-muted">
-                                            NO DUPLICATE · {rel.targetRequirementId}
-                                            {rel.reason
-                                              ? ` — ${rel.reason.split('\n')[0]}`
-                                              : ''}
-                                          </div>
-                                        );
-                                      }
                                       return (
                                         <div className="mt-2 space-y-2 rounded-md border border-border bg-bg/40 p-2 text-xs">
                                           <div className="font-medium text-fg">
-                                            {rel.relationship === 'RELATED' ||
-                                            rel.relationship === 'PRECEDES'
-                                              ? 'RELATED REQUIREMENT'
-                                              : rel.relationship.replace(
-                                                  /_/g,
-                                                  ' ',
-                                                )}
+                                            {relationshipLabel(rel.relationship)}
                                           </div>
                                           <div>{rel.targetRequirementId}</div>
                                           {rel.reason ? (
@@ -2297,50 +2311,102 @@ export default function ProjectWorkspacePage() {
                 </p>
               </div>
             )}
-            {selected.semantic ? (
-              <div className="grid gap-2 rounded-lg border border-border bg-bg-elevated/40 p-3 text-xs sm:grid-cols-2">
-                <div>Actor: {selected.semantic.actor}</div>
-                <div>Entity: {selected.semantic.entity}</div>
-                <div>Action: {selected.semantic.action}</div>
-                <div>Capability: {selected.semantic.businessCapability}</div>
-                <div className="sm:col-span-2">
-                  Outcome: {selected.semantic.businessOutcome}
-                </div>
+            <div className="rounded-lg border border-border bg-bg-elevated/40 p-3">
+              <div className="text-xs uppercase tracking-wide text-muted">
+                Requirement Intelligence
               </div>
-            ) : null}
+              {selected.semantic ? (
+                <div className="mt-2 grid gap-2 text-xs sm:grid-cols-2">
+                  <div>
+                    <span className="text-muted">Actor · </span>
+                    {selected.semantic.actor}
+                  </div>
+                  <div>
+                    <span className="text-muted">Action · </span>
+                    {selected.semantic.action}
+                  </div>
+                  <div>
+                    <span className="text-muted">Object · </span>
+                    {selected.semantic.entity}
+                  </div>
+                  <div>
+                    <span className="text-muted">Capability · </span>
+                    {selected.semantic.businessCapability}
+                  </div>
+                  <div className="sm:col-span-2">
+                    <span className="text-muted">Business outcome · </span>
+                    {selected.semantic.businessOutcome}
+                  </div>
+                  {selected.semantic.crudOp ? (
+                    <div>
+                      <span className="text-muted">CRUD · </span>
+                      {selected.semantic.crudOp}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-muted">
+                  Run analysis to populate actor / action / object intelligence.
+                </p>
+              )}
+              {(selected.businessRules?.length ||
+                selected.businessReview?.rules?.length) ? (
+                <div className="mt-3 text-xs">
+                  <div className="text-muted">Business rules</div>
+                  <ul className="mt-1 list-disc space-y-1 pl-4">
+                    {(selected.businessRules?.length
+                      ? selected.businessRules
+                      : (selected.businessReview?.rules ?? []).map(
+                          (r) => r.text,
+                        )
+                    )
+                      .slice(0, 4)
+                      .map((rule) => (
+                        <li key={rule}>{rule}</li>
+                      ))}
+                  </ul>
+                </div>
+              ) : null}
+              <div className="mt-3 text-xs">
+                <div className="text-muted">Review recommendation</div>
+                <p className="mt-1">
+                  {reviewStatusLabel(selected.reviewStatus)}
+                  {selected.readinessScore != null
+                    ? ` · readiness ${selected.readinessScore}%`
+                    : ''}
+                </p>
+              </div>
+            </div>
             {(() => {
-              const rel = primaryRelationship(selected.relationships);
-              if (!rel) return null;
-              if (rel.relationship === 'NOT_DUPLICATE') {
+              const positiveRels = (selected.relationships ?? []).filter(
+                (r) => r.relationship !== 'NOT_DUPLICATE',
+              );
+              if (!positiveRels.length) {
                 return (
-                  <div className="rounded-lg border border-border bg-bg-elevated/40 p-3 text-sm">
-                    <div className="font-medium">NO DUPLICATE</div>
-                    <p className="mt-1 text-muted">
-                      {selected.requirementKey} is not a duplicate of{' '}
-                      {rel.targetRequirementId}.
-                    </p>
-                    {rel.reason ? (
-                      <p className="mt-2 whitespace-pre-wrap text-muted">
-                        Why? {rel.reason}
-                      </p>
-                    ) : null}
+                  <div className="rounded-lg border border-border bg-bg-elevated/40 p-3 text-sm text-muted">
+                    No related requirements (independent).
                   </div>
                 );
               }
+              const rel = primaryRelationship(positiveRels);
+              if (!rel) return null;
               return (
                 <div
                   className={`space-y-2 rounded-lg border p-3 text-sm ${
-                    rel.relationship === 'RELATED' ||
-                    rel.relationship === 'PRECEDES'
-                      ? 'border-border bg-bg-elevated/40'
-                      : 'border-warning/40 bg-warning/10'
+                    rel.relationship === 'DUPLICATE' ||
+                    rel.relationship === 'POSSIBLE_DUPLICATE' ||
+                    rel.relationship === 'CONFLICT' ||
+                    rel.relationship === 'CONFLICTS_WITH'
+                      ? 'border-warning/40 bg-warning/10'
+                      : 'border-border bg-bg-elevated/40'
                   }`}
                 >
                   <div className="font-medium">
-                    {rel.relationship === 'RELATED' ||
-                    rel.relationship === 'PRECEDES'
-                      ? 'RELATED REQUIREMENT'
-                      : rel.relationship.replace(/_/g, ' ')}
+                    {relationshipLabel(rel.relationship)}
+                  </div>
+                  <div className="text-xs text-muted">
+                    {positiveRels.length} related requirement
+                    {positiveRels.length === 1 ? '' : 's'}
                   </div>
                   <div>{rel.targetRequirementId}</div>
                   {rel.reason ? (
@@ -2399,7 +2465,7 @@ export default function ProjectWorkspacePage() {
                       {reviewSummaryQuery.data?.analysisEngine ??
                         'semantic-requirement-review'}{' '}
                       v
-                      {reviewSummaryQuery.data?.analysisVersion ?? '2.3'}).
+                      {reviewSummaryQuery.data?.analysisVersion ?? '2.4'}).
                       Similarity percentage is not used as the primary signal.
                     </p>
                   </details>

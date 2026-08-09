@@ -103,6 +103,8 @@ export const RELATION_TYPES = [
   'AFFECTS',
   'RELATED_TO',
   'PRECEDES',
+  'SEQUENTIAL',
+  'BUSINESS_RULE_CONSTRAINT',
   'CONFLICTS_WITH',
   'DUPLICATE_OF',
   'OVERLAPS',
@@ -114,6 +116,9 @@ export const DUPLICATE_KINDS = [
   'DUPLICATE',
   'POSSIBLE_DUPLICATE',
   'RELATED',
+  'SEQUENTIAL',
+  'BUSINESS_RULE_CONSTRAINT',
+  'CONFLICT',
   'NOT_DUPLICATE',
 ] as const;
 
@@ -267,10 +272,13 @@ export type RequirementRelationship = {
     | 'DUPLICATE'
     | 'RELATED'
     | 'POSSIBLE_DUPLICATE'
-    | 'NOT_DUPLICATE'
+    | 'SEQUENTIAL'
+    | 'BUSINESS_RULE_CONSTRAINT'
+    | 'CONFLICT'
     | 'DEPENDS_ON'
-    | 'PRECEDES'
-    | 'CONFLICTS_WITH';
+    | 'PRECEDES' // legacy alias of SEQUENTIAL
+    | 'CONFLICTS_WITH' // legacy alias of CONFLICT
+    | 'NOT_DUPLICATE'; // never persisted for new analyses
   /** Optional supporting score only — never primary decision */
   confidence?: number;
   reason: string;
@@ -281,11 +289,28 @@ export type RequirementRelationship = {
     capabilityMatch: boolean;
     outcomeMatch: boolean;
     contextMatch: boolean;
+    workflowRelation?: boolean;
+    businessRuleMatch?: boolean;
   };
 };
 
 export const SEMANTIC_ANALYSIS_ENGINE = 'semantic-requirement-review';
-export const SEMANTIC_ANALYSIS_VERSION = '2.3';
+export const SEMANTIC_ANALYSIS_VERSION = '2.4';
+
+/** Relationships worth persisting (missing edge = INDEPENDENT). */
+export const PERSISTABLE_RELATIONSHIPS = new Set<
+  RequirementRelationship['relationship']
+>([
+  'DUPLICATE',
+  'POSSIBLE_DUPLICATE',
+  'RELATED',
+  'SEQUENTIAL',
+  'BUSINESS_RULE_CONSTRAINT',
+  'CONFLICT',
+  'DEPENDS_ON',
+  'PRECEDES',
+  'CONFLICTS_WITH',
+]);
 
 export function factStatusToIntentSource(
   status: ReviewFactStatus,

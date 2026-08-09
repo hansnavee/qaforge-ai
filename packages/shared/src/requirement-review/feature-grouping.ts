@@ -101,7 +101,14 @@ const FEATURE_DEFS: FeatureDef[] = [
       'Allow customers to evaluate a product’s attributes, availability, and pricing before adding it to the cart.',
     weight: 10,
     patterns: [/product detail/, /view product/, /product page/, /product information/],
-    exclude: [/admin/, /administrator/, /manage product/],
+    exclude: [
+      /admin/,
+      /administrator/,
+      /manage product/,
+      /open (an? )?order/,
+      /order details?/,
+      /view (an? )?order/,
+    ],
   },
   {
     name: 'Product Reviews',
@@ -164,7 +171,7 @@ const FEATURE_DEFS: FeatureDef[] = [
   // --- Orders ---
   {
     name: 'Order Confirmation',
-    businessArea: 'Order Management',
+    businessArea: 'Purchase',
     businessCapability: 'Confirm successful order creation to the customer.',
     businessIntent:
       'Inform customers that their order was successfully created and provide the confirmation details they need next.',
@@ -173,7 +180,7 @@ const FEATURE_DEFS: FeatureDef[] = [
   },
   {
     name: 'Order History',
-    businessArea: 'Order Management',
+    businessArea: 'Purchase',
     businessCapability: 'Let customers review past purchases.',
     businessIntent:
       'Allow customers to view their previous orders and track purchase history over time.',
@@ -181,8 +188,24 @@ const FEATURE_DEFS: FeatureDef[] = [
     patterns: [/order history/, /past orders/, /previous orders/, /my orders/],
   },
   {
+    name: 'Order Details',
+    businessArea: 'Purchase',
+    businessCapability: 'Let customers inspect a single order.',
+    businessIntent:
+      'Allow customers to open an order and view its line items, totals, and status details.',
+    weight: 12,
+    patterns: [
+      /open (an? )?order/,
+      /view (an? )?order/,
+      /order details?/,
+      /view its details.*order|order.*view its details/,
+      /each order should/,
+    ],
+    exclude: [/product detail/, /search result/, /confirmation/],
+  },
+  {
     name: 'Order Access',
-    businessArea: 'Order Management',
+    businessArea: 'Purchase',
     businessCapability: 'Enforce ownership boundaries on order data.',
     businessIntent:
       'Ensure customers can only access their own order information and cannot view another user’s orders.',
@@ -191,7 +214,7 @@ const FEATURE_DEFS: FeatureDef[] = [
   },
   {
     name: 'Order Cancellation',
-    businessArea: 'Order Management',
+    businessArea: 'Purchase',
     businessCapability: 'Control when customers may cancel orders.',
     businessIntent:
       'Allow customers to cancel eligible orders before fulfillment reaches a restricted state.',

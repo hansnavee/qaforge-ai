@@ -82,12 +82,19 @@ export function extractEntity(text: string): string {
     )
   )
     return 'order_confirmation';
-  if (/order (details|history)|each order should|order page/.test(t))
+  // Order entity before generic "view details" / product phrasing
+  if (
+    /open (an? )?order|view (an? )?order|order (details?|history|page)|view (previous|past|its) orders?|each order should|previous orders|past orders/.test(
+      t,
+    )
+  )
     return 'order';
   if (/order item|line item/.test(t)) return 'order_item';
-  if (/\borders?\b/.test(t) && !/product/.test(t)) return 'order';
+  if (/\borders?\b/.test(t) && !/\bproducts?\b/.test(t)) return 'order';
   if (/\bpayment\b|pay for|checkout payment/.test(t)) return 'payment';
-  if (/user account|user profile|email address|password|otp|credential/.test(t))
+  if (
+    /user account|user profile|email address|password|\botp\b|credential/.test(t)
+  )
     return 'user_account';
   if (/\breview\b|rating/.test(t)) return 'review';
   if (/\bcheckout\b/.test(t)) return 'checkout';
@@ -254,6 +261,12 @@ export function extractCapability(
     return 'product_administration';
   if (entity === 'order_confirmation' || /order confirmation/.test(t))
     return 'order_confirmation';
+  if (entity === 'order') {
+    if (/history|past orders|previous orders|my orders/.test(t))
+      return 'order_history';
+    if (/access|another user|own orders?/.test(t)) return 'order_access';
+    return 'order_details';
+  }
   if (entity === 'payment' || /\bpayment\b/.test(t)) return 'payment';
   if (entity === 'checkout' || /\bcheckout\b/.test(t)) return 'checkout';
   if (/password reset|forgot password|reset their password/.test(t))
@@ -261,8 +274,9 @@ export function extractCapability(
   if (/\botp\b/.test(t) && /sent|send|email|sms|deliver/.test(t))
     return 'otp_delivery';
   if (/\botp\b/.test(t)) return 'password_reset';
-  if (/register|registration|sign up/.test(t)) return 'user_registration';
-  if (/login|sign in/.test(t)) return 'user_login';
+  if (/\b(register|registration|sign up|create an account)\b/.test(t))
+    return 'user_registration';
+  if (/\b(login|sign in)\b/.test(t)) return 'user_login';
   if (
     /\bfilter\b/.test(t) &&
     /product/.test(t) &&
@@ -272,12 +286,14 @@ export function extractCapability(
   }
   if (
     /\b(admin|administrator).*(access|functionality|permissions?)\b/.test(t) ||
-    /\b(access|permissions?).*(admin|administrator)/.test(t)
+    /\b(access|permissions?).*(admin|administrator)/.test(t) ||
+    (/\bnormal users?\b/.test(t) && /administrator/.test(t))
   ) {
     return 'access_control';
   }
-  if (entity === 'product' || /product search|product detail/.test(t))
-    return 'product_discovery';
+  if (/product search|search for products/.test(t)) return 'product_search';
+  if (/product detail|view product/.test(t)) return 'product_details';
+  if (entity === 'product') return 'product_discovery';
   return entity !== 'general' ? entity : 'general';
 }
 

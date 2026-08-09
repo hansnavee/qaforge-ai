@@ -241,9 +241,28 @@ export function analyzeRequirement(
     );
   }
 
-  // --- Domain heuristics: gaps → questions (never invent confirmed rules) ---
+  // --- Capability-aware gaps → questions (never invent confirmed rules) ---
+  const cap = semantic.capability;
+  const isRegistration =
+    cap === 'user_registration' ||
+    /\b(register|registration|sign up|create an account)\b/.test(blob);
+  const isLogin =
+    (cap === 'user_login' || /\b(login|sign in)\b/.test(blob)) &&
+    !isRegistration &&
+    !/\botp\b|password reset/.test(blob);
+  const isOtpOrReset =
+    cap === 'otp_delivery' ||
+    cap === 'password_reset' ||
+    (/\botp\b|password reset|forgot password|reset.*password/.test(blob) &&
+      !isRegistration);
+  const isProductSearch =
+    cap === 'product_search' ||
+    cap === 'product_search_results' ||
+    (/\bsearch\b/.test(blob) && /\bproduct/.test(blob));
+  const isCheckout =
+    cap === 'checkout' || /\bcheckout\b|proceed to checkout/.test(blob);
 
-  if (/register|registration|create an account/.test(blob)) {
+  if (isRegistration) {
     business.outcomes.push(fact('User account creation', 'INFERRED', source));
     business.preconditions.push(
       fact('Valid registration information must be provided', 'INFERRED', source),
@@ -263,7 +282,29 @@ export function analyzeRequirement(
         fact('Email addresses must be unique', 'CONFIRMED', source),
       );
     }
-    if (!/redirect|login page|confirmation|auto-?login/.test(blob)) {
+    if (!/password.*(length|complex|character|policy|rule)/.test(blob)) {
+      questions.push(
+        q(
+          'BUSINESS_RULE',
+          'HIGH',
+          'What password complexity rules apply during registration?',
+          'Password policy is not defined for account creation.',
+          false,
+        ),
+      );
+    }
+    if (!/verif|confirm email|activation/.test(blob)) {
+      questions.push(
+        q(
+          'BUSINESS_FLOW',
+          'MEDIUM',
+          'Is email verification required before the account can be used?',
+          'Email verification requirement is not stated.',
+          false,
+        ),
+      );
+    }
+    if (!/redirect|confirmation|auto-?login/.test(blob)) {
       questions.push(
         q(
           'BUSINESS_OUTCOME',
@@ -276,7 +317,7 @@ export function analyzeRequirement(
     }
   }
 
-  if (/\blogin\b|\bsign in\b/.test(blob) && !/invalid|error/.test(blob)) {
+  if (isLogin && !/invalid|error/.test(blob)) {
     business.preconditions.push(
       fact('User must have an existing account', 'INFERRED', source),
     );
@@ -292,7 +333,7 @@ export function analyzeRequirement(
       );
     }
   }
-  if (/invalid/.test(blob) && /credential|login|error/.test(blob)) {
+  if (isLogin && /invalid/.test(blob) && /credential|login|error/.test(blob)) {
     functional.errorHandling.push(
       fact('Invalid credentials produce an error response', 'CONFIRMED', source),
     );
@@ -309,7 +350,7 @@ export function analyzeRequirement(
     }
   }
 
-  if (/\botp\b|password reset|reset.*password/.test(blob)) {
+  if (isOtpOrReset) {
     business.flow.push(fact('Password reset / OTP flow', 'INFERRED', source));
     if (/expire|expiry|valid for|minutes/.test(blob)) {
       business.rules.push(fact(req.description, 'CONFIRMED', source));
@@ -324,24 +365,49 @@ export function analyzeRequirement(
         ),
       );
     }
-    if (/\botp\b/.test(blob) && !/attempt|tries|retry/.test(blob)) {
+    if (/\botp\b/.test(blob) && !/attempt|tries|retry|invalid otp/.test(blob)) {
       questions.push(
         q(
           'BUSINESS_RULE',
           'HIGH',
-          'How many invalid OTP attempts are allowed?',
-          'OTP attempt limit is not defined.',
+          'How many invalid OTP attempts are allowed, and what happens after an invalid OTP?',
+          'OTP attempt and invalid-OTP behavior are not defined.',
           false,
         ),
       );
     }
-    if (/\botp\b/.test(blob) && !/resend|send again/.test(blob)) {
+    if (/\botp\b/.test(blob) && !/resend|send again|new otp/.test(blob)) {
       questions.push(
         q(
           'BUSINESS_FLOW',
           'MEDIUM',
           'Can the user request a new OTP (resend), and are there limits?',
           'OTP resend policy is not defined.',
+          false,
+        ),
+      );
+    }
+  }
+
+  if (isProductSearch) {
+    if (!/no (products?|results?)|empty|zero matches/.test(blob)) {
+      questions.push(
+        q(
+          'BUSINESS_OUTCOME',
+          'MEDIUM',
+          'What should happen when no products match the search?',
+          'Empty search-result behavior is not defined.',
+          false,
+        ),
+      );
+    }
+    if (!/field|name|description|sku/.test(blob) && !/filter/.test(blob)) {
+      questions.push(
+        q(
+          'DATA',
+          'LOW',
+          'Which product fields are searchable (name, description, SKU, etc.)?',
+          'Searchable fields are not specified.',
           false,
         ),
       );
@@ -381,10 +447,21 @@ export function analyzeRequirement(
     );
   }
 
-  if (/checkout|proceed to checkout/.test(blob)) {
+  if (isCheckout) {
     business.preconditions.push(
       fact('Cart should contain purchasable items', 'INFERRED', source),
     );
+    if (!/mandatory|required|field|address|contain/.test(blob)) {
+      questions.push(
+        q(
+          'INPUT',
+          'HIGH',
+          'Which checkout fields are mandatory (e.g. delivery address)?',
+          'Required checkout fields are not fully defined.',
+          false,
+        ),
+      );
+    }
     if (!/logged in|login|authenticated/.test(blob)) {
       questions.push(
         q(
@@ -404,6 +481,17 @@ export function analyzeRequirement(
           'What happens if inventory changes (becomes unavailable) during checkout?',
           'Inventory race during checkout is a critical business risk and is not defined.',
           true,
+        ),
+      );
+    }
+    if (!/payment fail|retry payment/.test(blob)) {
+      questions.push(
+        q(
+          'EXCEPTION',
+          'HIGH',
+          'What happens when payment fails during checkout, and can the user retry?',
+          'Payment failure / retry at checkout is not defined.',
+          false,
         ),
       );
     }
@@ -510,7 +598,14 @@ export function analyzeRequirement(
     }
   }
 
-  if (/admin|administrator/.test(blob)) {
+  if (
+    (cap === 'product_administration' ||
+      cap === 'access_control' ||
+      (/\b(administrators?|admins?)\b/.test(blob) &&
+        !/\bnormal users?\b/.test(blob))) &&
+    !isOtpOrReset &&
+    !isRegistration
+  ) {
     business.permissions.push(
       fact('Administrator capability referenced', 'CONFIRMED', source),
     );
@@ -561,7 +656,13 @@ export function analyzeRequirement(
     for (const ac of req.acceptanceCriteria ?? []) {
       functional.validations.push(fact(ac, 'CONFIRMED', source));
     }
-  } else if (primaryType === 'FUNCTIONAL') {
+  } else if (
+    primaryType === 'FUNCTIONAL' &&
+    (cap === 'checkout' ||
+      cap === 'payment' ||
+      cap === 'user_registration' ||
+      cap === 'user_login')
+  ) {
     questions.push(
       q(
         'VALIDATION',
@@ -589,7 +690,8 @@ export function analyzeRequirement(
     );
   } else if (
     primaryType === 'FUNCTIONAL' &&
-    /login|payment|otp|register/.test(blob)
+    (isLogin || isOtpOrReset || isRegistration || cap === 'payment') &&
+    !/fail|invalid|error/.test(blob)
   ) {
     questions.push(
       q(

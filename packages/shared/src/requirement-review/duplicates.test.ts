@@ -19,8 +19,8 @@ function kindOf(
   )?.kind;
 }
 
-describe('Piece 2.2 semantic relations', () => {
-  it('REQ032 vs REQ014 → NOT_DUPLICATE (actor/capability/outcome)', () => {
+describe('Piece 2.4 semantic relations', () => {
+  it('REQ032 vs REQ014 → INDEPENDENT (no edge)', () => {
     const pairs = detectDuplicatePairs([
       {
         requirementKey: 'REQ-014',
@@ -36,7 +36,7 @@ describe('Piece 2.2 semantic relations', () => {
         businessArea: 'Administration',
       },
     ]);
-    expect(kindOf(pairs, 'REQ-014', 'REQ-032')).toBe('NOT_DUPLICATE');
+    expect(kindOf(pairs, 'REQ-014', 'REQ-032')).toBeUndefined();
     expect(pairs.every((p) => p.kind !== 'POSSIBLE_DUPLICATE')).toBe(true);
     expect(pairs.every((p) => p.kind !== 'DUPLICATE')).toBe(true);
   });
@@ -112,11 +112,11 @@ describe('Piece 2.2 semantic relations', () => {
       },
     ]);
     const k = kindOf(pairs, 'REQ-026', 'REQ-029');
-    expect(k === 'RELATED' || k === 'POSSIBLE_DUPLICATE').toBe(true);
+    expect(k === 'RELATED' || k === 'SEQUENTIAL').toBe(true);
     expect(k).not.toBe('DUPLICATE');
   });
 
-  it('REQ010 search vs REQ011 search results → RELATED / PRECEDES', () => {
+  it('REQ010 search vs REQ011 search results → SEQUENTIAL', () => {
     const rel = detectSemanticRelations([
       {
         requirementKey: 'REQ-010',
@@ -133,141 +133,40 @@ describe('Piece 2.2 semantic relations', () => {
     ]);
     const pair = rel.find(
       (p) =>
-        (p.requirementKeyA === 'REQ-010' && p.requirementKeyB === 'REQ-011') ||
-        (p.requirementKeyA === 'REQ-011' && p.requirementKeyB === 'REQ-010'),
+        (p.requirementKeyA === 'REQ-010' &&
+          p.requirementKeyB === 'REQ-011') ||
+        (p.requirementKeyA === 'REQ-011' &&
+          p.requirementKeyB === 'REQ-010'),
     );
-    expect(pair?.kind === 'RELATED' || pair?.relationType === 'PRECEDES').toBe(
-      true,
-    );
-    expect(pair?.kind).not.toBe('DUPLICATE');
-    expect(pair?.kind).not.toBe('POSSIBLE_DUPLICATE');
+    expect(pair?.kind).toBe('SEQUENTIAL');
   });
 
-  it('identical confirmation-page behavior can be DUPLICATE', () => {
-    const pairs = detectDuplicatePairs([
-      {
-        requirementKey: 'REQ-026',
-        title: 'Order Confirmation',
-        description:
-          'The confirmation page should display product information.',
-      },
-      {
-        requirementKey: 'REQ-027',
-        title: 'Order Confirmation Screen',
-        description:
-          'The order confirmation screen should display the purchased products.',
-      },
-    ]);
-    expect(kindOf(pairs, 'REQ-026', 'REQ-027')).toBe('DUPLICATE');
-  });
-
-  it('does not classify duplicates from similarity alone', () => {
-    const pairs = detectDuplicatePairs([
-      {
-        requirementKey: 'REQ-A',
-        title: 'Add Product Something',
-        description: 'Add product add product add product for users to cart.',
-      },
-      {
-        requirementKey: 'REQ-B',
-        title: 'Add Product Catalog',
-        description:
-          'Administrators add product add product into the product catalog.',
-      },
-    ]);
-    expect(kindOf(pairs, 'REQ-A', 'REQ-B')).not.toBe('POSSIBLE_DUPLICATE');
-    expect(kindOf(pairs, 'REQ-A', 'REQ-B')).not.toBe('DUPLICATE');
-  });
-
-  it('normalizes admin actor aliases', () => {
+  it('acceptance: Open Order is order_details, not product_details', () => {
     const n = normalizeRequirement({
-      requirementKey: 'REQ-X',
-      title: 'Manage catalog',
-      description: 'Admin can update product information',
+      requirementKey: 'REQ-030',
+      title: 'Open An Order To View Its Details',
+      description: 'Users can open an order to view its details.',
     });
-    expect(n.actor[0]).toBe('administrator');
-  });
-
-  it('analyzeRelationship helper matches Piece 2.3 acceptance', () => {
+    expect(n.capability).toBe('order_details');
+    expect(n.entity[0]).toBe('order');
     expect(
       analyzeRelationship(
         {
-          requirementKey: 'REQ-032',
-          title: 'Add Product',
-          description: 'Administrators should be able to add new products.',
+          requirementKey: 'REQ-030',
+          title: 'Open An Order To View Its Details',
+          description: 'Users can open an order to view its details.',
         },
-        {
-          requirementKey: 'REQ-014',
-          title: 'Add Product To Cart',
-          description:
-            'Users should be able to add an available product to their cart.',
-        },
-      ),
-    ).toBe('NOT_DUPLICATE');
-    expect(
-      analyzeRelationship(
-        {
-          requirementKey: 'REQ-032',
-          title: 'Add Product',
-          description: 'Administrators should be able to add new products.',
-        },
-        {
-          requirementKey: 'REQ-034',
-          title: 'Remove Product',
-          description: 'Administrators should be able to remove products.',
-        },
-      ),
-    ).toBe('RELATED');
-    expect(
-      analyzeRelationship(
-        {
-          requirementKey: 'REQ-033',
-          title: 'Update Product',
-          description:
-            'Administrators should be able to update product information.',
-        },
-        {
-          requirementKey: 'REQ-035',
-          title: 'Update Product Inventory',
-          description:
-            'Administrators should be able to update product inventory.',
-        },
-      ),
-    ).toBe('RELATED');
-    expect(
-      analyzeRelationship(
-        {
-          requirementKey: 'REQ-026',
-          title: 'Order Confirmation',
-          description:
-            'The confirmation page should display product information.',
-        },
-        {
-          requirementKey: 'REQ-027',
-          title: 'Order Confirmation',
-          description: 'The user should receive an order confirmation email.',
-        },
-      ),
-    ).toBe('RELATED');
-    expect(
-      analyzeRelationship(
         {
           requirementKey: 'REQ-010',
           title: 'Product Search',
           description:
             'Users should be able to search for products using the search bar.',
         },
-        {
-          requirementKey: 'REQ-011',
-          title: 'Product Search Results',
-          description:
-            'Users can select a product from search results to view its details.',
-        },
       ),
-    ).toMatch(/RELATED|PRECEDES/);
+    ).toBe('NOT_RELATED');
   });
 
-  it('canonical relationships never include similarity-led POSSIBLE_DUPLICATE for cart vs admin', () => {
+  it('canonical relationships omit independent pairs', () => {
     const rels = toCanonicalRelationships([
       {
         requirementKey: 'REQ-014',
@@ -281,15 +180,7 @@ describe('Piece 2.2 semantic relations', () => {
         description: 'Administrators should be able to add new products.',
       },
     ]);
-    const hit = rels.find(
-      (r) =>
-        (r.sourceRequirementId === 'REQ-014' &&
-          r.targetRequirementId === 'REQ-032') ||
-        (r.sourceRequirementId === 'REQ-032' &&
-          r.targetRequirementId === 'REQ-014'),
-    );
-    expect(hit?.relationship).toBe('NOT_DUPLICATE');
-    expect(hit?.confidence).toBeUndefined();
+    expect(rels).toHaveLength(0);
   });
 });
 
@@ -332,7 +223,7 @@ describe('false duplicate guards', () => {
     ).toBe('RELATED');
   });
 
-  it('admin allow vs user deny are not duplicates', () => {
+  it('admin allow vs user deny are RELATED access-control peers', () => {
     expect(
       analyzeRelationship(
         {
@@ -348,7 +239,7 @@ describe('false duplicate guards', () => {
             'Normal users should not have administrator permissions.',
         },
       ),
-    ).toBe('NOT_DUPLICATE');
+    ).toBe('RELATED');
   });
 });
 
@@ -406,9 +297,9 @@ describe('Requirement semantic relationships', () => {
       'Users can select a product from search results to view its details.',
   };
 
-  test('admin add product is not duplicate of add to cart', () => {
+  test('admin add product is independent of add to cart', () => {
     expect(analyzeRelationship(adminAddProduct, addProductToCart)).toBe(
-      'NOT_DUPLICATE',
+      'NOT_RELATED',
     );
   });
 
@@ -428,9 +319,9 @@ describe('Requirement semantic relationships', () => {
     );
   });
 
-  test('search and selecting search result are related', () => {
-    expect(
-      analyzeRelationship(search, searchResultSelection),
-    ).toMatch(/RELATED|PRECEDES/);
+  test('search and selecting search result are sequential', () => {
+    expect(analyzeRelationship(search, searchResultSelection)).toBe(
+      'SEQUENTIAL',
+    );
   });
 });
