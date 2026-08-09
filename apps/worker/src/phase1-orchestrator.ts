@@ -211,7 +211,7 @@ type ManualFailure = {
 
 async function runManualSuite(opts: {
   ctx: AgentContext;
-  project: { id: string; appUrl: string };
+  project: { id: string; appUrl: string | null };
   executionId: string;
   browserSessionId: string;
   cases: Array<{
@@ -226,6 +226,7 @@ async function runManualSuite(opts: {
   passLabel: string;
 }): Promise<{ passed: number; failed: number; failures: ManualFailure[] }> {
   const page = await browserManager.getPage(opts.browserSessionId);
+  const appUrl = opts.project.appUrl ?? 'https://example.com';
   let passed = 0;
   let failed = 0;
   const failures: ManualFailure[] = [];
@@ -238,11 +239,11 @@ async function runManualSuite(opts: {
         ? (tc.testData as Record<string, string>)
         : null;
     try {
-      await page.goto(opts.project.appUrl, {
+      await page.goto(appUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 45_000,
       });
-      await executeTestSteps(page, steps, opts.project.appUrl, testData);
+      await executeTestSteps(page, steps, appUrl, testData);
       await prisma.testResult.create({
         data: {
           projectId: opts.project.id,
