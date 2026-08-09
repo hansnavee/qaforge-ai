@@ -1,7 +1,9 @@
 name: Deploy Railway
 
-# Backup deploy path when GitHub→Railway webhooks stop firing.
-# Requires repo secret: RAILWAY_TOKEN (Railway account or project token).
+# Primary deploy path for API/worker.
+# GitHub→Railway webhooks alone are unreliable after CLI `railway up` uploads.
+# Requires repo secret: RAILWAY_TOKEN (Railway account token from
+# https://railway.app/account/tokens — prefer a dedicated CI token).
 
 on:
   push:
@@ -35,6 +37,8 @@ concurrency:
 env:
   RAILWAY_PROJECT_ID: b16f09df-7481-49d2-add1-0fcd49a9cfe4
   RAILWAY_ENVIRONMENT: production
+  RAILWAY_REPO: hansnavee/qaforge-ai
+  RAILWAY_BRANCH: master
 
 jobs:
   deploy-api:
@@ -62,6 +66,14 @@ jobs:
             --detach \
             --yes \
             --message "GHA api ${GITHUB_SHA::7}"
+          # Keep GitHub source connected so dashboard still shows repo deploys
+          railway service source connect \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --service api \
+            --repo "$RAILWAY_REPO" \
+            --branch "$RAILWAY_BRANCH" \
+            --json
 
   deploy-worker:
     if: ${{ github.event_name == 'push' || github.event.inputs.service == 'worker' || github.event.inputs.service == 'both' }}
@@ -80,7 +92,6 @@ jobs:
             echo "::error::RAILWAY_TOKEN secret is missing."
             exit 1
           fi
-          # On push, only rebuild worker when worker-related paths change
           if [ "${{ github.event_name }}" = "push" ]; then
             if ! git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" | \
               grep -E '^(apps/worker/|packages/|docker/worker\.Dockerfile|hosting/railway\.worker\.toml|package\.json|pnpm-lock\.yaml)' >/dev/null; then
@@ -96,3 +107,10 @@ jobs:
             --detach \
             --yes \
             --message "GHA worker ${GITHUB_SHA::7}"
+          railway service source connect \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --service worker \
+            --repo "$RAILWAY_REPO" \
+            --branch "$RAILWAY_BRANCH" \
+            --json
