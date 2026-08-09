@@ -47,7 +47,31 @@ type ExtractionSummary = {
   businessRules: number;
   possibleDuplicates: number;
   sourceDocument: string;
+  rejected?: number;
+  merged?: number;
+  previousCount?: number;
+  tables?: number;
 };
+
+type ExtractionDecision = {
+  decision: string;
+  reason?: string;
+  source?: string;
+  aiCandidate?: string;
+  sourceElementType?: string;
+  parentKey?: string;
+  parentTitle?: string;
+  type?: string;
+  requirementKey?: string;
+  title?: string;
+  intoKey?: string;
+  intoTitle?: string;
+  detail?: string;
+};
+
+const SHOW_EXTRACTION_DEBUG =
+  process.env.NODE_ENV === 'development' ||
+  process.env.NEXT_PUBLIC_EXTRACTION_DEBUG === 'true';
 
 type ProjectDetail = {
   id: string;
@@ -119,6 +143,9 @@ export default function ProjectWorkspacePage() {
   const [progressStep, setProgressStep] = useState(0);
   const [summary, setSummary] = useState<ExtractionSummary | null>(null);
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [debugDecisions, setDebugDecisions] = useState<ExtractionDecision[]>(
+    [],
+  );
 
   const projectQuery = useQuery({
     queryKey: ['project', projectId],
@@ -146,6 +173,21 @@ export default function ProjectWorkspacePage() {
       }
     },
     enabled: Boolean(projectId),
+  });
+
+  const debugQuery = useQuery({
+    queryKey: ['extraction-debug', projectId],
+    queryFn: async () => {
+      try {
+        return await api<{
+          decisions: ExtractionDecision[];
+          stats: Record<string, number> | null;
+        }>(`/api/v1/projects/${projectId}/extraction-debug`);
+      } catch {
+        return { decisions: [], stats: null };
+      }
+    },
+    enabled: Boolean(projectId) && SHOW_EXTRACTION_DEBUG,
   });
 
   const project = projectQuery.data;
@@ -183,6 +225,7 @@ export default function ProjectWorkspacePage() {
         ok: boolean;
         summary: ExtractionSummary;
         requirements: ExtractedRequirement[];
+        debug?: { decisions: ExtractionDecision[] };
       }>(`/api/v1/projects/${projectId}/extract-requirements`, {
         method: 'POST',
         body: '{}',
@@ -191,8 +234,12 @@ export default function ProjectWorkspacePage() {
     onSuccess: async (data) => {
       setProgressStep(EXTRACT_STEPS.length);
       setSummary(data.summary);
+      if (data.debug?.decisions) setDebugDecisions(data.debug.decisions);
       await queryClient.invalidateQueries({
         queryKey: ['extracted-requirements', projectId],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['extraction-debug', projectId],
       });
       await queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       router.replace(`?tab=requirements&view=summary`, { scroll: false });
@@ -412,13 +459,101 @@ export default function ProjectWorkspacePage() {
             <div className="font-medium">{summary.nonFunctional}</div>
             <div>Business Rules</div>
             <div className="font-medium">{summary.businessRules}</div>
+            {summary.rejected != null ? (
+              <>
+                <div>Rejected Candidates</div>
+                <div className="font-medium">{summary.rejected}</div>
+              </>
+            ) : null}
+            {summary.merged != null ? (
+              <>
+                <div>Merged Duplicates</div>
+                <div className="font-medium">{summary.merged}</div>
+              </>
+            ) : null}
             <div>Source Document</div>
             <div className="font-medium">{summary.sourceDocument}</div>
           </div>
-          <Button onClick={() => setView('list')}>View Requirements</Button>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => setView('list')}>View Requirements</Button>
+            {SHOW_EXTRACTION_DEBUG ? (
+              <Button variant="secondary" onClick={() => setView('debug')}>
+                Extraction Debug
+              </Button>
+            ) : null}
+          </div>
         </Card>
       ) : null}
 
+      {tab !== 'overview' &&
+      !extractMutation.isPending &&
+      view === 'debug' &&
+      SHOW_EXTRACTION_DEBUG ? (
+        <Card className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-medium">Extraction Debug</h2>
+              <p className="mt-1 text-sm text-muted">
+                Source → candidate → validation decision (dev only)
+              </p>
+            </div>
+            <Button variant="secondary" size="sm" onClick={() => setView('list')}>
+              Back to list
+            </Button>
+          </div>
+          <ul className="max-h-[32rem] space-y-3 overflow-y-auto text-sm">
+            {(debugDecisions.length
+              ? debugDecisions
+              : debugQuery.data?.decisions ?? []
+            ).map((d, i) => (
+              <li
+                key={`${d.decision}-${i}`}
+                className="rounded-lg border border-border bg-bg-elevated/40 p-3"
+              >
+                <div className="font-mono text-xs uppercase tracking-wide text-muted">
+                  {d.decision}
+                  {d.reason ? ` · ${d.reason}` : ''}
+                  {d.type ? ` · ${d.type}` : ''}
+                </div>
+                {d.source ? (
+                  <div className="mt-2">
+                    <div className="text-xs text-muted">SOURCE</div>
+                    <pre className="mt-1 whitespace-pre-wrap font-sans text-fg">
+                      {d.source}
+                    </pre>
+                  </div>
+                ) : null}
+                {d.aiCandidate ? (
+                  <div className="mt-2">
+                    <div className="text-xs text-muted">AI CANDIDATE</div>
+                    <pre className="mt-1 whitespace-pre-wrap font-sans text-fg">
+                      {d.aiCandidate}
+                    </pre>
+                  </div>
+                ) : null}
+                {d.decision === 'SAVE' ? (
+                  <div className="mt-2 text-success">
+                    FINAL: {d.requirementKey} {d.title}
+                  </div>
+                ) : null}
+                {d.decision === 'MERGE' ? (
+                  <div className="mt-2">
+                    MERGED INTO: {d.intoKey} {d.intoTitle}
+                  </div>
+                ) : null}
+                {d.decision === 'ATTACH_TO_PARENT' ? (
+                  <div className="mt-2">
+                    PARENT: {d.parentKey} {d.parentTitle}
+                  </div>
+                ) : null}
+                {d.detail ? (
+                  <div className="mt-1 text-xs text-muted">{d.detail}</div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
       {tab !== 'overview' && !extractMutation.isPending && view === 'detail' && selected ? (
         <Card className="space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">

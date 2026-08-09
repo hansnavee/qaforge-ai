@@ -8,11 +8,10 @@ import { prisma } from '@qaforge/database';
 import {
   Role,
   extractionAiResponseSchema,
-  extractRequirementsFromSource,
-  filterExtractedRequirements,
+  finalizeExtraction,
   parseRequirementDocument,
   type ExtractedRequirementInput,
-  type ExtractionResult,
+  type ExtractionDecision,
 } from '@qaforge/shared';
 import { AuditService } from '../common/audit.service';
 import type { SessionUser } from '../auth/auth';
@@ -26,44 +25,6 @@ function normalizeText(value: string): string {
     .replace(/\s+/g, ' ')
     .replace(/[^\w\s]/g, '')
     .trim();
-}
-
-function flagDuplicates(
-  items: ExtractedRequirementInput[],
-): Map<string, string | null> {
-  const flags = new Map<string, string | null>();
-  for (let i = 0; i < items.length; i++) {
-    flags.set(items[i]!.requirementKey, null);
-    const a = normalizeText(items[i]!.description);
-    for (let j = 0; j < i; j++) {
-      const b = normalizeText(items[j]!.description);
-      if (!a || !b) continue;
-      if (a === b || a.includes(b) || b.includes(a)) {
-        flags.set(items[i]!.requirementKey, items[j]!.requirementKey);
-        break;
-      }
-    }
-  }
-  return flags;
-}
-
-function toExtractedInput(
-  result: ExtractionResult,
-): ExtractedRequirementInput[] {
-  return result.requirements.map((r) => ({
-    requirementKey: r.requirementKey,
-    title: r.title,
-    description: r.description,
-    type: r.type,
-    priority: r.priority,
-    acceptanceCriteria: r.acceptanceCriteria,
-    businessRules: r.businessRules,
-    dependencies: r.dependencies,
-    supportingInformation: r.supportingInformation,
-    source: r.source,
-    sourceText: r.source.text,
-    section: r.source.section,
-  }));
 }
 
 @Injectable()
@@ -169,6 +130,28 @@ export class RequirementExtractionService {
     return this.mapRequirement(row);
   }
 
+  async getExtractionDebug(userId: string, orgId: string, projectId: string) {
+    await this.requireProject(userId, orgId, projectId);
+    const doc = await prisma.requirementDocument.findFirst({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' },
+    });
+    const structure = (doc?.documentStructure ?? {}) as {
+      sections?: unknown[];
+      tables?: unknown[];
+      lastExtractionDecisions?: ExtractionDecision[];
+      lastExtractionStats?: Record<string, number>;
+    };
+    return {
+      ok: true,
+      documentId: doc?.id ?? null,
+      stats: structure.lastExtractionStats ?? null,
+      decisions: structure.lastExtractionDecisions ?? [],
+      sections: structure.sections ?? [],
+      tables: structure.tables ?? [],
+    };
+  }
+
   async extract(user: SessionUser, orgId: string, projectId: string) {
     const project = await this.requireProject(
       user.id,
@@ -196,71 +179,140 @@ export class RequirementExtractionService {
       orderBy: { requirementKey: 'asc' },
     });
 
-    const { requirements: parsed, documentElements } =
-      await this.extractPipeline(sourceText, doc.filename);
+    // AI candidates are NEVER written directly — finalize gate only.
+    const aiCandidates = await this.collectAiCandidates(sourceText, doc.filename);
+    const finalized = finalizeExtraction({
+      sourceText,
+      documentName: doc.filename,
+      aiCandidates,
+    });
 
-    if (!parsed.length) {
+    if (process.env.NODE_ENV !== 'production' || process.env.EXTRACTION_DEBUG === 'true') {
+      for (const d of finalized.decisions) {
+        if (d.decision === 'REJECT') {
+          console.debug(
+            `[extract] REJECT (${d.reason}): ${d.source?.slice(0, 80) ?? ''}`,
+          );
+        } else if (d.decision === 'SAVE') {
+          console.debug(`[extract] SAVE ${d.requirementKey} ${d.title}`);
+        } else if (d.decision === 'MERGE') {
+          console.debug(`[extract] MERGE → ${d.intoKey}`);
+        } else if (d.decision === 'TABLE_DATA') {
+          console.debug('[extract] TABLE → TABLE_DATA');
+        } else if (d.decision === 'SECTION_CONTEXT') {
+          console.debug(`[extract] SECTION → CONTEXT: ${d.source}`);
+        }
+      }
+    }
+
+    if (!finalized.requirements.length) {
       throw new BadRequestException(
         'No clear requirements were detected. Please check the document or paste the requirements manually.',
       );
     }
 
-    // Persist parsed structure (sections/tables) on the source document
-    await prisma.requirementDocument.update({
-      where: { id: doc.id },
-      data: {
-        documentStructure: documentElements as object,
-      },
-    });
+    // Preserve stable keys by source text when possible, then replace DB set
+    const assigned = this.assignStableKeys(
+      finalized.requirements.map((r) => ({
+        requirementKey: r.requirementKey,
+        title: r.title,
+        description: r.description,
+        type: r.type,
+        priority: r.priority,
+        acceptanceCriteria: r.acceptanceCriteria,
+        businessRules: r.businessRules,
+        dependencies: r.dependencies,
+        supportingInformation: r.supportingInformation,
+        source: r.source,
+        sourceText: r.source.text,
+        section: r.source.section,
+      })),
+      existing,
+    );
 
-    const assigned = this.assignStableKeys(parsed, existing);
-    const duplicateFlags = flagDuplicates(assigned);
+    const finalKeys = assigned.map((a) => a.requirementKey);
 
-    const saved = [];
-    for (const item of assigned) {
-      const data = {
-        title: item.title,
-        description: item.description,
-        type: item.type,
-        priority: item.priority ?? null,
-        status: 'EXTRACTED',
-        sourceDocumentId: doc.id,
-        sourcePage: item.source?.page ?? null,
-        sourceSection: item.section ?? item.source?.section ?? null,
-        sourceText: item.sourceText ?? item.source?.text ?? item.description,
-        acceptanceCriteria: item.acceptanceCriteria,
-        businessRules: item.businessRules,
-        dependencies: item.dependencies,
-        supportingInformation: item.supportingInformation ?? [],
-        possibleDuplicateOf: duplicateFlags.get(item.requirementKey) ?? null,
-      };
-
-      const row = await prisma.requirement.upsert({
-        where: {
-          projectId_requirementKey: {
-            projectId,
-            requirementKey: item.requirementKey,
+    await prisma.$transaction(async (tx) => {
+      await tx.requirementDocument.update({
+        where: { id: doc.id },
+        data: {
+          documentStructure: {
+            sections: finalized.documentElements.sections,
+            tables: finalized.documentElements.tables,
+            lastExtractionDecisions: finalized.decisions,
+            lastExtractionStats: {
+              ...finalized.stats,
+              previousCount: existing.length,
+            },
           },
         },
-        create: {
-          projectId,
-          requirementKey: item.requirementKey,
-          ...data,
-        },
-        update: data,
-        include: { sourceDocument: { select: { filename: true } } },
       });
-      saved.push(this.mapRequirement(row));
-    }
+
+      // Remove invalid/orphan rows from prior extractions (headings, tables, etc.)
+      if (finalKeys.length) {
+        await tx.requirement.deleteMany({
+          where: {
+            projectId,
+            requirementKey: { notIn: finalKeys },
+          },
+        });
+      } else {
+        await tx.requirement.deleteMany({ where: { projectId } });
+      }
+
+      for (const item of assigned) {
+        const data = {
+          title: item.title,
+          description: item.description,
+          type: item.type,
+          priority: item.priority ?? null,
+          status: 'EXTRACTED',
+          sourceDocumentId: doc.id,
+          sourcePage: item.source?.page ?? null,
+          sourceSection: item.section ?? item.source?.section ?? null,
+          sourceText: item.sourceText ?? item.source?.text ?? item.description,
+          acceptanceCriteria: item.acceptanceCriteria,
+          businessRules: item.businessRules,
+          dependencies: item.dependencies,
+          supportingInformation: item.supportingInformation ?? [],
+          possibleDuplicateOf: null as string | null,
+        };
+
+        await tx.requirement.upsert({
+          where: {
+            projectId_requirementKey: {
+              projectId,
+              requirementKey: item.requirementKey,
+            },
+          },
+          create: {
+            projectId,
+            requirementKey: item.requirementKey,
+            ...data,
+          },
+          update: data,
+        });
+      }
+    });
+
+    const savedRows = await prisma.requirement.findMany({
+      where: { projectId },
+      include: { sourceDocument: { select: { filename: true } } },
+      orderBy: { requirementKey: 'asc' },
+    });
+    const saved = savedRows.map((r) => this.mapRequirement(r));
 
     const summary = {
       total: saved.length,
       functional: saved.filter((r) => r.type === 'FUNCTIONAL').length,
       nonFunctional: saved.filter((r) => r.type === 'NON_FUNCTIONAL').length,
       businessRules: saved.filter((r) => r.type === 'BUSINESS_RULE').length,
-      possibleDuplicates: saved.filter((r) => r.possibleDuplicateOf).length,
-      tables: documentElements.tables.length,
-      sections: documentElements.sections.length,
+      possibleDuplicates: 0,
+      tables: finalized.documentElements.tables.length,
+      sections: finalized.documentElements.sections.length,
+      rejected: finalized.stats.rejected,
+      merged: finalized.stats.merged,
+      previousCount: existing.length,
       sourceDocument: doc.filename,
     };
 
@@ -277,63 +329,26 @@ export class RequirementExtractionService {
       ok: true,
       summary,
       requirements: saved,
-      documentElements,
+      documentElements: finalized.documentElements,
+      // Decision log for extraction debug view / API (not end-user CoT)
+      debug: {
+        decisions: finalized.decisions,
+        stats: finalized.stats,
+      },
     };
   }
 
   /**
-   * Parser → AI (optional) → normalize → validate.
-   * Deterministic semantic extract is the reliable baseline.
+   * Collect AI candidates only — never persisted until finalizeExtraction.
    */
-  private async extractPipeline(
+  private async collectAiCandidates(
     sourceText: string,
     documentName: string,
-  ): Promise<{
-    requirements: ExtractedRequirementInput[];
-    documentElements: ExtractionResult['documentElements'];
-  }> {
-    const parsedDoc = parseRequirementDocument(sourceText);
-    const baseline = extractRequirementsFromSource(sourceText, documentName);
-    const fallbackReqs = filterExtractedRequirements(
-      toExtractedInput(baseline),
-    );
-
+  ): Promise<ExtractedRequirementInput[]> {
     try {
-      const fromLlm = await this.callLlm(parsedDoc, documentName);
-      const filtered = filterExtractedRequirements(fromLlm).map((r) => ({
-        ...r,
-        supportingInformation: r.supportingInformation ?? [],
-        source: {
-          document: r.source?.document || documentName,
-          page: r.source?.page ?? null,
-          section: r.section ?? r.source?.section ?? null,
-          text: r.sourceText || r.source?.text || r.description,
-        },
-        sourceText: r.sourceText || r.source?.text || r.description,
-      }));
-
-      if (
-        filtered.length === 0 ||
-        filtered.length < Math.max(1, Math.floor(fromLlm.length * 0.4))
-      ) {
-        return {
-          requirements: fallbackReqs,
-          documentElements: baseline.documentElements,
-        };
-      }
-
-      return {
-        requirements: filtered,
-        documentElements: {
-          sections: baseline.documentElements.sections,
-          tables: baseline.documentElements.tables,
-        },
-      };
+      return await this.callLlm(sourceText, documentName);
     } catch {
-      return {
-        requirements: fallbackReqs,
-        documentElements: baseline.documentElements,
-      };
+      return [];
     }
   }
 
@@ -349,14 +364,11 @@ export class RequirementExtractionService {
     const bySource = new Map<string, string>();
     for (const e of existing) {
       const key = normalizeText(e.sourceText || e.description);
+      // Only reuse keys for content that would still be valid finals
       if (key) bySource.set(key, e.requirementKey);
     }
 
-    let nextNum =
-      existing.reduce((max, e) => {
-        const m = e.requirementKey.match(/^REQ-(\d+)$/i);
-        return m ? Math.max(max, Number(m[1])) : max;
-      }, 0) + 1;
+    let nextNum = 1;
 
     return incoming.map((item) => {
       const sourceKey = normalizeText(
@@ -364,19 +376,9 @@ export class RequirementExtractionService {
       );
       let key = bySource.get(sourceKey);
 
-      if (!key) {
-        const candidate = item.requirementKey.toUpperCase();
-        const clash = existing.find((e) => e.requirementKey === candidate);
-        if (
-          !used.has(candidate) &&
-          (!clash ||
-            normalizeText(clash.sourceText || clash.description) === sourceKey)
-        ) {
-          key = candidate;
-        }
-      }
+      if (key && used.has(key)) key = undefined;
 
-      if (!key || used.has(key)) {
+      if (!key) {
         while (used.has(`REQ-${String(nextNum).padStart(3, '0')}`)) nextNum += 1;
         key = `REQ-${String(nextNum).padStart(3, '0')}`;
         nextNum += 1;
@@ -388,34 +390,33 @@ export class RequirementExtractionService {
   }
 
   private async callLlm(
-    parsedDoc: ReturnType<typeof parseRequirementDocument>,
+    sourceText: string,
     documentName: string,
   ): Promise<ExtractedRequirementInput[]> {
+    const parsedDoc = parseRequirementDocument(sourceText);
     const structured = JSON.stringify(
       {
         document: documentName,
         elements: parsedDoc.elements,
+        sectionHierarchy: parsedDoc.sections.map((s) => s.title),
       },
       null,
       2,
     ).slice(0, 60_000);
 
     const llm = await this.llm.complete({
-      system: `You perform SEMANTIC software requirement extraction from a PARSED document.
+      system: `You extract CANDIDATE software requirements from a PARSED document.
 
-The input is already structured into HEADING, PARAGRAPH, LIST, and TABLE elements.
+Return candidates only. A server-side quality gate will reject invalid ones.
 
 Hard rules:
-- HEADING elements are NEVER requirements. Use section headings only as section context.
-- Acceptance Criteria headings and their LIST items become acceptanceCriteria on the parent requirement.
-- TABLE elements are NEVER requirements. Ignore table headers and rows.
-- Do NOT create a requirement per bullet. LIST items under display/contain intros become supportingInformation.
-- Separate clearly independent behaviors into distinct requirements.
-- Only populate acceptanceCriteria / businessRules / dependencies / supportingInformation when present in source.
-- Never invent information.
-- Classify FUNCTIONAL | NON_FUNCTIONAL | BUSINESS_RULE correctly.
-- Titles must be concise and complete (e.g. "User Login"), never truncated mid-phrase.
-- sourceText must be the full original statement, never truncated.
+- Never return HEADING text as a candidate (including markdown # headings).
+- Never return TABLE headers or rows as candidates.
+- Never return Acceptance Criteria labels or individual AC bullets as candidates; attach them to parent acceptanceCriteria.
+- Never return isolated formatting fragments or incomplete sentences ending with ':'.
+- Section titles alone are not candidates.
+- Prefer fewer accurate candidates over many fragments.
+- sourceText must be the full original statement.
 - requirementKey format: REQ-001, REQ-002, ...`,
       prompt: `Parsed document JSON:
 ${structured}
@@ -436,11 +437,7 @@ Return JSON only:
       "supportingInformation": [],
       "sourceText": "exact full source statement"
     }
-  ],
-  "documentElements": {
-    "sections": [],
-    "tables": []
-  }
+  ]
 }`,
       json: true,
       model: 'fast',

@@ -126,6 +126,15 @@ export class ProjectsCompatController {
     );
   }
 
+  @Get(':projectId/extraction-debug')
+  async extractionDebug(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.extraction.getExtractionDebug(user.id, orgId, projectId);
+  }
+
   @Get(':projectId')
   async get(
     @CurrentUser() user: SessionUser,

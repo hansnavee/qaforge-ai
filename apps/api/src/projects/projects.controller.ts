@@ -115,6 +115,15 @@ export class ProjectsController {
     );
   }
 
+  @Get(':projectId/extraction-debug')
+  extractionDebug(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.extraction.getExtractionDebug(user.id, orgId, projectId);
+  }
+
   @Get(':projectId')
   get(
     @CurrentUser() user: SessionUser,
