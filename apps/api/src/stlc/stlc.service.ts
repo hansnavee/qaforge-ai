@@ -56,10 +56,32 @@ export class StlcService {
   }
 
   private async latestExecution(projectId: string) {
-    return prisma.execution.findFirst({
-      where: { projectId },
+    const rows = await prisma.execution.findMany({
+      where: {
+        projectId,
+        runMode: { in: ['STLC', 'PHASE1', 'FULL'] },
+        status: { notIn: ['CANCELLED'] },
+      },
       orderBy: { createdAt: 'desc' },
+      take: 30,
     });
+    if (!rows.length) return null;
+
+    const rank = (status: string) => {
+      if (status.startsWith('AWAITING_')) return 5;
+      if (status === 'RUNNING') return 4;
+      if (status === 'QUEUED' || status === 'PENDING') return 2;
+      if (status === 'COMPLETED') return 1;
+      return 0;
+    };
+
+    return (
+      [...rows].sort(
+        (a, b) =>
+          rank(b.status) - rank(a.status) ||
+          b.createdAt.getTime() - a.createdAt.getTime(),
+      )[0] ?? null
+    );
   }
 
   async listPhases(user: SessionUser, orgId: string, projectId: string) {

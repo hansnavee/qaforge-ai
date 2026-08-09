@@ -80,6 +80,68 @@ export class Phase1Service {
     return this.start(user, orgId, projectId);
   }
 
+  /**
+   * Prefer an in-flight STLC run (awaiting human / running) over a newer
+   * QUEUED duplicate. Worker concurrency is often 1 and blocks on gates, so
+   * extra starts otherwise sit forever at INIT.
+   */
+  private async findActiveStlcExecution(projectId: string) {
+    const rows = await prisma.execution.findMany({
+      where: {
+        projectId,
+        runMode: { in: ['STLC', 'PHASE1'] },
+        status: {
+          notIn: [
+            ExecutionStatus.CANCELLED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.COMPLETED,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+    });
+
+    const rank = (status: string) => {
+      if (status.startsWith('AWAITING_')) return 4;
+      if (status === ExecutionStatus.RUNNING) return 3;
+      if (
+        status === ExecutionStatus.QUEUED ||
+        status === ExecutionStatus.PENDING
+      ) {
+        return 1;
+      }
+      return 0;
+    };
+
+    return (
+      [...rows].sort(
+        (a, b) =>
+          rank(b.status) - rank(a.status) ||
+          b.createdAt.getTime() - a.createdAt.getTime(),
+      )[0] ?? null
+    );
+  }
+
+  private stlcStageFromExecutionStatus(status: string): string | null {
+    const map: Record<string, string> = {
+      AWAITING_PLAN_APPROVAL: 'PLANNING',
+      AWAITING_DESIGN_APPROVAL: 'DESIGN',
+      AWAITING_ENV_APPROVAL: 'ENVIRONMENT',
+      AWAITING_DATA_APPROVAL: 'DATA',
+      AWAITING_LOGIN: 'EXECUTION',
+      AWAITING_EXECUTION_APPROVAL: 'EXECUTION',
+      AWAITING_DEFECT_APPROVAL: 'DEFECTS',
+      AWAITING_AUTOMATION_APPROVAL: 'AUTOMATION',
+      AWAITING_REPORT_APPROVAL: 'REPORTING',
+      AWAITING_QA_SIGNOFF: 'SIGNOFF',
+      QUEUED: 'PLANNING',
+      PENDING: 'PLANNING',
+      RUNNING: 'PLANNING',
+    };
+    return map[status] ?? null;
+  }
+
   async start(user: SessionUser, orgId: string, projectId: string) {
     const project = await this.requireProject(
       user.id,
@@ -128,6 +190,56 @@ export class Phase1Service {
       });
     }
 
+    // Resume the active run instead of queueing another INIT job.
+    const existing = await this.findActiveStlcExecution(projectId);
+    if (existing) {
+      // Drop duplicate QUEUED starts that can never run while a gate is held.
+      await prisma.execution.updateMany({
+        where: {
+          projectId,
+          runMode: { in: ['STLC', 'PHASE1'] },
+          status: {
+            in: [ExecutionStatus.QUEUED, ExecutionStatus.PENDING],
+          },
+          id: { not: existing.id },
+        },
+        data: {
+          status: ExecutionStatus.CANCELLED,
+          finishedAt: new Date(),
+          errorSummary:
+            'Cancelled — another STLC run is already in progress for this project',
+        },
+      });
+
+      if (
+        existing.status === ExecutionStatus.QUEUED ||
+        existing.status === ExecutionStatus.PENDING
+      ) {
+        await this.queue.enqueueRunExecution(existing.id, {
+          jobId: `stlc-retry-${existing.id}-${Date.now()}`,
+          runMode: 'STLC',
+        });
+      }
+
+      const stage = this.stlcStageFromExecutionStatus(existing.status);
+      if (stage) {
+        await prisma.project.update({
+          where: { id: projectId },
+          data: { stlcStage: stage },
+        });
+      }
+
+      await this.queue.publishExecutionEvent(existing.id, {
+        executionId: existing.id,
+        type: 'stlc.resume_existing',
+        phase: existing.phase,
+        message: `Continuing existing STLC run (${existing.status}) instead of starting a new one`,
+        timestamp: new Date().toISOString(),
+      });
+
+      return existing;
+    }
+
     const execution = await prisma.execution.create({
       data: {
         projectId: project.id,
@@ -156,6 +268,8 @@ export class Phase1Service {
         regressionApprovedBy: null,
         automationApprovedAt: null,
         automationApprovedBy: null,
+        reportApprovedAt: null,
+        reportApprovedBy: null,
         qaSignedOffAt: null,
         qaSignedOffBy: null,
       },

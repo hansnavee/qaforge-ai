@@ -1059,16 +1059,24 @@ export default function ProjectWorkspacePage() {
 
   const startPlanningMutation = useMutation({
     mutationFn: async () => {
-      return api<{ id: string }>(`/api/v1/projects/${projectId}/stlc/start`, {
-        method: 'POST',
-        body: '{}',
-      });
+      return api<{ id: string; status?: string; phase?: string }>(
+        `/api/v1/projects/${projectId}/stlc/start`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
     },
     onSuccess: async (execution) => {
       await invalidateReviewQueries();
-      if (execution?.id) {
+      void qc.invalidateQueries({ queryKey: ['stlc-phases', projectId] });
+      if (!execution?.id) return;
+      // If a run is already waiting for Approve, open that execution — not a stuck INIT job.
+      if (execution.status?.startsWith('AWAITING_')) {
         router.push(`/app/executions/${execution.id}`);
+        return;
       }
+      router.replace('?tab=stlc&phase=PLANNING', { scroll: false });
     },
   });
 
