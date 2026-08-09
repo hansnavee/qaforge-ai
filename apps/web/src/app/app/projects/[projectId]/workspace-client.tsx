@@ -1388,36 +1388,77 @@ export default function ProjectWorkspacePage() {
                         : 'Approve →'}
                     </Button>
                   </>
-                ) : (
-                  <>
-                    <Button
-                      size="sm"
-                      onClick={() => startPlanningMutation.mutate()}
-                      disabled={startPlanningMutation.isPending}
-                    >
-                      {startPlanningMutation.isPending
-                        ? 'Starting…'
-                        : 'Continue to Test Planning'}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() =>
-                        router.replace('?tab=stlc&phase=PLANNING', {
-                          scroll: false,
-                        })
-                      }
-                    >
-                      Open current phase
-                    </Button>
-                  </>
-                )}
+                ) : (() => {
+                  const stage = (
+                    reviewSummaryQuery.data?.stlcStage ??
+                    project.stlcStage ??
+                    'PLANNING'
+                  ).toUpperCase();
+                  const needsPlanningKickoff =
+                    stage === 'REQUIREMENTS' || stage === 'PLANNING';
+                  const currentPhaseId =
+                    stage === 'REQUIREMENTS' ? 'PLANNING' : stage;
+                  return (
+                    <>
+                      {needsPlanningKickoff ? (
+                        <Button
+                          size="sm"
+                          onClick={() => startPlanningMutation.mutate()}
+                          disabled={startPlanningMutation.isPending}
+                        >
+                          {startPlanningMutation.isPending
+                            ? 'Starting…'
+                            : 'Continue to Test Planning'}
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          onClick={() =>
+                            router.replace(
+                              `?tab=stlc&phase=${currentPhaseId}`,
+                              { scroll: false },
+                            )
+                          }
+                        >
+                          Continue: {activeStep?.label.replace(/^\d+\.\s*/, '')}
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() =>
+                          router.replace('?tab=stlc&phase=DESIGN', {
+                            scroll: false,
+                          })
+                        }
+                      >
+                        Review test cases
+                      </Button>
+                    </>
+                  );
+                })()}
               </div>
 
               {requirementsApproved ? (
                 <p className="mt-3 text-xs text-muted">
-                  Continues AI Test Planning: generates the strategy, designs
-                  documented test cases, then unlocks Test Design for review.
+                  {(
+                    reviewSummaryQuery.data?.stlcStage ??
+                    project.stlcStage ??
+                    ''
+                  ).toUpperCase() === 'ENVIRONMENT'
+                    ? 'Environment = Test Environment Setup (browsers, URL, credentials). Planning and Design are already done — open Review test cases anytime, or Continue to Accept Environment.'
+                    : (
+                          reviewSummaryQuery.data?.stlcStage ??
+                          project.stlcStage ??
+                          'PLANNING'
+                        ).toUpperCase() === 'PLANNING' ||
+                        (
+                          reviewSummaryQuery.data?.stlcStage ??
+                          project.stlcStage ??
+                          ''
+                        ).toUpperCase() === 'REQUIREMENTS'
+                      ? 'Continues AI Test Planning: generates the strategy, designs documented test cases, then unlocks Test Design for review.'
+                      : 'Open your current STLC step to Accept, or Review test cases to edit Design anytime.'}
                 </p>
               ) : null}
 

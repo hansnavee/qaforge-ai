@@ -99,8 +99,8 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
   const phases = phasesQuery.data?.phases ?? [];
   const currentPhaseId = phasesQuery.data?.currentPhaseId ?? null;
 
-  /** Only the active gate phase — ignore stale READY docs from earlier steps. */
-  const currentPhase = useMemo(() => {
+  /** Active Accept-gate phase (where the run is waiting). */
+  const gatePhase = useMemo(() => {
     if (currentPhaseId) {
       const active = phases.find((p) => p.id === currentPhaseId);
       if (active) return active;
@@ -116,20 +116,35 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
     );
   }, [phases, currentPhaseId]);
 
-  const selected = currentPhase?.id ?? 'PLANNING';
+  /**
+   * Allow browsing ACCEPTED/READY prior steps (e.g. Design cases while the
+   * gate is Environment). Only bounce away from LOCKED / unknown phases.
+   */
+  const viewingPhase = useMemo(() => {
+    if (phaseParam) {
+      const requested = phases.find((p) => p.id === phaseParam);
+      if (requested && requested.status !== 'LOCKED') return requested;
+    }
+    return gatePhase;
+  }, [phaseParam, phases, gatePhase]);
+
+  const selected = viewingPhase?.id ?? 'PLANNING';
 
   useEffect(() => {
-    if (!currentPhase) return;
-    // Always keep the URL on the active gate so users don't get stuck on an
-    // older step with Accept disabled.
-    if (phaseParam !== currentPhase.id) {
-      router.replace(`?tab=stlc&phase=${currentPhase.id}`, { scroll: false });
+    if (!phases.length || !gatePhase) return;
+    const requested = phaseParam
+      ? phases.find((p) => p.id === phaseParam)
+      : null;
+    if (!phaseParam || !requested || requested.status === 'LOCKED') {
+      if (phaseParam !== gatePhase.id) {
+        router.replace(`?tab=stlc&phase=${gatePhase.id}`, { scroll: false });
+      }
     }
-  }, [currentPhase, phaseParam, router]);
+  }, [phases, gatePhase, phaseParam, router]);
 
   const phaseQuery = useQuery({
     queryKey: ['stlc-phase', projectId, selected],
-    enabled: Boolean(currentPhase),
+    enabled: Boolean(viewingPhase),
     queryFn: async () => {
       const orgId = await getDefaultOrgId();
       return api<PhaseDetail>(
@@ -201,20 +216,15 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
   });
 
   const detail = phaseQuery.data;
-  const stepNum = currentPhase?.index ?? 1;
+  const stepNum = viewingPhase?.index ?? 1;
   const total = phases.length || 10;
   const doneCount = phases.filter((p) => p.status === 'ACCEPTED').length;
   const prevPhase = phases.find((p) => p.index === stepNum - 1);
   const nextPhase = phases.find((p) => p.index === stepNum + 1);
   const latestExecutionId = phasesQuery.data?.latestExecutionId ?? null;
-  const latestExecutionStatus =
-    phasesQuery.data?.latestExecutionStatus ?? null;
-  const awaitingAi =
-    Boolean(latestExecutionId) &&
-    (detail?.status === 'RUNNING' ||
-      latestExecutionStatus === 'QUEUED' ||
-      latestExecutionStatus === 'PENDING' ||
-      latestExecutionStatus === 'RUNNING');
+  const browsingPastGate =
+    Boolean(gatePhase && viewingPhase && gatePhase.id !== viewingPhase.id);
+  const awaitingAi = detail?.status === 'RUNNING';
   const waitingToStart =
     (selected === 'PLANNING' || selected === 'DESIGN') &&
     !latestExecutionId &&
@@ -235,7 +245,7 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
     router.replace(`?tab=stlc&phase=${prevPhase.id}`, { scroll: false });
   }
 
-  if (!currentPhase) {
+  if (!gatePhase && !viewingPhase) {
     return (
       <p className="text-sm text-muted">
         No QA step available yet. Approve requirements first, then start Test
@@ -262,15 +272,35 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
         </div>
       </div>
 
+      {browsingPastGate && gatePhase ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-sm">
+          <p className="text-muted">
+            Viewing past step. Your turn now:{' '}
+            <span className="font-medium text-fg">{gatePhase.label}</span>
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() =>
+              router.replace(`?tab=stlc&phase=${gatePhase.id}`, {
+                scroll: false,
+              })
+            }
+          >
+            Go to your turn →
+          </Button>
+        </div>
+      ) : null}
+
       <section className="rounded-xl border border-border bg-surface p-5 sm:p-6">
         <p className="text-xs font-medium uppercase tracking-wide text-muted">
-          Current phase only
+          {browsingPastGate ? 'Browsing completed step' : 'Your turn'}
         </p>
         <h3 className="mt-1 text-2xl font-semibold text-fg">
-          {currentPhase.label}
+          {viewingPhase?.label ?? selected}
         </h3>
         <p className="mt-1 text-sm text-muted">
-          {currentPhase.agentName}
+          {viewingPhase?.agentName}
           {detail?.description ? ` · ${detail.description}` : ''}
         </p>
 
@@ -285,7 +315,7 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
               unlock Test Design for edit/delete review.
             </p>
           </div>
-        ) : awaitingAi || detail.status === 'RUNNING' ? (
+        ) : awaitingAi ? (
           <div className="mt-6 space-y-3">
             <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm">
               {selected === 'PLANNING' || selected === 'DESIGN' ? (
@@ -470,8 +500,10 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
 
       <p className="text-center text-xs text-muted">
         {selected === 'DESIGN'
-          ? 'Review, edit, or delete cases, then Accept. You can still edit cases later.'
-          : 'You only work on this one phase. After Accept, we take you to the next phase automatically.'}
+          ? 'Test cases stay editable anytime — even after Design was accepted.'
+          : browsingPastGate
+            ? 'You can revisit completed steps. Accept only applies on your current turn.'
+            : 'After Accept, we take you to the next phase automatically.'}
       </p>
     </div>
   );

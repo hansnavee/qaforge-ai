@@ -811,10 +811,15 @@ export class Phase1Service {
 
   async listTestCases(userId: string, orgId: string, projectId: string) {
     await this.requireProject(userId, orgId, projectId);
-    return prisma.testCase.findMany({
+    const cases = await prisma.testCase.findMany({
       where: { projectId },
       orderBy: { createdAt: 'asc' },
     });
+    // Keep DESIGN phase doc aligned with persisted cases (browse/edit after Accept).
+    if (cases.length) {
+      void this.syncDesignDocFromCases(projectId).catch(() => undefined);
+    }
+    return cases;
   }
 
   private async syncDesignDocFromCases(projectId: string) {
