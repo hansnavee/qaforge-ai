@@ -190,8 +190,8 @@ export function detectBusinessConflicts(
         conflicts.push({
           keyA: a.requirementKey,
           keyB: b.requirementKey,
-          summary: 'Cancellation eligibility differs',
-          detail: `Business rule conflict between ${a.requirementKey} and ${b.requirementKey}. Clarification required before test design.`,
+          summary: 'BUSINESS CONFLICT: cancellation eligibility differs',
+          detail: `${a.requirementKey} conflicts with ${b.requirementKey} on which order statuses allow cancellation. Do not decide automatically. Question: Which order statuses actually allow cancellation?`,
         });
       }
     }

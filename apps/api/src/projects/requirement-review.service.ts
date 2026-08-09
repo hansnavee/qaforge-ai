@@ -12,12 +12,12 @@ import {
   detectDuplicatePairs,
   detectRequirementRelations,
   dedupeQuestionsAgainstExisting,
-  deriveFeatureImpact,
-  deriveFeatureStatus,
+  FEATURE_DEPENDENCY_EDGES,
   deriveStatuses,
   groupRequirementsIntoFeatures,
   interpretAnswer,
   questionBucket,
+  summarizeFeature,
   type BusinessReviewPayload,
   type FunctionalReviewPayload,
   type ReviewFact,
@@ -140,8 +140,17 @@ export class RequirementReviewService {
     });
     await prisma.requirementRelation.deleteMany({ where: { projectId } });
     await prisma.featureGroup.deleteMany({ where: { projectId } });
+    await prisma.requirement.updateMany({
+      where: { projectId },
+      data: {
+        featureGroupId: null,
+        possibleDuplicateOf: null,
+        duplicateSimilarity: null,
+        duplicateKind: null,
+      },
+    });
 
-    // Feature grouping (logical containers only)
+    // Feature grouping by business capability (Area → Feature → Requirements)
     const featureDrafts = groupRequirementsIntoFeatures(
       requirements.map((r) => ({
         requirementKey: r.requirementKey,
@@ -153,6 +162,8 @@ export class RequirementReviewService {
     );
 
     const featureIdByKey = new Map<string, string>();
+    const featureNameToId = new Map<string, string>();
+    const featureNameToReqKeys = new Map<string, string[]>();
     for (const fg of featureDrafts) {
       const created = await prisma.featureGroup.create({
         data: {
@@ -160,12 +171,22 @@ export class RequirementReviewService {
           featureKey: fg.featureKey,
           name: fg.name,
           businessArea: fg.businessArea,
+          businessCapability: fg.businessCapability ?? null,
           businessIntent: fg.businessIntent ?? null,
           businessImpact: 'MEDIUM',
+          featureRisk: null,
+          featureRiskReason: null,
           reviewStatus: null,
+          analysis: {
+            dependsOn: [],
+            affects: [],
+            relatedTo: [],
+          },
         },
       });
       featureIdByKey.set(fg.featureKey, created.id);
+      featureNameToId.set(fg.name, created.id);
+      featureNameToReqKeys.set(fg.name, fg.requirementKeys);
       for (const reqKey of fg.requirementKeys) {
         await prisma.requirement.updateMany({
           where: { projectId, requirementKey: reqKey },
@@ -174,7 +195,46 @@ export class RequirementReviewService {
       }
     }
 
-    // Duplicate / overlap soft flags (never delete)
+    // Cross-feature journey relationships (DEPENDS_ON) — do not merge features
+    const keyToId = new Map(requirements.map((r) => [r.requirementKey, r.id]));
+    for (const [fromName, toName] of FEATURE_DEPENDENCY_EDGES) {
+      const fromFeatureId = featureNameToId.get(fromName);
+      const toFeatureId = featureNameToId.get(toName);
+      if (!fromFeatureId || !toFeatureId) continue;
+      const fromKeys = featureNameToReqKeys.get(fromName) ?? [];
+      const toKeys = featureNameToReqKeys.get(toName) ?? [];
+      const fromReqId = keyToId.get(fromKeys[0] ?? '');
+      const toReqId = keyToId.get(toKeys[0] ?? '');
+      await prisma.featureGroup.update({
+        where: { id: fromFeatureId },
+        data: {
+          analysis: {
+            dependsOn: [toName],
+            affects: [],
+            relatedTo: [],
+          },
+        },
+      });
+      if (fromReqId && toReqId) {
+        try {
+          await prisma.requirementRelation.create({
+            data: {
+              projectId,
+              fromRequirementId: fromReqId,
+              toRequirementId: toReqId,
+              relationType: 'DEPENDS_ON',
+              confidence: 0.9,
+              source: 'REVIEW',
+              detail: `${fromName} DEPENDS_ON ${toName}`,
+            },
+          });
+        } catch {
+          // unique — ignore
+        }
+      }
+    }
+
+    // Duplicate / related soft flags (never delete; RELATED ≠ duplicate)
     const dupPairs = detectDuplicatePairs(
       requirements.map((r) => ({
         requirementKey: r.requirementKey,
@@ -183,20 +243,24 @@ export class RequirementReviewService {
         sourceText: r.sourceText,
       })),
     );
-    const keyToId = new Map(requirements.map((r) => [r.requirementKey, r.id]));
     for (const pair of dupPairs) {
       const aId = keyToId.get(pair.requirementKeyA);
       const bId = keyToId.get(pair.requirementKeyB);
       if (!aId || !bId) continue;
-      // Flag lower key as possible duplicate of higher similarity peer
-      await prisma.requirement.update({
-        where: { id: bId },
-        data: {
-          possibleDuplicateOf: pair.requirementKeyA,
-          duplicateSimilarity: pair.similarity,
-          duplicateKind: pair.kind,
-        },
-      });
+
+      const isDupLike =
+        pair.kind === 'DUPLICATE' || pair.kind === 'POSSIBLE_DUPLICATE';
+      if (isDupLike) {
+        await prisma.requirement.update({
+          where: { id: bId },
+          data: {
+            possibleDuplicateOf: pair.requirementKeyA,
+            duplicateSimilarity: pair.showConfidence ? pair.similarity : null,
+            duplicateKind: pair.kind,
+          },
+        });
+      }
+
       await prisma.requirementRelation.create({
         data: {
           projectId,
@@ -205,7 +269,7 @@ export class RequirementReviewService {
           relationType:
             pair.kind === 'DUPLICATE'
               ? 'DUPLICATE_OF'
-              : pair.kind === 'OVERLAPPING'
+              : pair.kind === 'POSSIBLE_DUPLICATE'
                 ? 'OVERLAPS'
                 : 'RELATED_TO',
           confidence: pair.similarity / 100,
@@ -458,22 +522,68 @@ export class RequirementReviewService {
         ...f.questions,
         ...f.requirements.flatMap((r) => r.questions),
       ];
-      const critical = openQs.filter((q) => q.priority === 'CRITICAL').length;
-      const high = openQs.filter((q) => q.priority === 'HIGH').length;
+      // Deduplicate question ids (feature-level + requirement-level)
+      const seenQ = new Set<string>();
+      const uniqueOpenQs = openQs.filter((q) => {
+        if (seenQ.has(q.id)) return false;
+        seenQ.add(q.id);
+        return true;
+      });
+      const analysis =
+        f.analysis && typeof f.analysis === 'object'
+          ? (f.analysis as Record<string, unknown>)
+          : {};
+      const impactCounts = {
+        critical: f.requirements.filter((r) => r.businessImpact === 'CRITICAL')
+          .length,
+        high: f.requirements.filter((r) => r.businessImpact === 'HIGH').length,
+        medium: f.requirements.filter((r) => r.businessImpact === 'MEDIUM')
+          .length,
+        low: f.requirements.filter((r) => r.businessImpact === 'LOW').length,
+      };
+      const statusCounts = {
+        blocked: f.requirements.filter((r) => r.reviewStatus === 'BLOCKED')
+          .length,
+        needsClarification: f.requirements.filter(
+          (r) => r.reviewStatus === 'NEEDS_CLARIFICATION',
+        ).length,
+        reviewRecommended: f.requirements.filter(
+          (r) => r.reviewStatus === 'REVIEW_RECOMMENDED',
+        ).length,
+        ready: f.requirements.filter(
+          (r) => r.reviewStatus === 'READY_FOR_TEST_DESIGN',
+        ).length,
+      };
       return {
         id: f.id,
         featureKey: f.featureKey,
         name: f.name,
         businessArea: f.businessArea,
+        businessCapability: f.businessCapability,
         businessIntent: f.businessIntent,
         businessImpact: f.businessImpact,
+        featureRisk: f.featureRisk,
+        featureRiskReason: f.featureRiskReason,
         reviewStatus: f.reviewStatus,
         requirementCount: f.requirements.length,
-        criticalQuestions: critical,
-        highQuestions: high,
-        questionCount: openQs.length,
+        impactCounts,
+        statusCounts,
+        openQuestionCount: uniqueOpenQs.length,
+        questionCount: uniqueOpenQs.length,
+        // legacy fields kept for older UI — mapped from impact, not questions
+        criticalQuestions: impactCounts.critical,
+        highQuestions: impactCounts.high,
+        dependsOn: Array.isArray(analysis.dependsOn) ? analysis.dependsOn : [],
+        businessRules: Array.isArray(analysis.businessRules)
+          ? analysis.businessRules
+          : [],
         duplicateRequirements: f.requirements
-          .filter((r) => r.possibleDuplicateOf)
+          .filter(
+            (r) =>
+              r.possibleDuplicateOf &&
+              (r.duplicateKind === 'DUPLICATE' ||
+                r.duplicateKind === 'POSSIBLE_DUPLICATE'),
+          )
           .map((r) => r.requirementKey),
         requirements: f.requirements.map((r) => ({
           id: r.id,
@@ -755,48 +865,130 @@ export class RequirementReviewService {
   private async refreshFeatureStatuses(projectId: string) {
     const features = await prisma.featureGroup.findMany({
       where: { projectId },
-      include: { requirements: true },
+      include: {
+        requirements: {
+          include: { questions: { where: { status: 'OPEN' } } },
+        },
+        questions: { where: { status: 'OPEN' } },
+      },
     });
+    const openConflicts = await prisma.requirementConflict.findMany({
+      where: { projectId, status: 'OPEN' },
+      select: { requirementAId: true, requirementBId: true },
+    });
+
     for (const f of features) {
-      const status = deriveFeatureStatus(
-        f.requirements.map((r) => r.reviewStatus),
-      );
-      const impact = deriveFeatureImpact(
-        f.requirements.map((r) => r.businessImpact),
-      );
-      const intent =
-        f.businessIntent ||
-        f.requirements.find((r) => {
-          const biz = r.businessReview as BusinessReviewPayload | null;
-          return biz?.intent?.text;
-        });
+      const openQs = [
+        ...f.questions,
+        ...f.requirements.flatMap((r) => r.questions),
+      ];
+      const seenQ = new Set<string>();
+      const uniqueOpenQs = openQs.filter((q) => {
+        if (seenQ.has(q.id)) return false;
+        seenQ.add(q.id);
+        return true;
+      });
+      const reqIds = new Set(f.requirements.map((r) => r.id));
+      const conflictCount = openConflicts.filter(
+        (c) => reqIds.has(c.requirementAId) || reqIds.has(c.requirementBId),
+      ).length;
+
+      const summary = summarizeFeature({
+        requirementCount: f.requirements.length,
+        businessImpacts: f.requirements.map((r) => r.businessImpact),
+        reviewStatuses: f.requirements.map((r) => r.reviewStatus),
+        openQuestionPriorities: uniqueOpenQs.map((q) => q.priority),
+        openConflictCount: conflictCount,
+      });
+
+      // Prefer curated feature intent from grouping; do not overwrite with shallow req text
       const intentText =
-        typeof intent === 'string'
-          ? intent
+        f.businessIntent && !/^Support\s+/i.test(f.businessIntent)
+          ? f.businessIntent
           : ((
               f.requirements.find((r) => {
                 const biz = r.businessReview as BusinessReviewPayload | null;
-                return biz?.intent?.text;
+                return biz?.intent?.text && !/^Support\s+/i.test(biz.intent.text);
               })?.businessReview as BusinessReviewPayload | null
             )?.intent?.text ?? f.businessIntent);
+
+      const confirmedRules = this.collectFeatureBusinessRules(f.requirements);
+      const prev =
+        f.analysis && typeof f.analysis === 'object'
+          ? (f.analysis as Record<string, unknown>)
+          : {};
 
       await prisma.featureGroup.update({
         where: { id: f.id },
         data: {
-          reviewStatus: status,
-          businessImpact: impact,
+          reviewStatus: summary.reviewStatus,
+          businessImpact: summary.businessImpact,
+          featureRisk: summary.featureRisk,
+          featureRiskReason: summary.featureRiskReason,
           businessIntent: intentText,
           analysis: {
-            requirementCount: f.requirements.length,
-            ready: f.requirements.filter(
-              (r) => r.reviewStatus === 'READY_FOR_TEST_DESIGN',
-            ).length,
-            blocked: f.requirements.filter((r) => r.reviewStatus === 'BLOCKED')
-              .length,
+            ...prev,
+            requirementCount: summary.requirementCount,
+            impactCounts: summary.impactCounts,
+            statusCounts: summary.statusCounts,
+            openQuestionCount: summary.openQuestionCount,
+            businessRules: confirmedRules,
           },
         },
       });
     }
+  }
+
+  private collectFeatureBusinessRules(
+    requirements: Array<{
+      title: string;
+      description: string;
+      businessRules: unknown;
+      businessReview: unknown;
+    }>,
+  ): Array<{ text: string; source: 'CONFIRMED' | 'AI_INFERRED'; requirementKey?: string }> {
+    const rules: Array<{
+      text: string;
+      source: 'CONFIRMED' | 'AI_INFERRED';
+      requirementKey?: string;
+    }> = [];
+    const seen = new Set<string>();
+
+    for (const r of requirements) {
+      const fromField = Array.isArray(r.businessRules)
+        ? r.businessRules.map(String)
+        : typeof r.businessRules === 'string' && r.businessRules.trim()
+          ? r.businessRules
+              .split(/\n+/)
+              .map((s) => s.replace(/^[-*•\d.)\s]+/, '').trim())
+              .filter(Boolean)
+          : [];
+      for (const text of fromField) {
+        const key = text.toLowerCase();
+        if (seen.has(key) || text.length < 12) continue;
+        seen.add(key);
+        rules.push({ text, source: 'CONFIRMED' });
+      }
+
+      const biz = r.businessReview as BusinessReviewPayload | null;
+      for (const fact of biz?.rules ?? []) {
+        if (!fact?.text) continue;
+        const key = fact.text.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rules.push({
+          text: fact.text,
+          source:
+            fact.status === 'CONFIRMED' ||
+            fact.status === 'DERIVED_FROM_USER_ANSWER' ||
+            fact.intentSource === 'USER_CONFIRMED' ||
+            fact.intentSource === 'EXPLICIT'
+              ? 'CONFIRMED'
+              : 'AI_INFERRED',
+        });
+      }
+    }
+    return rules.slice(0, 12);
   }
 
   private async nextQuestionSeq(projectId: string): Promise<number> {
@@ -1009,6 +1201,51 @@ export class RequirementReviewService {
           status: 'OPEN',
         },
       });
+
+      // Conflicts block readiness — importance (CRITICAL impact) is separate
+      await prisma.requirement.updateMany({
+        where: { id: { in: [aId, bId] } },
+        data: {
+          reviewStatus: 'BLOCKED',
+          businessReadiness: 'BLOCKED',
+        },
+      });
+
+      const conflictQuestion =
+        /cancel/i.test(c.summary) || /cancel/i.test(c.detail)
+          ? 'Which order statuses actually allow cancellation?'
+          : /stock|inventory/i.test(c.summary)
+            ? 'Which out-of-stock purchase rule is authoritative when requirements disagree?'
+            : `How should the business resolve the conflict between ${c.keyA} and ${c.keyB}?`;
+      const fp = questionBucket(conflictQuestion);
+      const already = await prisma.requirementQuestion.findFirst({
+        where: {
+          projectId,
+          status: { in: ['OPEN', 'ANSWERED'] },
+          OR: [{ fingerprint: fp }, { question: conflictQuestion }],
+        },
+      });
+      if (!already) {
+        const seq = await this.nextQuestionSeq(projectId);
+        const questionKey = `Q${String(seq).padStart(3, '0')}`;
+        const aReq = requirements.find((r) => r.id === aId);
+        await prisma.requirementQuestion.create({
+          data: {
+            projectId,
+            requirementId: aId,
+            featureGroupId: aReq?.featureGroupId ?? null,
+            scope: 'REQUIREMENT',
+            questionKey,
+            category: 'BUSINESS_RULE',
+            priority: 'CRITICAL',
+            question: conflictQuestion,
+            reason: c.detail,
+            blocking: true,
+            fingerprint: fp,
+            status: 'OPEN',
+          },
+        });
+      }
 
       try {
         await prisma.requirementRelation.create({

@@ -111,8 +111,9 @@ export type RelationType = (typeof RELATION_TYPES)[number];
 
 export const DUPLICATE_KINDS = [
   'DUPLICATE',
-  'OVERLAPPING',
+  'POSSIBLE_DUPLICATE',
   'RELATED',
+  'NOT_DUPLICATE',
 ] as const;
 
 export type DuplicateKind = (typeof DUPLICATE_KINDS)[number];
@@ -201,8 +202,9 @@ export type FeatureGroupDraft = {
   featureKey: string;
   name: string;
   businessArea: string;
-  requirementKeys: string[];
+  businessCapability?: string;
   businessIntent?: string;
+  requirementKeys: string[];
 };
 
 export type DuplicatePair = {
@@ -211,6 +213,8 @@ export type DuplicatePair = {
   similarity: number;
   kind: DuplicateKind;
   recommendation: string;
+  /** Only show % when business meaning is confidently duplicate-like */
+  showConfidence?: boolean;
 };
 
 export type RelationDraft = {

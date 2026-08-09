@@ -154,8 +154,13 @@ model FeatureGroup {
   featureKey       String
   name             String
   businessArea     String?
+  businessCapability String? @db.Text
   businessIntent   String?  @db.Text
+  /// Highest requirement businessImpact (importance — not status)
   businessImpact   String?  // CRITICAL | HIGH | MEDIUM | LOW
+  /// Risk from impact + unresolved gaps + conflicts (distinct from impact/status)
+  featureRisk      String?  // CRITICAL | HIGH | MEDIUM | LOW
+  featureRiskReason String? @db.Text
   reviewStatus     String?  // BLOCKED | NEEDS_CLARIFICATION | REVIEW_RECOMMENDED | READY_FOR_TEST_DESIGN
   analysis         Json?
   createdAt        DateTime @default(now())

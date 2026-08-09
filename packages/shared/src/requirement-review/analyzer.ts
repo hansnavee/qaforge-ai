@@ -133,31 +133,44 @@ function buildBusinessIntent(req: AnalyzableRequirement): ReviewFact {
     return fact(desc, 'CONFIRMED', source);
   }
 
-  // Domain-aware intent phrasing (AI_INFERRED — never confirmed)
+  // Domain-aware intent phrasing (AI_INFERRED — never confirmed; outcome-focused)
   const blob = blobOf(req);
-  let intent = `Enable: ${title}. ${desc}`;
+  let intent = `Allow the system to fulfill “${title}” with clear business outcomes for the actors involved.`;
   if (/cancel.*order|order.*cancel/.test(blob)) {
     intent =
       'Allow customers to cancel eligible orders before fulfillment reaches a restricted state.';
-  } else if (/payment fail|payment failure/.test(blob)) {
+  } else if (/payment fail|payment failure|payment.*fail/.test(blob)) {
     intent =
-      'Prevent unsuccessful payments from creating invalid orders and define failure recovery.';
-  } else if (/payment success|successful payment/.test(blob)) {
+      'Allow customers to complete an order using supported payment methods while preventing invalid orders when payment fails.';
+  } else if (/payment success|successful payment|\bpayment\b/.test(blob)) {
     intent =
-      'Ensure successful payments result in a valid confirmed order for the customer.';
-  } else if (/out of stock|cannot be purchased/.test(blob)) {
+      'Allow customers to complete purchases using supported payment methods and create a valid order when payment succeeds.';
+  } else if (/checkout|delivery address|shipping address/.test(blob)) {
     intent =
-      'Prevent purchase of unavailable inventory and protect order integrity.';
+      'Allow customers to provide delivery information and create an order before payment is processed.';
+  } else if (/product search|search product|filter.*product|\bsearch\b.*\bproduct/.test(blob)) {
+    intent =
+      'Allow customers to quickly discover relevant products and narrow results using available filters.';
+  } else if (/password reset|forgot password|\botp\b/.test(blob)) {
+    intent =
+      'Allow users who cannot access their password to securely regain access to their account through OTP-based verification.';
+  } else if (/shopping cart|add.*cart|cart total|cart quantity/.test(blob)) {
+    intent =
+      'Allow customers to assemble intended purchases and keep cart quantities and totals accurate before checkout.';
+  } else if (/out of stock|cannot be purchased|inventory/.test(blob)) {
+    intent =
+      'Prevent purchase of unavailable inventory and keep orderable quantities aligned with stock rules.';
   } else if (/unique email/.test(blob)) {
     intent = 'Ensure each user account is uniquely identified by email.';
   } else if (/access control|another user/.test(blob)) {
     intent = 'Restrict users to their own data and prevent unauthorized access.';
   } else if (/register|registration/.test(blob)) {
     intent = 'Allow new customers to create accounts and become authenticated users.';
-  } else if (/\botp\b/.test(blob)) {
-    intent = 'Verify user identity securely during authentication or password reset.';
   } else if (/admin|administrator/.test(blob)) {
-    intent = 'Allow administrators to manage catalog/operations within authorized boundaries.';
+    intent =
+      'Allow administrators to manage catalog and inventory operations within authorized boundaries.';
+  } else if (desc.length > 40 && desc.length < 280) {
+    intent = desc;
   }
 
   return fact(intent, 'INFERRED', source);

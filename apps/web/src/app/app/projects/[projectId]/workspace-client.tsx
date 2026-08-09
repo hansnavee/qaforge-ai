@@ -159,13 +159,31 @@ type FeatureGroupView = {
   featureKey: string;
   name: string;
   businessArea?: string | null;
+  businessCapability?: string | null;
   businessIntent?: string | null;
   businessImpact?: string | null;
+  featureRisk?: string | null;
+  featureRiskReason?: string | null;
   reviewStatus?: string | null;
   requirementCount: number;
+  impactCounts?: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
+  statusCounts?: {
+    blocked: number;
+    needsClarification: number;
+    reviewRecommended: number;
+    ready: number;
+  };
+  openQuestionCount?: number;
   criticalQuestions: number;
   highQuestions: number;
   questionCount: number;
+  dependsOn?: string[];
+  businessRules?: Array<{ text: string; source: string }>;
   duplicateRequirements: string[];
   requirements: Array<{
     id: string;
@@ -179,6 +197,7 @@ type FeatureGroupView = {
     highOpenCount?: number;
     possibleDuplicateOf?: string | null;
     duplicateSimilarity?: number | null;
+    duplicateKind?: string | null;
   }>;
 };
 
@@ -1609,6 +1628,19 @@ export default function ProjectWorkspacePage() {
             <div className="space-y-3">
               {(featuresQuery.data ?? []).map((f) => {
                 const open = expandedFeatures[f.id] ?? true;
+                const impact = f.impactCounts ?? {
+                  critical: f.criticalQuestions ?? 0,
+                  high: f.highQuestions ?? 0,
+                  medium: 0,
+                  low: 0,
+                };
+                const status = f.statusCounts ?? {
+                  blocked: 0,
+                  needsClarification: 0,
+                  reviewRecommended: 0,
+                  ready: 0,
+                };
+                const openQs = f.openQuestionCount ?? f.questionCount ?? 0;
                 return (
                   <div
                     key={f.id}
@@ -1616,7 +1648,7 @@ export default function ProjectWorkspacePage() {
                   >
                     <button
                       type="button"
-                      className="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-3 text-left text-sm"
+                      className="flex w-full flex-wrap items-start justify-between gap-3 px-3 py-3 text-left text-sm"
                       onClick={() =>
                         setExpandedFeatures((prev) => ({
                           ...prev,
@@ -1624,20 +1656,74 @@ export default function ProjectWorkspacePage() {
                         }))
                       }
                     >
-                      <div>
+                      <div className="min-w-0 flex-1 space-y-2">
                         <div className="font-medium">
-                          {open ? '▼' : '▶'} {f.businessArea ?? 'Other'} /{' '}
-                          {f.name}
+                          {open ? '▼' : '▶'} {f.name}
                         </div>
-                        <div className="mt-1 text-xs text-muted">
-                          {f.requirementCount} requirements ·{' '}
-                          {f.criticalQuestions} critical · {f.highQuestions} high
+                        <div className="text-xs text-muted">
+                          {f.businessArea ?? 'Other'}
+                          {f.businessCapability
+                            ? ` · ${f.businessCapability}`
+                            : ''}
+                        </div>
+                        <div className="text-xs">
+                          {f.requirementCount} Requirements
+                        </div>
+                        <div className="grid gap-2 text-xs sm:grid-cols-2">
+                          <div className="space-y-0.5 text-muted">
+                            <div className="font-medium text-fg">Impact</div>
+                            <div>🔴 {impact.critical} Critical</div>
+                            <div>🟠 {impact.high} High</div>
+                            {(impact.medium > 0 || impact.low > 0) && (
+                              <div>
+                                🟡 {impact.medium} Medium
+                                {impact.low > 0 ? ` · ${impact.low} Low` : ''}
+                              </div>
+                            )}
+                          </div>
+                          <div className="space-y-0.5 text-muted">
+                            <div className="font-medium text-fg">Review</div>
+                            {status.blocked > 0 ? (
+                              <div>🔴 {status.blocked} Blocked</div>
+                            ) : null}
+                            {status.needsClarification > 0 ? (
+                              <div>
+                                🟠 {status.needsClarification} Needs
+                                Clarification
+                              </div>
+                            ) : null}
+                            {status.reviewRecommended > 0 ? (
+                              <div>
+                                🟡 {status.reviewRecommended} Review Recommended
+                              </div>
+                            ) : null}
+                            <div>🟢 {status.ready} Ready</div>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+                          <span>Open Questions: {openQs}</span>
+                          {f.featureRisk ? (
+                            <span>
+                              Feature Risk:{' '}
+                              <span className="text-fg">
+                                {impactLabel(f.featureRisk)}
+                              </span>
+                            </span>
+                          ) : null}
+                          <span>
+                            Status:{' '}
+                            <span className="text-fg">
+                              {reviewStatusLabel(f.reviewStatus)}
+                            </span>
+                          </span>
                         </div>
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Badge tone={impactTone(f.businessImpact)}>
-                          {impactLabel(f.businessImpact)}
-                        </Badge>
+                      <div className="flex flex-col items-end gap-2">
+                        {f.featureRisk ? (
+                          <Badge tone={impactTone(f.featureRisk)}>
+                            Risk: {impactLabel(f.featureRisk)}
+                          </Badge>
+                        ) : null}
                         <Badge tone={reviewStatusTone(f.reviewStatus)}>
                           {reviewStatusLabel(f.reviewStatus)}
                         </Badge>
@@ -1647,7 +1733,41 @@ export default function ProjectWorkspacePage() {
                       <ul className="space-y-1 border-t border-border px-3 py-2 text-sm">
                         {f.businessIntent ? (
                           <li className="mb-2 text-xs text-muted">
-                            Intent: {f.businessIntent}
+                            <span className="font-medium text-fg">Intent:</span>{' '}
+                            {f.businessIntent}
+                          </li>
+                        ) : null}
+                        {f.featureRiskReason ? (
+                          <li className="mb-2 text-xs text-muted">
+                            <span className="font-medium text-fg">
+                              Risk reason:
+                            </span>{' '}
+                            {f.featureRiskReason}
+                          </li>
+                        ) : null}
+                        {(f.dependsOn?.length ?? 0) > 0 ? (
+                          <li className="mb-2 text-xs text-muted">
+                            Depends on: {f.dependsOn!.join(', ')}
+                          </li>
+                        ) : null}
+                        {(f.businessRules?.length ?? 0) > 0 ? (
+                          <li className="mb-2 space-y-1 text-xs text-muted">
+                            <div className="font-medium text-fg">
+                              Business Rules
+                            </div>
+                            <ol className="list-decimal space-y-0.5 pl-4">
+                              {f.businessRules!.slice(0, 5).map((rule, idx) => (
+                                <li key={`${idx}-${rule.text.slice(0, 24)}`}>
+                                  {rule.text}
+                                  {rule.source === 'AI_INFERRED' ? (
+                                    <span className="text-warning">
+                                      {' '}
+                                      (Suggested · AI_INFERRED)
+                                    </span>
+                                  ) : null}
+                                </li>
+                              ))}
+                            </ol>
                           </li>
                         ) : null}
                         {f.requirements.map((r) => (
@@ -1664,12 +1784,16 @@ export default function ProjectWorkspacePage() {
                                   {r.requirementKey}
                                 </span>{' '}
                                 {r.title}
-                                {r.possibleDuplicateOf ? (
+                                {r.possibleDuplicateOf &&
+                                (r.duplicateKind === 'DUPLICATE' ||
+                                  r.duplicateKind === 'POSSIBLE_DUPLICATE') ? (
                                   <span className="ml-2 text-xs text-warning">
-                                    Possible duplicate of{' '}
-                                    {r.possibleDuplicateOf}
+                                    {r.duplicateKind === 'DUPLICATE'
+                                      ? 'DUPLICATE'
+                                      : 'POSSIBLE DUPLICATE'}{' '}
+                                    of {r.possibleDuplicateOf}
                                     {r.duplicateSimilarity != null
-                                      ? ` (${Math.round(r.duplicateSimilarity)}%)`
+                                      ? ` · ${Math.round(r.duplicateSimilarity)}% confidence`
                                       : ''}
                                   </span>
                                 ) : null}
@@ -1833,12 +1957,16 @@ export default function ProjectWorkspacePage() {
                 </p>
               </div>
             )}
-            {selected.possibleDuplicateOf ? (
+            {selected.possibleDuplicateOf &&
+            (selected.duplicateKind === 'DUPLICATE' ||
+              selected.duplicateKind === 'POSSIBLE_DUPLICATE') ? (
               <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
-                Possible {selected.duplicateKind ?? 'Duplicate'} of{' '}
-                {selected.possibleDuplicateOf}
+                {selected.duplicateKind === 'DUPLICATE'
+                  ? 'DUPLICATE'
+                  : 'POSSIBLE DUPLICATE'}{' '}
+                of {selected.possibleDuplicateOf}
                 {selected.duplicateSimilarity != null
-                  ? ` · Similarity ${Math.round(selected.duplicateSimilarity)}%`
+                  ? ` · ${Math.round(selected.duplicateSimilarity)}% confidence`
                   : ''}
                 . Original IDs are preserved — no automatic delete/merge.
               </div>
@@ -1900,9 +2028,18 @@ export default function ProjectWorkspacePage() {
                 ) : null}
               </div>
             </div>
-            {selected.possibleDuplicateOf ? (
+            {selected.possibleDuplicateOf &&
+            (selected.duplicateKind === 'DUPLICATE' ||
+              selected.duplicateKind === 'POSSIBLE_DUPLICATE') ? (
               <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
-                ⚠ Possible Duplicate of {selected.possibleDuplicateOf}
+                ⚠{' '}
+                {selected.duplicateKind === 'DUPLICATE'
+                  ? 'Duplicate'
+                  : 'Possible duplicate'}{' '}
+                of {selected.possibleDuplicateOf}
+                {selected.duplicateSimilarity != null
+                  ? ` (${Math.round(selected.duplicateSimilarity)}% confidence)`
+                  : ''}
               </div>
             ) : null}
           </div>
@@ -2263,11 +2400,16 @@ export default function ProjectWorkspacePage() {
                             {r.analysisStale ? (
                               <div className="text-xs text-warning">Stale</div>
                             ) : null}
-                            {r.possibleDuplicateOf ? (
+                            {r.possibleDuplicateOf &&
+                            (r.duplicateKind === 'DUPLICATE' ||
+                              r.duplicateKind === 'POSSIBLE_DUPLICATE') ? (
                               <div className="text-xs text-warning">
-                                Possible duplicate of {r.possibleDuplicateOf}
+                                {r.duplicateKind === 'DUPLICATE'
+                                  ? 'DUPLICATE of '
+                                  : 'POSSIBLE DUPLICATE of '}
+                                {r.possibleDuplicateOf}
                                 {r.duplicateSimilarity != null
-                                  ? ` (${Math.round(r.duplicateSimilarity)}%)`
+                                  ? ` · ${Math.round(r.duplicateSimilarity)}% confidence`
                                   : ''}
                               </div>
                             ) : null}
