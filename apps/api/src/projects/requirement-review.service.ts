@@ -26,11 +26,14 @@ import {
   type FunctionalReviewPayload,
   type RequirementRelationship,
   type ReviewFact,
+  type StructuredRequirementSemantics,
 } from '@qaforge/shared';
+import { OpenRouterLlmClient } from '@qaforge/agent-sdk';
 import { randomUUID } from 'node:crypto';
 import { AuditService } from '../common/audit.service';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
+import { extractStructuredSemanticsBatch } from './structured-semantic-extract';
 
 function asStringArray(v: unknown): string[] {
   return Array.isArray(v) ? v.map(String) : [];
@@ -50,6 +53,9 @@ function asFacts(v: unknown): ReviewFact[] {
 @Injectable()
 export class RequirementReviewService {
   private readonly logger = new Logger(RequirementReviewService.name);
+  private readonly llm = new OpenRouterLlmClient();
+  /** Per-run structured semantics (LLM + heuristic), keyed by requirementKey */
+  private structuredByKey = new Map<string, StructuredRequirementSemantics>();
 
   constructor(
     private readonly orgs: OrgsService,
@@ -274,6 +280,25 @@ export class RequirementReviewService {
         });
       }
     }
+    // Step 2.5 — structured semantic extraction (LLM when available, else heuristic)
+    this.structuredByKey = await extractStructuredSemanticsBatch({
+      requirements: requirements.map((r) => ({
+        requirementKey: r.requirementKey,
+        title: r.title,
+        description: r.description,
+        sourceText: r.sourceText,
+        type: r.type,
+      })),
+      llm: this.llm,
+      logger: this.logger,
+    });
+    const accepted = [...this.structuredByKey.values()].filter(
+      (s) => !s.uncertain && s.confidence >= 0.85,
+    ).length;
+    this.logger.log(
+      `Structured semantics: ${accepted}/${requirements.length} accepted (≥0.85); engine uses structured actor/action/object/capability for relationships`,
+    );
+
     const comparable = requirements.map((r) => ({
       requirementKey: r.requirementKey,
       title: r.title,
@@ -282,6 +307,7 @@ export class RequirementReviewService {
       featureName: featureMetaByReq.get(r.requirementKey)?.featureName,
       businessArea: featureMetaByReq.get(r.requirementKey)?.businessArea,
       type: r.type,
+      structured: this.structuredByKey.get(r.requirementKey) ?? null,
     }));
     // Canonical semantic relationships (source of truth for API + UI)
     const canonical = toCanonicalRelationships(comparable);
@@ -497,6 +523,16 @@ export class RequirementReviewService {
           analyzedAt: completedAt.toISOString(),
           relationshipCount: canonical.length,
           relationships: canonical,
+          structuredSemantics: {
+            total: this.structuredByKey.size,
+            accepted: [...this.structuredByKey.values()].filter(
+              (s) => !s.uncertain && s.confidence >= 0.85,
+            ).length,
+            uncertain: [...this.structuredByKey.values()].filter(
+              (s) => s.uncertain || s.confidence < 0.85,
+            ).length,
+            llmEnabled: Boolean(process.env.OPENROUTER_API_KEY),
+          },
         },
       },
     });
@@ -1282,6 +1318,7 @@ export class RequirementReviewService {
       supportingInformation: asStringArray(req.supportingInformation),
       knownDerivedRules: knownDerived,
       existingQuestionTexts,
+      structured: this.structuredByKey.get(req.requirementKey) ?? null,
     });
 
     const projectQs = await prisma.requirementQuestion.findMany({

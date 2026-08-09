@@ -24,6 +24,8 @@ export type SemanticComparable = {
   sourceText?: string | null;
   featureName?: string | null;
   businessArea?: string | null;
+  /** Optional LLM/heuristic structured semantics (Step 2.5+) */
+  structured?: import('./structured-semantics.js').StructuredRequirementSemantics | null;
 };
 
 function textOf(r: SemanticComparable): string {

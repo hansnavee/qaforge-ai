@@ -200,15 +200,18 @@ function isPurchaseConstrainedCap(c: string): boolean {
 
 function isInventoryConstraint(n: NormalizedRequirement): boolean {
   return (
-    n.isBusinessRule &&
-    (n.capability === 'inventory' ||
-      n.entity[0] === 'inventory' ||
-      /unavailable_purchase_blocked/.test(n.businessOutcome) ||
-      /out of stock|cannot be purchased/.test(n.originalText.toLowerCase()))
+    n.capability === 'inventory' ||
+    n.condition === 'OUT_OF_STOCK' ||
+    (n.isBusinessRule &&
+      n.polarity === 'NOT_ALLOWED' &&
+      (n.entity[0] === 'product' || n.entity[0] === 'inventory')) ||
+    /unavailable_purchase_blocked/.test(n.businessOutcome) ||
+    /out of stock|cannot be purchased/.test(n.originalText.toLowerCase())
   );
 }
 
 function isUniquenessRule(n: NormalizedRequirement): boolean {
+  if (n.capability === 'email_uniqueness') return true;
   const t = n.originalText.toLowerCase();
   return (
     (/unique/.test(t) && /email/.test(t)) ||
@@ -349,16 +352,55 @@ function classifyNormalized(
     });
   }
 
-  // 4b) Password reset ↔ OTP delivery — related recovery steps
+  // 4b) Password reset ↔ OTP* — related recovery steps (not registration/login)
+  {
+    const otpFamily = new Set([
+      'password_reset',
+      'otp_delivery',
+      'otp_entry',
+      'otp_expiration',
+    ]);
+    if (
+      otpFamily.has(a.capability) &&
+      otpFamily.has(b.capability) &&
+      a.capability !== b.capability
+    ) {
+      return pairResult(a, b, {
+        kind: 'RELATED',
+        relationType: 'RELATED_TO',
+        reason:
+          'Related authentication/password-recovery steps (reset / OTP), not the same business behavior.',
+      });
+    }
+  }
+
+  // 4c) Admin/inventory CRUD peers — RELATED (never sequential workflow)
   if (
-    (a.capability === 'password_reset' && b.capability === 'otp_delivery') ||
-    (b.capability === 'password_reset' && a.capability === 'otp_delivery')
+    isAdminInventoryCap(a.capability) &&
+    isAdminInventoryCap(b.capability) &&
+    sameActor(a, b) &&
+    (a.crudOp !== b.crudOp ||
+      a.entity[0] !== b.entity[0] ||
+      a.capability !== b.capability ||
+      a.businessOutcome !== b.businessOutcome)
   ) {
     return pairResult(a, b, {
       kind: 'RELATED',
       relationType: 'RELATED_TO',
-      reason:
-        'Related authentication/password-recovery steps (reset vs OTP delivery), not the same business behavior.',
+      reason: [
+        'Same administration/inventory capability family with different CRUD/operations.',
+        a.crudOp && b.crudOp && a.crudOp !== b.crudOp
+          ? `CRUD: ${a.crudOp} vs ${b.crudOp}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      sameFeatureDifferentOps: true,
+      suggestedFeatureSplit:
+        (a.entity[0] === 'inventory' || b.entity[0] === 'inventory') &&
+        (a.entity[0] === 'product_catalog' || b.entity[0] === 'product_catalog')
+          ? ['Product Management', 'Inventory Management']
+          : undefined,
     });
   }
 
@@ -486,37 +528,7 @@ function classifyNormalized(
     });
   }
 
-  // 5d) Admin/inventory CRUD peers — BOTH sides must be admin/inventory
-  if (
-    isAdminInventoryCap(a.capability) &&
-    isAdminInventoryCap(b.capability) &&
-    sameActor(a, b) &&
-    (a.crudOp !== b.crudOp ||
-      a.entity[0] !== b.entity[0] ||
-      a.capability !== b.capability ||
-      a.businessOutcome !== b.businessOutcome)
-  ) {
-    return pairResult(a, b, {
-      kind: 'RELATED',
-      relationType: 'RELATED_TO',
-      reason: [
-        'Same administration/inventory capability family with different CRUD/operations.',
-        a.crudOp && b.crudOp && a.crudOp !== b.crudOp
-          ? `CRUD: ${a.crudOp} vs ${b.crudOp}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join('\n'),
-      sameFeatureDifferentOps: true,
-      suggestedFeatureSplit:
-        (a.entity[0] === 'inventory' || b.entity[0] === 'inventory') &&
-        (a.entity[0] === 'product_catalog' || b.entity[0] === 'product_catalog')
-          ? ['Product Management', 'Inventory Management']
-          : undefined,
-    });
-  }
-
-  // 5e) Order confirmation vs order details/history — RELATED when both order-domain
+  // 5d) Order confirmation vs order details/history — RELATED when both order-domain
   const orderCaps = new Set([
     'order_confirmation',
     'order_details',
@@ -545,7 +557,8 @@ function classifyNormalized(
     }
   }
 
-  // 5f) Same entity + same actor + different actions, but only for strong entities
+  // 5f) Same object + same actor + different actions — only within capability family
+  //     Never use actor-alone or broad user_account matching across auth domains.
   const strongEntities = new Set([
     'product_catalog',
     'inventory',
@@ -553,20 +566,21 @@ function classifyNormalized(
     'order',
     'order_confirmation',
     'payment',
-    'user_account',
   ]);
   if (
     sameEntity(a, b) &&
     sameActor(a, b) &&
     a.action[0] !== b.action[0] &&
     strongEntities.has(a.entity[0] ?? '') &&
-    capabilityFamily(a, b)
+    capabilityFamily(a, b) &&
+    a.capability !== 'email_uniqueness' &&
+    b.capability !== 'email_uniqueness'
   ) {
     return pairResult(a, b, {
       kind: 'RELATED',
       relationType: 'RELATED_TO',
       reason:
-        'Same actor and entity within the same capability family, different actions — related operations, not duplicates.',
+        'Same actor and object within the same capability family, different actions — related operations, not duplicates.',
       sameFeatureDifferentOps: true,
     });
   }

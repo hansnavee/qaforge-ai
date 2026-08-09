@@ -65,7 +65,51 @@ function mockExtractFromPrompt(prompt: string): unknown | null {
   };
 }
 
+function mockStructuredSemanticsFromPrompt(prompt: string): unknown {
+  try {
+    const jsonMatch = prompt.match(/Requirements:\s*(\[[\s\S]*\])/i);
+    const rows = jsonMatch ? (JSON.parse(jsonMatch[1]!) as Array<Record<string, unknown>>) : [];
+    // Lazy require to avoid circular init issues in some runners
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const shared = require('@qaforge/shared') as typeof import('@qaforge/shared');
+    return {
+      requirements: rows.map((r) => {
+        const s = shared.extractStructuredSemanticsHeuristic({
+          requirementKey: String(r.requirementKey ?? ''),
+          title: String(r.title ?? ''),
+          description: String(r.description ?? ''),
+          sourceText: (r.sourceText as string | null) ?? null,
+          type: (r.type as string | null) ?? null,
+        });
+        return {
+          requirementKey: r.requirementKey,
+          actor: s.actor.toUpperCase(),
+          action: s.action.toUpperCase(),
+          object: s.object.toUpperCase(),
+          condition: s.condition,
+          polarity: s.polarity,
+          requirementType: s.requirementType,
+          capability: s.capability.toUpperCase(),
+          confidence: s.confidence,
+        };
+      }),
+    };
+  } catch {
+    return { requirements: [] };
+  }
+}
+
 function mockJsonForPrompt(haystack: string, prompt = ''): unknown {
+  // Step 2.5 structured semantic extraction
+  if (
+    haystack.includes('structured semantics') ||
+    (haystack.includes('polarity') &&
+      haystack.includes('capability') &&
+      haystack.includes('requirementkey'))
+  ) {
+    return mockStructuredSemanticsFromPrompt(prompt);
+  }
+
   // Piece 2 extraction — parser + semantic extraction (not line-splitting)
   if (
     haystack.includes('requirementkey') ||

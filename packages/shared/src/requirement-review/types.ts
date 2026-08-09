@@ -175,6 +175,11 @@ export type BusinessReviewPayload = {
     businessOutcome: string;
     channel?: string | null;
     crudOp?: string | null;
+    condition?: string | null;
+    polarity?: string | null;
+    confidence?: number | null;
+    uncertain?: boolean | null;
+    source?: string | null;
   } | null;
 };
 
@@ -295,7 +300,7 @@ export type RequirementRelationship = {
 };
 
 export const SEMANTIC_ANALYSIS_ENGINE = 'semantic-requirement-review';
-export const SEMANTIC_ANALYSIS_VERSION = '2.4';
+export const SEMANTIC_ANALYSIS_VERSION = '2.5';
 
 /** Relationships worth persisting (missing edge = INDEPENDENT). */
 export const PERSISTABLE_RELATIONSHIPS = new Set<

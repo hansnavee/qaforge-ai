@@ -8,6 +8,12 @@ import {
   type CrudOp,
   type SemanticComparable,
 } from './semantic-profile.js';
+import {
+  acceptStructuredSemantics,
+  resolveStructuredSemantics,
+  type StructuredPolarity,
+  type StructuredRequirementSemantics,
+} from './structured-semantics.js';
 
 export type NormalizedRequirement = {
   id: string;
@@ -37,6 +43,11 @@ export type NormalizedRequirement = {
   flowStep: number | null;
   /** True when this requirement primarily expresses a constraint / BR. */
   isBusinessRule: boolean;
+  polarity: StructuredPolarity;
+  condition: string | null;
+  structuredConfidence: number;
+  structuredUncertain: boolean;
+  structuredSource: StructuredRequirementSemantics['source'] | null;
 };
 
 export type NormalizeInput = SemanticComparable & {
@@ -52,6 +63,8 @@ export const BUSINESS_FLOW_STEPS: string[] = [
   'user_login',
   'password_reset',
   'otp_delivery',
+  'otp_entry',
+  'otp_expiration',
   'product_search',
   'product_search_results',
   'product_filtering',
@@ -66,8 +79,8 @@ export const BUSINESS_FLOW_STEPS: string[] = [
   'order_access',
   'order_management',
   'product_administration',
-  'inventory',
   'inventory_update',
+  // inventory (stock BR) intentionally omitted from sequential chain
 ];
 
 function mapType(t?: string | null): NormalizedRequirement['type'] {
@@ -260,26 +273,70 @@ function flowStepFor(capability: string, subFeature: string | null): number | nu
 
 /**
  * Convert a raw requirement into the normalized semantic model.
+ * When structured semantics are accepted (LLM/heuristic confidence ≥ 0.85),
+ * actor/action/object/capability/polarity override keyword heuristics.
  */
 export function normalizeRequirement(input: NormalizeInput): NormalizedRequirement {
   const profile = buildSemanticProfile(input);
   const text = `${input.title}\n${input.description}\n${input.sourceText ?? ''}`;
-  const type = mapType(input.type);
-  const capability = refineCapability(
+  const structured = resolveStructuredSemantics(
+    {
+      requirementKey: input.requirementKey,
+      title: input.title,
+      description: input.description,
+      sourceText: input.sourceText,
+      type: input.type,
+    },
+    input.structured ?? null,
+  );
+  const useStructured = acceptStructuredSemantics(structured);
+
+  let type = mapType(input.type ?? structured.requirementType);
+  if (useStructured && structured.requirementType === 'BUSINESS_RULE') {
+    type = 'Business Rule';
+  } else if (useStructured && structured.requirementType === 'NON_FUNCTIONAL') {
+    type = 'Non-Functional';
+  }
+
+  let capability = refineCapability(
     text,
     profile.capability,
     profile.entity,
     profile.action,
   );
-  const channel = profile.channel;
-  const subFeature = refineSubFeature(
-    text,
-    capability,
-    channel,
-    profile.entity,
-  );
-  const actor =
+  let entity = profile.entity;
+  let action = profile.action;
+  let actor =
     profile.actor === 'registered_user' ? 'customer' : profile.actor;
+
+  if (useStructured) {
+    capability = structured.capability || capability;
+    entity = structured.object || entity;
+    action = structured.action || action;
+    actor =
+      structured.actor === 'user' ? 'customer' : structured.actor || actor;
+  } else if (structured.capability && structured.capability !== 'general') {
+    // Partial: still prefer high-signal heuristic capability from resolver
+    capability = structured.capability;
+    if (structured.object !== 'general') entity = structured.object;
+    if (structured.action !== 'unspecified') action = structured.action;
+  }
+
+  const channel = profile.channel;
+  const subFeature = refineSubFeature(text, capability, channel, entity);
+
+  const isBusinessRule =
+    type === 'Business Rule' ||
+    structured.requirementType === 'BUSINESS_RULE' ||
+    structured.polarity === 'NOT_ALLOWED' ||
+    detectBusinessRule(text, type);
+
+  let businessOutcome = profile.outcome;
+  if (structured.condition === 'OUT_OF_STOCK' || capability === 'inventory') {
+    businessOutcome = 'unavailable_purchase_blocked';
+  } else if (capability === 'email_uniqueness') {
+    businessOutcome = 'email_uniqueness_enforced';
+  }
 
   return {
     id: input.requirementKey,
@@ -289,10 +346,10 @@ export function normalizeRequirement(input: NormalizeInput): NormalizedRequireme
     businessArea: input.businessArea ?? 'Unclassified',
     feature: input.featureName ?? capability.replace(/_/g, ' '),
     subFeature,
-    entity: [profile.entity],
-    action: [profile.action],
+    entity: [entity],
+    action: [action],
     capability,
-    businessOutcome: profile.outcome,
+    businessOutcome,
     channel,
     context: profile.context,
     crudOp: profile.crudOp,
@@ -302,7 +359,12 @@ export function normalizeRequirement(input: NormalizeInput): NormalizedRequireme
     businessImpact: mapImpact(input.businessImpact),
     reviewStatus: mapStatus(input.reviewStatus),
     flowStep: flowStepFor(capability, subFeature),
-    isBusinessRule: detectBusinessRule(text, type),
+    isBusinessRule,
+    polarity: structured.polarity,
+    condition: structured.condition,
+    structuredConfidence: structured.confidence,
+    structuredUncertain: !!structured.uncertain,
+    structuredSource: structured.source ?? null,
   };
 }
 
@@ -341,13 +403,16 @@ export function capabilityFamily(
     'product_discovery',
   ]);
   if (discovery.has(a.capability) && discovery.has(b.capability)) return true;
-  const auth = new Set([
-    'user_registration',
-    'user_login',
+  const authLifecycle = new Set(['user_registration', 'user_login']);
+  if (authLifecycle.has(a.capability) && authLifecycle.has(b.capability))
+    return true;
+  const otpFamily = new Set([
     'password_reset',
     'otp_delivery',
+    'otp_entry',
+    'otp_expiration',
   ]);
-  if (auth.has(a.capability) && auth.has(b.capability)) return true;
+  if (otpFamily.has(a.capability) && otpFamily.has(b.capability)) return true;
   if (a.capability === 'access_control' && b.capability === 'access_control')
     return true;
   const purchase = new Set([
@@ -375,6 +440,17 @@ export function areSequentialCapabilities(
 ): boolean {
   if (a.flowStep == null || b.flowStep == null) return false;
   if (a.flowStep === b.flowStep) return false;
+  // Stock / uniqueness business rules are constraints, not workflow steps
+  if (
+    a.capability === 'inventory' ||
+    b.capability === 'inventory' ||
+    a.capability === 'email_uniqueness' ||
+    b.capability === 'email_uniqueness' ||
+    a.capability === 'access_control' ||
+    b.capability === 'access_control'
+  ) {
+    return false;
+  }
   if (!capabilityFamily(a, b)) return false;
   // Must be nearby in the same family chain (not just same area)
   return Math.abs(a.flowStep - b.flowStep) <= 3;

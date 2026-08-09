@@ -14,6 +14,10 @@ import {
 } from './scoring.js';
 import { buildSemanticProfile } from './semantic-profile.js';
 import {
+  resolveStructuredSemantics,
+  type StructuredRequirementSemantics,
+} from './structured-semantics.js';
+import {
   factStatusToIntentSource,
   type BusinessReviewPayload,
   type FunctionalReviewPayload,
@@ -36,6 +40,8 @@ export type AnalyzableRequirement = {
   knownDerivedRules?: ReviewFact[];
   /** Existing project questions for dedup (optional; also applied at service layer). */
   existingQuestionTexts?: string[];
+  /** Optional LLM/heuristic structured semantics */
+  structured?: StructuredRequirementSemantics | null;
 };
 
 function fact(
@@ -216,20 +222,40 @@ export function analyzeRequirement(
     ...extractConfirmedRules(req),
     ...(req.knownDerivedRules ?? []),
   ];
+  const structured = resolveStructuredSemantics(
+    {
+      requirementKey: req.requirementKey,
+      title: req.title,
+      description: req.description,
+      sourceText: req.sourceText,
+      type: req.type,
+    },
+    req.structured ?? null,
+  );
   const semantic = buildSemanticProfile({
     requirementKey: req.requirementKey,
     title: req.title,
     description: req.description,
     sourceText: req.sourceText,
+    structured,
   });
+  const actor = structured.actor || semantic.actor;
+  const entity = structured.object || semantic.entity;
+  const action = structured.action || semantic.action;
+  const capability = structured.capability || semantic.capability;
   business.semantic = {
-    actor: semantic.actor,
-    entity: semantic.entity,
-    action: semantic.action,
-    businessCapability: semantic.capability,
+    actor,
+    entity,
+    action,
+    businessCapability: capability,
     businessOutcome: semantic.outcome,
     channel: semantic.channel,
     crudOp: semantic.crudOp,
+    condition: structured.condition,
+    polarity: structured.polarity,
+    confidence: structured.confidence,
+    uncertain: structured.uncertain ?? false,
+    source: structured.source ?? null,
   };
   if (semantic.outcome && semantic.outcome !== 'general') {
     business.outcomes.push(
@@ -242,25 +268,30 @@ export function analyzeRequirement(
   }
 
   // --- Capability-aware gaps → questions (never invent confirmed rules) ---
-  const cap = semantic.capability;
-  const isRegistration =
-    cap === 'user_registration' ||
-    /\b(register|registration|sign up|create an account)\b/.test(blob);
-  const isLogin =
-    (cap === 'user_login' || /\b(login|sign in)\b/.test(blob)) &&
-    !isRegistration &&
-    !/\botp\b|password reset/.test(blob);
+  const cap = capability;
+  const isRegistration = cap === 'user_registration';
+  const isLogin = cap === 'user_login';
   const isOtpOrReset =
     cap === 'otp_delivery' ||
-    cap === 'password_reset' ||
-    (/\botp\b|password reset|forgot password|reset.*password/.test(blob) &&
-      !isRegistration);
+    cap === 'otp_expiration' ||
+    cap === 'otp_entry' ||
+    cap === 'password_reset';
   const isProductSearch =
     cap === 'product_search' ||
     cap === 'product_search_results' ||
-    (/\bsearch\b/.test(blob) && /\bproduct/.test(blob));
-  const isCheckout =
-    cap === 'checkout' || /\bcheckout\b|proceed to checkout/.test(blob);
+    cap === 'product_filtering';
+  const isCheckout = cap === 'checkout';
+  if (structured.uncertain) {
+    questions.push(
+      q(
+        'BUSINESS_RULE',
+        'MEDIUM',
+        `Please confirm the primary business capability for "${req.title}" (actor, action, and object).`,
+        'Structured semantic extraction confidence was below threshold.',
+        false,
+      ),
+    );
+  }
 
   if (isRegistration) {
     business.outcomes.push(fact('User account creation', 'INFERRED', source));
