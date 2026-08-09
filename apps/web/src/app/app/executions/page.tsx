@@ -21,7 +21,18 @@ type Project = { id: string; name: string };
 function toneFor(status: string) {
   if (status === 'COMPLETED') return 'success' as const;
   if (status === 'FAILED') return 'danger' as const;
-  if (status === 'AWAITING_LOGIN' || status === 'AWAITING_CLARIFICATION')
+  if (
+    status === 'AWAITING_LOGIN' ||
+    status === 'AWAITING_CLARIFICATION' ||
+    status === 'AWAITING_PLAN_APPROVAL' ||
+    status === 'AWAITING_DESIGN_APPROVAL' ||
+    status === 'AWAITING_DATA_APPROVAL' ||
+    status === 'AWAITING_EXECUTION_APPROVAL' ||
+    status === 'AWAITING_DEFECT_APPROVAL' ||
+    status === 'AWAITING_REGRESSION_APPROVAL' ||
+    status === 'AWAITING_AUTOMATION_APPROVAL' ||
+    status === 'AWAITING_QA_SIGNOFF'
+  )
     return 'warning' as const;
   if (status === 'RUNNING' || status === 'QUEUED') return 'accent' as const;
   return 'default' as const;

@@ -8,12 +8,14 @@ import { prisma } from '@qaforge/database';
 import {
   Role,
   analyzeRequirement,
+  buildReviewedRequirementsArtifact,
   computeReadinessScore,
   detectBusinessConflicts,
   detectSemanticRelations,
   toCanonicalRelationships,
   detectRequirementRelations,
   dedupeQuestionsAgainstExisting,
+  evaluateRequirementsReadiness,
   FEATURE_DEPENDENCY_EDGES,
   deriveStatuses,
   generateSemanticTitle,
@@ -119,6 +121,26 @@ export class RequirementReviewService {
         analysisStatus: 'RUNNING',
         analysisStartedAt: new Date(),
         analysisError: null,
+        // Fresh analysis invalidates Stage 1–3 human approvals
+        requirementsApprovedAt: null,
+        requirementsApprovedBy: null,
+        testPlanApprovedAt: null,
+        testPlanApprovedBy: null,
+        testDesignApprovedAt: null,
+        testDesignApprovedBy: null,
+        testDataApprovedAt: null,
+        testDataApprovedBy: null,
+        testExecutionApprovedAt: null,
+        testExecutionApprovedBy: null,
+        defectsApprovedAt: null,
+        defectsApprovedBy: null,
+        regressionApprovedAt: null,
+        regressionApprovedBy: null,
+        automationApprovedAt: null,
+        automationApprovedBy: null,
+        qaSignedOffAt: null,
+        qaSignedOffBy: null,
+        stlcStage: 'REQUIREMENTS',
       },
     });
 
@@ -725,6 +747,25 @@ export class RequirementReviewService {
       low: requirements.filter((r) => r.businessImpact === 'LOW').length,
     };
 
+    const openQuestionRows = await prisma.requirementQuestion.findMany({
+      where: { projectId, status: 'OPEN' },
+      select: { priority: true, blocking: true, status: true },
+    });
+
+    const stlcHandoff = evaluateRequirementsReadiness({
+      analysisStatus: project.analysisStatus,
+      staleRequirementCount: project.staleRequirementCount,
+      requirementsApprovedAt: project.requirementsApprovedAt,
+      requirements: requirements.map((r) => ({
+        requirementKey: r.requirementKey,
+        title: r.title,
+        reviewStatus: r.reviewStatus,
+        analysisStale: r.analysisStale,
+        businessImpact: r.businessImpact,
+      })),
+      openQuestions: openQuestionRows,
+    });
+
     return {
       total,
       reviewed: reviewed.length,
@@ -754,7 +795,156 @@ export class RequirementReviewService {
           (r) => r.reviewStatus === 'READY_FOR_TEST_DESIGN',
         ).length,
       },
+      requirementsApprovedAt: project.requirementsApprovedAt ?? null,
+      requirementsApprovedBy: project.requirementsApprovedBy ?? null,
+      stlcStage: project.stlcStage ?? 'REQUIREMENTS',
+      stlcHandoff,
     };
+  }
+
+  async getStlcHandoff(userId: string, orgId: string, projectId: string) {
+    const summary = await this.getSummary(userId, orgId, projectId);
+    return {
+      stlcStage: summary.stlcStage,
+      requirementsApprovedAt: summary.requirementsApprovedAt,
+      requirementsApprovedBy: summary.requirementsApprovedBy,
+      ...summary.stlcHandoff,
+    };
+  }
+
+  async approveRequirements(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+  ) {
+    const project = await this.requireProject(
+      user.id,
+      orgId,
+      projectId,
+      Role.MEMBER,
+    );
+
+    const requirements = await prisma.requirement.findMany({
+      where: { projectId },
+      select: {
+        requirementKey: true,
+        title: true,
+        reviewStatus: true,
+        analysisStale: true,
+        businessImpact: true,
+      },
+    });
+    const openQuestions = await prisma.requirementQuestion.findMany({
+      where: { projectId, status: 'OPEN' },
+      select: { priority: true, blocking: true, status: true },
+    });
+
+    const readiness = evaluateRequirementsReadiness({
+      analysisStatus: project.analysisStatus,
+      staleRequirementCount: project.staleRequirementCount,
+      requirementsApprovedAt: project.requirementsApprovedAt,
+      requirements,
+      openQuestions,
+    });
+
+    if (!readiness.canApprove) {
+      throw new BadRequestException({
+        message: 'Requirements are not ready for approval',
+        blockers: readiness.blockers,
+        counts: readiness.counts,
+      });
+    }
+
+    const approvedAt = new Date();
+    const updated = await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        requirementsApprovedAt: approvedAt,
+        requirementsApprovedBy: user.id,
+        // Stay on REQUIREMENTS until planning is started; approval unlocks next stage
+        stlcStage: 'REQUIREMENTS',
+        status: 'REQUIREMENTS_APPROVED',
+      },
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.requirements.approve',
+      resource: 'project',
+      resourceId: projectId,
+      metadata: {
+        analysisId: project.analysisId,
+        analysisVersion: project.analysisVersion,
+        requirementCount: requirements.length,
+      },
+    });
+
+    return {
+      projectId,
+      requirementsApprovedAt: updated.requirementsApprovedAt,
+      requirementsApprovedBy: updated.requirementsApprovedBy,
+      stlcStage: updated.stlcStage,
+      status: updated.status,
+      stlcHandoff: evaluateRequirementsReadiness({
+        analysisStatus: updated.analysisStatus,
+        staleRequirementCount: updated.staleRequirementCount,
+        requirementsApprovedAt: updated.requirementsApprovedAt,
+        requirements,
+        openQuestions,
+      }),
+    };
+  }
+
+  async buildApprovedRequirementsArtifact(projectId: string) {
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, deletedAt: null },
+      include: {
+        extractedRequirements: {
+          orderBy: { requirementKey: 'asc' },
+          include: {
+            featureGroup: {
+              select: {
+                featureKey: true,
+                name: true,
+                businessArea: true,
+              },
+            },
+          },
+        },
+        featureGroups: {
+          orderBy: [{ businessArea: 'asc' }, { name: 'asc' }],
+        },
+      },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    return buildReviewedRequirementsArtifact({
+      appUrl: project.appUrl,
+      projectName: project.name,
+      analysisId: project.analysisId,
+      analysisVersion: project.analysisVersion,
+      requirements: project.extractedRequirements.map((r) => ({
+        requirementKey: r.requirementKey,
+        title: r.title,
+        description: r.description,
+        priority: r.priority,
+        businessImpact: r.businessImpact,
+        reviewStatus: r.reviewStatus,
+        acceptanceCriteria: r.acceptanceCriteria,
+        businessRules: r.businessRules,
+        featureGroup: r.featureGroup,
+      })),
+      features: project.featureGroups.map((f) => ({
+        featureKey: f.featureKey,
+        name: f.name,
+        businessArea: f.businessArea,
+        businessIntent: f.businessIntent,
+        businessImpact: f.businessImpact,
+        featureRisk: f.featureRisk,
+        reviewStatus: f.reviewStatus,
+      })),
+    });
   }
 
   async listFeatures(userId: string, orgId: string, projectId: string) {

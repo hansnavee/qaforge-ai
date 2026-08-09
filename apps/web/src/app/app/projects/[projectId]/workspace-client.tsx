@@ -141,6 +141,22 @@ type ExtractedRequirement = {
   analysisStale?: boolean;
 };
 
+type StlcHandoff = {
+  canApprove: boolean;
+  canStartPlanning: boolean;
+  approved: boolean;
+  blockers: string[];
+  counts: {
+    total: number;
+    blocked: number;
+    needsClarification: number;
+    reviewRecommended: number;
+    readyForTestDesign: number;
+    stale: number;
+    openBlockingCriticalQuestions: number;
+  };
+};
+
 type ReviewSummary = {
   total: number;
   reviewed: number;
@@ -181,6 +197,10 @@ type ReviewSummary = {
     reviewRecommended: number;
     readyForTestDesign: number;
   };
+  requirementsApprovedAt?: string | null;
+  requirementsApprovedBy?: string | null;
+  stlcStage?: string | null;
+  stlcHandoff?: StlcHandoff;
 };
 
 type FeatureGroupView = {
@@ -365,6 +385,9 @@ type ProjectDetail = {
   analysisId?: string | null;
   analysisVersion?: string | null;
   analysisEngine?: string | null;
+  requirementsApprovedAt?: string | null;
+  requirementsApprovedBy?: string | null;
+  stlcStage?: string | null;
   staleRequirementCount?: number;
   requirementCount?: number;  extractedRequirementCount?: number;
   questionCount?: number;
@@ -373,16 +396,93 @@ type ProjectDetail = {
   primaryRequirement?: RequirementDoc | null;
 };
 
-const WORKFLOW = [
-  { id: 'project', label: 'Project', state: 'done' as const },
-  { id: 'requirements', label: 'Requirements', state: 'active' as const },
-  { id: 'test-design', label: 'Test Design', state: 'locked' as const },
-  { id: 'manual', label: 'Manual Testing', state: 'locked' as const },
-  { id: 'bugs', label: 'Bug Management', state: 'locked' as const },
-  { id: 'automation', label: 'Automation', state: 'locked' as const },
-  { id: 'execution', label: 'Execution', state: 'locked' as const },
-  { id: 'reports', label: 'Reports', state: 'locked' as const },
-];
+type WorkflowState = 'done' | 'active' | 'locked';
+
+function buildWorkflow(opts: {
+  requirementsApproved: boolean;
+  stlcStage?: string | null;
+}): Array<{ id: string; label: string; state: WorkflowState }> {
+  const stage = (opts.stlcStage ?? 'REQUIREMENTS').toUpperCase();
+  const pastSignoff = stage === 'DONE';
+  const inSignoff = stage === 'SIGNOFF';
+  const inAutomation = stage === 'AUTOMATION';
+  const inRegression = stage === 'REGRESSION';
+  const inDefects = stage === 'DEFECTS';
+  const inExecution = stage === 'EXECUTION';
+  const inData = stage === 'DATA';
+  const inDesign = stage === 'DESIGN';
+  const inPlanning = stage === 'PLANNING';
+  const pastAutomation = inSignoff || pastSignoff;
+  const pastRegression = inAutomation || pastAutomation;
+  const pastDefects = inRegression || pastRegression;
+  const pastExecution = inDefects || pastDefects;
+  const pastData = inExecution || pastExecution;
+  const pastDesign = inData || pastData;
+  const pastPlanning = inDesign || pastDesign;
+
+  return [
+    { id: 'project', label: 'Project', state: 'done' },
+    {
+      id: 'requirements',
+      label: 'Requirements',
+      state: opts.requirementsApproved ? 'done' : 'active',
+    },
+    {
+      id: 'test-planning',
+      label: 'Test Planning',
+      state: pastPlanning
+        ? 'done'
+        : inPlanning || opts.requirementsApproved
+          ? 'active'
+          : 'locked',
+    },
+    {
+      id: 'test-design',
+      label: 'Test Design',
+      state: pastDesign ? 'done' : inDesign ? 'active' : 'locked',
+    },
+    {
+      id: 'test-data',
+      label: 'Test Data',
+      state: pastData ? 'done' : inData ? 'active' : 'locked',
+    },
+    {
+      id: 'execution',
+      label: 'Execution',
+      state: pastExecution ? 'done' : inExecution ? 'active' : 'locked',
+    },
+    {
+      id: 'manual',
+      label: 'Manual Testing',
+      state: pastExecution ? 'done' : inExecution ? 'active' : 'locked',
+    },
+    {
+      id: 'bugs',
+      label: 'Bug Management',
+      state: pastDefects ? 'done' : inDefects ? 'active' : 'locked',
+    },
+    {
+      id: 'regression',
+      label: 'Regression',
+      state: pastRegression ? 'done' : inRegression ? 'active' : 'locked',
+    },
+    {
+      id: 'automation',
+      label: 'Automation',
+      state: pastAutomation ? 'done' : inAutomation ? 'active' : 'locked',
+    },
+    {
+      id: 'signoff',
+      label: 'QA Sign-off',
+      state: pastSignoff ? 'done' : inSignoff ? 'active' : 'locked',
+    },
+    {
+      id: 'reports',
+      label: 'Reports',
+      state: pastAutomation ? (pastSignoff ? 'done' : 'active') : 'locked',
+    },
+  ];
+}
 
 const EXTRACT_STEPS = [
   'Requirement document loaded',
@@ -930,6 +1030,33 @@ export default function ProjectWorkspacePage() {
     },
   });
 
+  const approveRequirementsMutation = useMutation({
+    mutationFn: async () => {
+      return api(`/api/v1/projects/${projectId}/approve-requirements`, {
+        method: 'POST',
+        body: '{}',
+      });
+    },
+    onSuccess: async () => {
+      await invalidateReviewQueries();
+    },
+  });
+
+  const startPlanningMutation = useMutation({
+    mutationFn: async () => {
+      return api<{ id: string }>(`/api/v1/projects/${projectId}/stlc/start`, {
+        method: 'POST',
+        body: '{}',
+      });
+    },
+    onSuccess: async (execution) => {
+      await invalidateReviewQueries();
+      if (execution?.id) {
+        router.push(`/app/executions/${execution.id}`);
+      }
+    },
+  });
+
   useEffect(() => {
     if (!reviewMutation.isPending) return;
     setReviewProgressStep(0);
@@ -1000,6 +1127,18 @@ export default function ProjectWorkspacePage() {
     (reviewSummaryQuery.data?.analysisVersion !== '2.6.0' ||
       reviewSummaryQuery.data?.analysisEngine !==
         'semantic-requirement-review');
+  const stlcHandoff = reviewSummaryQuery.data?.stlcHandoff;
+  const requirementsApproved = Boolean(
+    stlcHandoff?.approved ||
+      reviewSummaryQuery.data?.requirementsApprovedAt ||
+      project.requirementsApprovedAt,
+  );
+  const workflowSteps = buildWorkflow({
+    requirementsApproved,
+    stlcStage:
+      reviewSummaryQuery.data?.stlcStage ?? project.stlcStage ?? 'REQUIREMENTS',
+  });
+  const handoffBlockers = stlcHandoff?.blockers ?? [];
   const openEditProject = () => {
     setProjectForm({
       name: project.name,
@@ -1111,7 +1250,7 @@ export default function ProjectWorkspacePage() {
       <Card className="space-y-3">
         <h2 className="text-sm font-medium">QA Workflow</h2>
         <div className="flex flex-wrap gap-2">
-          {WORKFLOW.map((step) => (
+          {workflowSteps.map((step) => (
             <span
               key={step.id}
               className={cn(
@@ -1132,6 +1271,91 @@ export default function ProjectWorkspacePage() {
             </span>
           ))}
         </div>
+
+        {analysisStatus === 'COMPLETED' || requirementsApproved ? (
+          <div className="rounded-lg border border-border bg-panel/40 p-3 space-y-2">
+            <div className="text-sm font-medium">
+              Stage 1 → 2 handoff
+            </div>
+            {requirementsApproved ? (
+              <p className="text-sm text-muted">
+                Requirements approved
+                {reviewSummaryQuery.data?.requirementsApprovedAt
+                  ? ` · ${formatDate(reviewSummaryQuery.data.requirementsApprovedAt)}`
+                  : ''}
+                . Continue to Test Planning when ready.
+              </p>
+            ) : stlcHandoff?.canApprove ? (
+              <p className="text-sm text-muted">
+                Analysis is complete and clear enough for human approval.
+                Approve to unlock Test Planning.
+              </p>
+            ) : (
+              <div className="space-y-1">
+                <p className="text-sm text-muted">
+                  Resolve blockers before approving requirements:
+                </p>
+                <ul className="list-disc pl-5 text-sm text-warning">
+                  {(handoffBlockers.length
+                    ? handoffBlockers
+                    : ['Finish requirement analysis first']
+                  ).map((b) => (
+                    <li key={b}>{b}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                onClick={() => approveRequirementsMutation.mutate()}
+                disabled={
+                  !stlcHandoff?.canApprove ||
+                  requirementsApproved ||
+                  approveRequirementsMutation.isPending
+                }
+              >
+                {approveRequirementsMutation.isPending
+                  ? 'Approving…'
+                  : requirementsApproved
+                    ? 'Requirements approved'
+                    : 'Approve requirements'}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => startPlanningMutation.mutate()}
+                disabled={
+                  !stlcHandoff?.canStartPlanning ||
+                  startPlanningMutation.isPending
+                }
+              >
+                {startPlanningMutation.isPending
+                  ? 'Starting…'
+                  : 'Continue to Test Planning'}
+              </Button>
+            </div>
+            {approveRequirementsMutation.isError ? (
+              <p className="text-sm text-danger">
+                {approveRequirementsMutation.error instanceof ApiError
+                  ? approveRequirementsMutation.error.message
+                  : 'Could not approve requirements.'}
+              </p>
+            ) : null}
+            {startPlanningMutation.isError ? (
+              <p className="text-sm text-danger">
+                {startPlanningMutation.error instanceof ApiError
+                  ? startPlanningMutation.error.message
+                  : 'Could not start Test Planning.'}
+              </p>
+            ) : null}
+            {startPlanningMutation.isSuccess ? (
+              <p className="text-sm text-success">
+                Test Planning queued from approved Step 2 requirements.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </Card>
 
       {analysisIsStaleEngine ? (

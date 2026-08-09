@@ -115,6 +115,35 @@ model Project {
   environment     String                 @default("QA")
   encryptedConfig String?
   requirementText String?                @db.Text
+  /// Human gate after Step 2 review — required before STLC Test Planning
+  requirementsApprovedAt DateTime?
+  requirementsApprovedBy String?
+  /// Human gate after Stage 2 test strategy — required before Test Design
+  testPlanApprovedAt DateTime?
+  testPlanApprovedBy String?
+  /// Human gate after Stage 3 test design — required before Test Data
+  testDesignApprovedAt DateTime?
+  testDesignApprovedBy String?
+  /// Human gate after Stage 4 test data — required before Test Execution
+  testDataApprovedAt DateTime?
+  testDataApprovedBy String?
+  /// Human gate after Stage 5 test execution — required before Defect Management
+  testExecutionApprovedAt DateTime?
+  testExecutionApprovedBy String?
+  /// Human gate after Stage 6 defect management — required before Regression
+  defectsApprovedAt DateTime?
+  defectsApprovedBy String?
+  /// Human gate after Stage 7 regression — required before Automation
+  regressionApprovedAt DateTime?
+  regressionApprovedBy String?
+  /// Human gate after Stage 8 automation — required before QA Sign-off
+  automationApprovedAt DateTime?
+  automationApprovedBy String?
+  /// Final Stage 9 QA sign-off
+  qaSignedOffAt   DateTime?
+  qaSignedOffBy   String?
+  /// STLC stage pointer: REQUIREMENTS | PLANNING | DESIGN | DATA | EXECUTION | DEFECTS | REGRESSION | AUTOMATION | SIGNOFF | DONE
+  stlcStage       String                 @default("REQUIREMENTS")
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
   deletedAt       DateTime?

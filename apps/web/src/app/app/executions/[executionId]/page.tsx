@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -21,10 +22,11 @@ type ClarificationQuestion = {
 
 type Execution = {
   id: string;
+  projectId?: string;
   status: string;
   phase: string;
   scores?: Record<string, number> | null;
-  project?: { name?: string; appUrl?: string };
+  project?: { id?: string; name?: string; appUrl?: string };
   clarificationQuestions?: {
     questions?: ClarificationQuestion[];
   } | null;
@@ -129,6 +131,134 @@ export default function ExecutionLivePage() {
     },
   });
 
+  const approvePlan = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-test-plan`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
+  const approveDesign = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-test-design`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
+  const approveData = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-test-data`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
+  const approveExecution = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-test-execution`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
+  const approveDefects = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-defects`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
+  const approveRegression = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-regression`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
+  const approveAutomation = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-automation`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
+  const approveSignoff = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-qa-signoff`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
   const clarify = useMutation({
     mutationFn: async (opts: { skip?: boolean }) => {
       const orgId = await getDefaultOrgId();
@@ -155,10 +285,40 @@ export default function ExecutionLivePage() {
   const liveScores = execution?.scores ?? scores;
   const awaitingClarification =
     liveStatus === 'AWAITING_CLARIFICATION' || livePhase === 'CLARIFICATION';
+  const awaitingPlanApproval = liveStatus === 'AWAITING_PLAN_APPROVAL';
+  const awaitingDesignApproval = liveStatus === 'AWAITING_DESIGN_APPROVAL';
+  const awaitingDataApproval = liveStatus === 'AWAITING_DATA_APPROVAL';
+  const awaitingExecutionApproval =
+    liveStatus === 'AWAITING_EXECUTION_APPROVAL';
+  const awaitingDefectApproval = liveStatus === 'AWAITING_DEFECT_APPROVAL';
+  const awaitingRegressionApproval =
+    liveStatus === 'AWAITING_REGRESSION_APPROVAL';
+  const awaitingAutomationApproval =
+    liveStatus === 'AWAITING_AUTOMATION_APPROVAL';
+  const awaitingQaSignoff = liveStatus === 'AWAITING_QA_SIGNOFF';
   const awaitingLogin =
     liveStatus === 'AWAITING_LOGIN' ||
-    (livePhase === 'AUTHENTICATION' && !awaitingClarification);
-  const awaiting = awaitingClarification || awaitingLogin;
+    (livePhase === 'AUTHENTICATION' &&
+      !awaitingClarification &&
+      !awaitingPlanApproval &&
+      !awaitingDesignApproval &&
+      !awaitingDataApproval &&
+      !awaitingExecutionApproval &&
+      !awaitingDefectApproval &&
+      !awaitingRegressionApproval &&
+      !awaitingAutomationApproval &&
+      !awaitingQaSignoff);
+  const awaiting =
+    awaitingClarification ||
+    awaitingPlanApproval ||
+    awaitingDesignApproval ||
+    awaitingDataApproval ||
+    awaitingExecutionApproval ||
+    awaitingDefectApproval ||
+    awaitingRegressionApproval ||
+    awaitingAutomationApproval ||
+    awaitingQaSignoff ||
+    awaitingLogin;
 
   return (
     <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[280px_1fr]">
@@ -265,6 +425,280 @@ export default function ExecutionLivePage() {
             {clarify.isError ? (
               <p className="mt-3 text-sm text-danger">
                 Could not submit clarification. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {awaitingPlanApproval ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Approve test plan
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 2 Test Planning is ready. Review the strategy in the event
+              log / artifacts, then approve to unlock Stage 3 Test Design.
+            </p>
+            <Button
+              className="mt-4"
+              size="lg"
+              onClick={() => approvePlan.mutate()}
+              disabled={approvePlan.isPending}
+            >
+              {approvePlan.isPending
+                ? 'Approving…'
+                : 'Approve test plan & continue'}
+            </Button>
+            {approvePlan.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not approve the test plan. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {awaitingDesignApproval ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Approve test design
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 3 Test Design is ready on the Test Board. Approve to unlock
+              Stage 4 Test Data.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Button
+                size="lg"
+                onClick={() => approveDesign.mutate()}
+                disabled={approveDesign.isPending}
+              >
+                {approveDesign.isPending
+                  ? 'Approving…'
+                  : 'Approve test design & continue'}
+              </Button>
+              {execution?.projectId || execution?.project?.id ? (
+                <Link
+                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=test-board`}
+                >
+                  <Button size="lg" variant="secondary">
+                    Open Test Board
+                  </Button>
+                </Link>
+              ) : null}
+            </div>
+            {approveDesign.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not approve the test design. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {awaitingDataApproval ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Approve test data
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 4 Test Data is ready for the designed cases. Review data on
+              the Test Board, then approve to unlock Test Execution.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Button
+                size="lg"
+                onClick={() => approveData.mutate()}
+                disabled={approveData.isPending}
+              >
+                {approveData.isPending
+                  ? 'Approving…'
+                  : 'Approve test data & continue'}
+              </Button>
+              {execution?.projectId || execution?.project?.id ? (
+                <Link
+                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=test-board`}
+                >
+                  <Button size="lg" variant="secondary">
+                    Open Test Board
+                  </Button>
+                </Link>
+              ) : null}
+            </div>
+            {approveData.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not approve the test data. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {awaitingExecutionApproval ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Approve test execution
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 5 Test Execution finished (auth, discovery, functional/API,
+              and manual suite). Review results in the event log, then approve
+              to unlock Defect Management.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Button
+                size="lg"
+                onClick={() => approveExecution.mutate()}
+                disabled={approveExecution.isPending}
+              >
+                {approveExecution.isPending
+                  ? 'Approving…'
+                  : 'Approve execution & continue'}
+              </Button>
+              {execution?.projectId || execution?.project?.id ? (
+                <Link
+                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=test-board`}
+                >
+                  <Button size="lg" variant="secondary">
+                    Open Test Board
+                  </Button>
+                </Link>
+              ) : null}
+            </div>
+            {approveExecution.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not approve the test execution. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {awaitingDefectApproval ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Approve defects
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 6 Defect Management finished. Review filed bugs in the
+              event log, then approve to unlock Regression.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Button
+                size="lg"
+                onClick={() => approveDefects.mutate()}
+                disabled={approveDefects.isPending}
+              >
+                {approveDefects.isPending
+                  ? 'Approving…'
+                  : 'Approve defects & continue'}
+              </Button>
+              <Link href="/app/executions">
+                <Button size="lg" variant="secondary">
+                  Back to executions
+                </Button>
+              </Link>
+            </div>
+            {approveDefects.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not approve defects. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {awaitingRegressionApproval ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Approve regression
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 7 Regression finished (retest of failed cases, or skipped
+              when none failed). Review results in the event log, then approve
+              to unlock Automation.
+            </p>
+            <Button
+              className="mt-4"
+              size="lg"
+              onClick={() => approveRegression.mutate()}
+              disabled={approveRegression.isPending}
+            >
+              {approveRegression.isPending
+                ? 'Approving…'
+                : 'Approve regression & continue'}
+            </Button>
+            {approveRegression.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not approve regression. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {awaitingAutomationApproval ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Approve automation
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 8 Automation finished (framework generation + automated
+              run). Review artifacts in the event log, then approve to unlock
+              QA Sign-off.
+            </p>
+            <Button
+              className="mt-4"
+              size="lg"
+              onClick={() => approveAutomation.mutate()}
+              disabled={approveAutomation.isPending}
+            >
+              {approveAutomation.isPending
+                ? 'Approving…'
+                : 'Approve automation & continue'}
+            </Button>
+            {approveAutomation.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not approve automation. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {awaitingQaSignoff ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              QA Sign-off
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 9 evidence pack is ready (report, quality analysis, final
+              ZIP). Sign off to close this STLC run as complete.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Button
+                size="lg"
+                onClick={() => approveSignoff.mutate()}
+                disabled={approveSignoff.isPending}
+              >
+                {approveSignoff.isPending
+                  ? 'Signing off…'
+                  : 'Sign off & complete STLC'}
+              </Button>
+              <a
+                href={
+                  orgId
+                    ? `${API_URL}/api/v1/orgs/${orgId}/executions/${executionId}/download-zip`
+                    : undefined
+                }
+                className="inline-flex"
+                aria-disabled={!orgId}
+              >
+                <Button size="lg" variant="secondary" disabled={!orgId}>
+                  Download evidence pack
+                </Button>
+              </a>
+            </div>
+            {approveSignoff.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not complete QA sign-off. Try again.
+              </p>
+            ) : null}
+            {approveSignoff.isSuccess ? (
+              <p className="mt-3 text-sm text-success">
+                QA sign-off recorded. Closing STLC run…
               </p>
             ) : null}
           </Card>

@@ -217,6 +217,24 @@ export class ProjectsCompatController {
     return this.review.getSummary(user.id, orgId, projectId);
   }
 
+  @Get(':projectId/stlc-handoff')
+  async stlcHandoff(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.review.getStlcHandoff(user.id, orgId, projectId);
+  }
+
+  @Post(':projectId/approve-requirements')
+  async approveRequirements(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.review.approveRequirements(user, orgId, projectId);
+  }
+
   @Get(':projectId/review-questions')
   async reviewQuestions(
     @CurrentUser() user: SessionUser,

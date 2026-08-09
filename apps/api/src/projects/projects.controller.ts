@@ -206,6 +206,24 @@ export class ProjectsController {
     return this.review.getSummary(user.id, orgId, projectId);
   }
 
+  @Get(':projectId/stlc-handoff')
+  stlcHandoff(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.review.getStlcHandoff(user.id, orgId, projectId);
+  }
+
+  @Post(':projectId/approve-requirements')
+  approveRequirements(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.review.approveRequirements(user, orgId, projectId);
+  }
+
   @Get(':projectId/review-questions')
   reviewQuestions(
     @CurrentUser() user: SessionUser,

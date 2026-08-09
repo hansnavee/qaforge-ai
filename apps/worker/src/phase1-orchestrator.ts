@@ -2,6 +2,7 @@ import { prisma } from '@qaforge/database';
 import {
   AgentId,
   ArtifactType,
+  buildReviewedRequirementsArtifact,
   ExecutionPhase,
   ExecutionStatus,
 } from '@qaforge/shared';
@@ -19,6 +20,7 @@ import { requirementAgent } from './agents/requirement.agent.js';
 import { clarificationAgent } from './agents/clarification.agent.js';
 import { strategyAgent } from './agents/strategy.agent.js';
 import { designAgent, type DesignedCase } from './agents/design.agent.js';
+import { testdataAgent } from './agents/testdata.agent.js';
 import { authenticationAgent } from './agents/authentication.agent.js';
 import { discoveryAgent } from './agents/discovery.agent.js';
 import { functionalAgent } from './agents/functional.agent.js';
@@ -348,12 +350,34 @@ export async function runStlcExecution(executionId: string): Promise<void> {
   const execution = await prisma.execution.findUnique({
     where: { id: executionId },
     include: {
-      project: { include: { requirements: true } },
+      project: {
+        include: {
+          requirements: true,
+          extractedRequirements: {
+            orderBy: { requirementKey: 'asc' },
+            include: {
+              featureGroup: {
+                select: {
+                  featureKey: true,
+                  name: true,
+                  businessArea: true,
+                },
+              },
+            },
+          },
+          featureGroups: {
+            orderBy: [{ businessArea: 'asc' }, { name: 'asc' }],
+          },
+        },
+      },
     },
   });
   if (!execution) throw new Error(`Execution not found: ${executionId}`);
 
   const project = execution.project;
+  const useStep2Reviewed =
+    Boolean(project.requirementsApprovedAt) &&
+    project.extractedRequirements.length > 0;
   const sessionRef: { id?: string } = {};
   let browserSessionId: string | undefined;
 
@@ -381,101 +405,160 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       message: 'STLC run started',
     });
 
-    // 1. Requirements
-    const requirementsJson = await runAgent(
-      ctx,
-      {
-        agent: requirementAgent,
-        phase: ExecutionPhase.REQUIREMENTS,
-        agentId: AgentId.REQUIREMENT_ANALYSIS,
-      },
-      {
-        requirementText:
-          project.requirementText ||
-          project.requirements
-            .map((d) => d.originalContent || d.parsedText)
-            .filter(Boolean)
-            .join('\n\n') ||
-          null,
-        documents: project.requirements.map((d) => ({
-          storageKey: d.storageKey,
-          mime: d.mime,
-          filename: d.filename,
-          parsedText: d.originalContent || d.parsedText,
-        })),
-        appUrl: project.appUrl ?? 'https://example.com',
-      },
-    );
-
-    // 2. Clarification loop
-    let clear = false;
-    let round = 0;
-    while (!clear && round < MAX_CLARIFY_ROUNDS) {
-      round += 1;
-      const clarifyOut = (await runAgent(
-        ctx,
-        {
-          agent: clarificationAgent,
-          phase: ExecutionPhase.CLARIFICATION,
-          agentId: AgentId.REQUIREMENT_CLARIFICATION,
-        },
-        { appUrl: project.appUrl, round },
-        ExecutionStatus.AWAITING_CLARIFICATION,
-      )) as { questions?: Array<{ id: string }> };
-
-      const questions = clarifyOut?.questions ?? [];
-      await publishClarificationQuestions(executionId, { questions, round });
-
-      await prisma.clarificationRound.create({
-        data: {
-          projectId: project.id,
-          executionId,
-          round,
-          questions: questions as never,
-        },
-      });
-
-      if (questions.length === 0) {
-        clear = true;
-        break;
-      }
-
-      await setExecution(executionId, {
-        status: ExecutionStatus.AWAITING_CLARIFICATION,
-        phase: ExecutionPhase.CLARIFICATION,
-      });
-
-      await ctx.emit({
-        type: 'stlc.awaiting_clarification',
-        phase: ExecutionPhase.CLARIFICATION,
-        message: `Awaiting clarification answers (round ${round})`,
-        data: { round, questionCount: questions.length },
-      });
-
-      const signal = await waitForClarifySignal(executionId);
-      const skip = Boolean(signal?.skip);
-      const answers = (signal?.answers ?? {}) as Record<string, string>;
-
-      await prisma.clarificationRound.updateMany({
-        where: { executionId, round, answeredAt: null },
-        data: {
-          answers: answers as never,
-          skipped: skip,
-          answeredAt: new Date(),
-        },
-      });
-
-      await ctx.putArtifactJson(ArtifactType.CLARIFICATION_ANSWERS, {
-        round,
-        skip,
-        answers,
-      });
-
-      clear = requirementsSeemClear(questions, skip, round);
+    // 1. Requirements — prefer Step 2 reviewed requirements when approved
+    let requirementsJson: unknown;
+    if (useStep2Reviewed) {
       await setExecution(executionId, {
         status: ExecutionStatus.RUNNING,
-        phase: ExecutionPhase.CLARIFICATION,
+        phase: ExecutionPhase.REQUIREMENTS,
       });
+      await ctx.emit({
+        type: 'requirements.from_step2',
+        phase: ExecutionPhase.REQUIREMENTS,
+        message:
+          'Using approved Step 2 reviewed requirements (skip re-parse)',
+        data: {
+          requirementCount: project.extractedRequirements.length,
+          analysisId: project.analysisId,
+          analysisVersion: project.analysisVersion,
+        },
+      });
+
+      requirementsJson = buildReviewedRequirementsArtifact({
+        appUrl: project.appUrl,
+        projectName: project.name,
+        analysisId: project.analysisId,
+        analysisVersion: project.analysisVersion,
+        requirements: project.extractedRequirements.map((r) => ({
+          requirementKey: r.requirementKey,
+          title: r.title,
+          description: r.description,
+          priority: r.priority,
+          businessImpact: r.businessImpact,
+          reviewStatus: r.reviewStatus,
+          acceptanceCriteria: r.acceptanceCriteria,
+          businessRules: r.businessRules,
+          featureGroup: r.featureGroup,
+        })),
+        features: project.featureGroups.map((f) => ({
+          featureKey: f.featureKey,
+          name: f.name,
+          businessArea: f.businessArea,
+          businessIntent: f.businessIntent,
+          businessImpact: f.businessImpact,
+          featureRisk: f.featureRisk,
+          reviewStatus: f.reviewStatus,
+        })),
+      });
+
+      await ctx.putArtifactJson(ArtifactType.REQUIREMENTS_JSON, requirementsJson);
+      await ctx.putArtifactJson(ArtifactType.CLARIFICATION_ANSWERS, {
+        source: 'step2-reviewed',
+        skip: true,
+        answers: {},
+        note: 'Step 2 human approval already completed; STLC clarification skipped',
+      });
+      await ctx.emit({
+        type: 'requirements.ready',
+        phase: ExecutionPhase.REQUIREMENTS,
+        message: 'Reviewed requirements artifact written',
+      });
+    } else {
+      requirementsJson = await runAgent(
+        ctx,
+        {
+          agent: requirementAgent,
+          phase: ExecutionPhase.REQUIREMENTS,
+          agentId: AgentId.REQUIREMENT_ANALYSIS,
+        },
+        {
+          requirementText:
+            project.requirementText ||
+            project.requirements
+              .map((d) => d.originalContent || d.parsedText)
+              .filter(Boolean)
+              .join('\n\n') ||
+            null,
+          documents: project.requirements.map((d) => ({
+            storageKey: d.storageKey,
+            mime: d.mime,
+            filename: d.filename,
+            parsedText: d.originalContent || d.parsedText,
+          })),
+          appUrl: project.appUrl ?? 'https://example.com',
+        },
+      );
+
+      // Legacy path: clarification loop when Step 2 approval is absent
+      let clear = false;
+      let round = 0;
+      while (!clear && round < MAX_CLARIFY_ROUNDS) {
+        round += 1;
+        const clarifyOut = (await runAgent(
+          ctx,
+          {
+            agent: clarificationAgent,
+            phase: ExecutionPhase.CLARIFICATION,
+            agentId: AgentId.REQUIREMENT_CLARIFICATION,
+          },
+          { appUrl: project.appUrl, round },
+          ExecutionStatus.AWAITING_CLARIFICATION,
+        )) as { questions?: Array<{ id: string }> };
+
+        const questions = clarifyOut?.questions ?? [];
+        await publishClarificationQuestions(executionId, { questions, round });
+
+        await prisma.clarificationRound.create({
+          data: {
+            projectId: project.id,
+            executionId,
+            round,
+            questions: questions as never,
+          },
+        });
+
+        if (questions.length === 0) {
+          clear = true;
+          break;
+        }
+
+        await setExecution(executionId, {
+          status: ExecutionStatus.AWAITING_CLARIFICATION,
+          phase: ExecutionPhase.CLARIFICATION,
+        });
+
+        await ctx.emit({
+          type: 'stlc.awaiting_clarification',
+          phase: ExecutionPhase.CLARIFICATION,
+          message: `Awaiting clarification answers (round ${round})`,
+          data: { round, questionCount: questions.length },
+        });
+
+        const signal = await waitForClarifySignal(executionId);
+        const skip = Boolean(signal?.skip);
+        const answers = (signal?.answers ?? {}) as Record<string, string>;
+
+        await prisma.clarificationRound.updateMany({
+          where: { executionId, round, answeredAt: null },
+          data: {
+            answers: answers as never,
+            skipped: skip,
+            answeredAt: new Date(),
+          },
+        });
+
+        await ctx.putArtifactJson(ArtifactType.CLARIFICATION_ANSWERS, {
+          round,
+          skip,
+          answers,
+        });
+
+        clear = requirementsSeemClear(questions, skip, round);
+        await setExecution(executionId, {
+          status: ExecutionStatus.RUNNING,
+          phase: ExecutionPhase.CLARIFICATION,
+        });
+      }
     }
 
     await prisma.projectRequirementSnapshot.create({
@@ -509,6 +592,31 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         } as never,
         clear: true,
       },
+    });
+
+    // Stage 2 human gate — pause for test plan / strategy approval
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_PLAN_APPROVAL,
+      phase: ExecutionPhase.TEST_STRATEGY,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_plan_approval',
+      phase: ExecutionPhase.TEST_STRATEGY,
+      message: 'Test strategy ready — awaiting human approval before Test Design',
+    });
+    await waitForContinueSignal(executionId);
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.TEST_DESIGN,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'DESIGN' },
+    });
+    await ctx.emit({
+      type: 'stlc.plan_approved',
+      phase: ExecutionPhase.TEST_DESIGN,
+      message: 'Test plan approved — continuing to Test Design',
     });
 
     // 4. Test Design (cases + data) — before browser login
@@ -547,8 +655,112 @@ export async function runStlcExecution(executionId: string): Promise<void> {
     await ctx.emit({
       type: 'stlc.test_design_ready',
       phase: ExecutionPhase.TEST_DESIGN,
-      message: `Test Board ready — ${cases.length} case(s) with data`,
+      message: `Test Board ready — ${cases.length} case(s)`,
       data: { count: cases.length },
+    });
+
+    // Stage 3 human gate — pause for test design approval
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_DESIGN_APPROVAL,
+      phase: ExecutionPhase.TEST_DESIGN,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_design_approval',
+      phase: ExecutionPhase.TEST_DESIGN,
+      message: 'Test design ready — awaiting human approval before Test Data',
+      data: { count: cases.length },
+    });
+    await waitForContinueSignal(executionId);
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.TEST_DATA,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'DATA' },
+    });
+    await ctx.emit({
+      type: 'stlc.design_approved',
+      phase: ExecutionPhase.TEST_DATA,
+      message: 'Test design approved — continuing to Test Data',
+    });
+
+    // 4b. Stage 4 — Test Data
+    const dbCasesForData = await prisma.testCase.findMany({
+      where: { executionId },
+      orderBy: { createdAt: 'asc' },
+    });
+    const dataOut = (await runAgent(
+      ctx,
+      {
+        agent: testdataAgent,
+        phase: ExecutionPhase.TEST_DATA,
+        agentId: AgentId.TEST_DATA,
+      },
+      {
+        appUrl: project.appUrl,
+        cases: dbCasesForData.map((tc) => ({
+          id: tc.id,
+          externalId: tc.externalId,
+          module: tc.module,
+          scenario: tc.scenario,
+          type: tc.type,
+          testData:
+            tc.testData && typeof tc.testData === 'object'
+              ? (tc.testData as Record<string, string>)
+              : null,
+        })),
+      },
+    )) as { cases?: Array<{ testCaseId: string; data: Record<string, string> }> };
+
+    for (const row of dataOut?.cases ?? []) {
+      const match = dbCasesForData.find(
+        (tc) => tc.externalId === row.testCaseId || tc.id === row.testCaseId,
+      );
+      if (!match) continue;
+      await prisma.testCase.update({
+        where: { id: match.id },
+        data: { testData: row.data as never },
+      });
+    }
+
+    await prisma.projectRequirementSnapshot.create({
+      data: {
+        projectId: project.id,
+        executionId,
+        payload: {
+          kind: 'TEST_DATA',
+          cases: dataOut?.cases ?? [],
+        } as never,
+        clear: true,
+      },
+    });
+
+    // Stage 4 human gate — pause for test data approval
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_DATA_APPROVAL,
+      phase: ExecutionPhase.TEST_DATA,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_data_approval',
+      phase: ExecutionPhase.TEST_DATA,
+      message:
+        'Test data ready — awaiting human approval before Test Execution',
+      data: { count: dataOut?.cases?.length ?? 0 },
+    });
+    await waitForContinueSignal(executionId);
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.AUTHENTICATION,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'EXECUTION' },
+    });
+    await ctx.emit({
+      type: 'stlc.data_approved',
+      phase: ExecutionPhase.AUTHENTICATION,
+      message: 'Test data approved — continuing to Test Execution',
     });
 
     // 5. Authentication pause
@@ -627,7 +839,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       {},
     );
 
-    // 8. Manual Test Agent
+    // 8. Manual Test Agent (Stage 5 core execution)
     await setExecution(executionId, {
       status: ExecutionStatus.RUNNING,
       phase: ExecutionPhase.MANUAL_TEST,
@@ -648,9 +860,68 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       passLabel: 'Manual Test Agent',
     });
 
-    // 9. Bug Agent on failures
+    const executionSummary = {
+      kind: 'TEST_EXECUTION',
+      source: 'stage5-manual-suite',
+      completedAt: new Date().toISOString(),
+      totals: {
+        cases: dbCases.length,
+        passed: manual.passed,
+        failed: manual.failed,
+      },
+      failures: manual.failures.map((f) => ({
+        testCaseId: f.testCaseId,
+        externalId: f.externalId,
+        scenario: f.scenario,
+        message: f.message,
+        severity: f.severity ?? null,
+      })),
+    };
+
+    await ctx.putArtifactJson(
+      ArtifactType.EXECUTION_RESULTS,
+      executionSummary,
+    );
+    await prisma.projectRequirementSnapshot.create({
+      data: {
+        projectId: project.id,
+        executionId,
+        payload: executionSummary as never,
+        clear: true,
+      },
+    });
+
+    // Stage 5 human gate — pause for execution results approval
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_EXECUTION_APPROVAL,
+      phase: ExecutionPhase.MANUAL_TEST,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_execution_approval',
+      phase: ExecutionPhase.MANUAL_TEST,
+      message:
+        'Test execution complete — awaiting human approval before Defect Management',
+      data: executionSummary.totals,
+    });
+    await waitForContinueSignal(executionId);
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.BUG_ANALYSIS,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'DEFECTS' },
+    });
+    await ctx.emit({
+      type: 'stlc.execution_approved',
+      phase: ExecutionPhase.BUG_ANALYSIS,
+      message: 'Test execution approved — continuing to Defect Management',
+    });
+
+    // 9. Stage 6 — Defect Management
+    let bugCount = 0;
     if (manual.failures.length) {
-      await runAgent(
+      const bugOut = (await runAgent(
         ctx,
         {
           agent: bugAgent,
@@ -658,12 +929,84 @@ export async function runStlcExecution(executionId: string): Promise<void> {
           agentId: AgentId.BUG_ANALYSIS,
         },
         { projectId: project.id, failures: manual.failures },
-      );
+      )) as { bugCount?: number };
+      bugCount = bugOut?.bugCount ?? manual.failures.length;
+    } else {
+      await ctx.putArtifactJson(ArtifactType.FAILURE_ANALYSIS, {
+        summary: 'No failures — no defects filed',
+        failures: [],
+      });
+      await ctx.emit({
+        type: 'bugs.none',
+        phase: ExecutionPhase.BUG_ANALYSIS,
+        message: 'No execution failures — defect board is empty',
+      });
     }
 
-    // 10. Retest failed cases once
+    const openBugs = await prisma.bug.findMany({
+      where: { executionId, status: 'OPEN' },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        title: true,
+        severity: true,
+        status: true,
+        testCaseId: true,
+      },
+    });
+
+    const defectSummary = {
+      kind: 'DEFECT_MANAGEMENT',
+      source: 'stage6-bug-agent',
+      completedAt: new Date().toISOString(),
+      totals: {
+        executionFailures: manual.failures.length,
+        bugsFiled: bugCount,
+        openBugs: openBugs.length,
+      },
+      bugs: openBugs,
+    };
+
+    await prisma.projectRequirementSnapshot.create({
+      data: {
+        projectId: project.id,
+        executionId,
+        payload: defectSummary as never,
+        clear: true,
+      },
+    });
+
+    // Stage 6 human gate — pause for defect review/approval
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_DEFECT_APPROVAL,
+      phase: ExecutionPhase.BUG_ANALYSIS,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_defect_approval',
+      phase: ExecutionPhase.BUG_ANALYSIS,
+      message:
+        'Defect management complete — awaiting human approval before Regression',
+      data: defectSummary.totals,
+    });
+    await waitForContinueSignal(executionId);
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.RETEST,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'REGRESSION' },
+    });
+    await ctx.emit({
+      type: 'stlc.defects_approved',
+      phase: ExecutionPhase.RETEST,
+      message: 'Defects approved — continuing to Regression',
+    });
+
+    // 10. Retest failed cases once (Stage 7 Regression)
     let retestPassed = 0;
     let retestFailed = 0;
+    let retestSkipped = false;
     if (manual.failures.length) {
       await setExecution(executionId, {
         status: ExecutionStatus.RUNNING,
@@ -693,10 +1036,65 @@ export async function runStlcExecution(executionId: string): Promise<void> {
           { projectId: project.id, failures: retest.failures },
         );
       }
+    } else {
+      retestSkipped = true;
+      await ctx.emit({
+        type: 'stlc.regression_skipped',
+        phase: ExecutionPhase.RETEST,
+        message: 'No failed cases — regression retest skipped',
+      });
     }
 
-    // 11. Automation generation
-    await runAgent(
+    const regressionSummary = {
+      kind: 'REGRESSION',
+      source: 'stage7-retest',
+      completedAt: new Date().toISOString(),
+      skipped: retestSkipped,
+      totals: {
+        candidates: manual.failures.length,
+        passed: retestPassed,
+        failed: retestFailed,
+      },
+    };
+
+    await prisma.projectRequirementSnapshot.create({
+      data: {
+        projectId: project.id,
+        executionId,
+        payload: regressionSummary as never,
+        clear: true,
+      },
+    });
+
+    // Stage 7 human gate — pause for regression approval
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_REGRESSION_APPROVAL,
+      phase: ExecutionPhase.RETEST,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_regression_approval',
+      phase: ExecutionPhase.RETEST,
+      message:
+        'Regression complete — awaiting human approval before Automation',
+      data: regressionSummary.totals,
+    });
+    await waitForContinueSignal(executionId);
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.AUTOMATION,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'AUTOMATION' },
+    });
+    await ctx.emit({
+      type: 'stlc.regression_approved',
+      phase: ExecutionPhase.AUTOMATION,
+      message: 'Regression approved — continuing to Automation',
+    });
+
+    // 11. Stage 8 — Automation generation
+    const automationOut = await runAgent(
       ctx,
       {
         agent: automationAgent,
@@ -712,7 +1110,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
     );
 
     // 12. Automation execution
-    await runAgent(
+    const autoExecOut = await runAgent(
       ctx,
       {
         agent: executionAgent,
@@ -726,7 +1124,50 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
     );
 
-    // 13. HTML report
+    const automationSummary = {
+      kind: 'AUTOMATION',
+      source: 'stage8-automation',
+      completedAt: new Date().toISOString(),
+      generation: automationOut ?? null,
+      execution: autoExecOut ?? null,
+    };
+
+    await prisma.projectRequirementSnapshot.create({
+      data: {
+        projectId: project.id,
+        executionId,
+        payload: automationSummary as never,
+        clear: true,
+      },
+    });
+
+    // Stage 8 human gate — pause for automation approval
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_AUTOMATION_APPROVAL,
+      phase: ExecutionPhase.AUTOMATION,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_automation_approval',
+      phase: ExecutionPhase.AUTOMATION,
+      message:
+        'Automation complete — awaiting human approval before QA Sign-off',
+    });
+    await waitForContinueSignal(executionId);
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.REPORT,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'SIGNOFF' },
+    });
+    await ctx.emit({
+      type: 'stlc.automation_approved',
+      phase: ExecutionPhase.REPORT,
+      message: 'Automation approved — continuing to QA Sign-off',
+    });
+
+    // 13. HTML report (Stage 9 sign-off pack begins)
     const reportOut = (await runAgent(
       ctx,
       {
@@ -823,34 +1264,84 @@ export async function runStlcExecution(executionId: string): Promise<void> {
 
     const totalPassed = manual.passed + retestPassed;
     const totalFailed = retestFailed || manual.failed;
+    const scores = {
+      functional: dbCases.length
+        ? Math.round((manual.passed / dbCases.length) * 100)
+        : 0,
+      passed: totalPassed,
+      failed: totalFailed,
+      total: dbCases.length,
+      retestPassed,
+      retestFailed,
+      bugs: bugsRows.length,
+    };
+
+    const signoffSummary = {
+      kind: 'QA_SIGNOFF',
+      source: 'stage9-signoff-pack',
+      preparedAt: new Date().toISOString(),
+      totals: {
+        cases: dbCases.length,
+        passed: manual.passed,
+        failed: manual.failed,
+        retestPassed,
+        retestFailed,
+        bugs: bugsRows.length,
+      },
+      artifacts: {
+        finalZipKey: `${executionId}/stlc/final-pack.zip`,
+        reportZipKey: reportOut?.zipKey ?? null,
+      },
+      scores,
+    };
+
+    await prisma.projectRequirementSnapshot.create({
+      data: {
+        projectId: project.id,
+        executionId,
+        payload: signoffSummary as never,
+        clear: true,
+      },
+    });
+
+    // Stage 9 human gate — pause for QA sign-off
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_QA_SIGNOFF,
+      phase: ExecutionPhase.REPORT,
+      scores,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_qa_signoff',
+      phase: ExecutionPhase.REPORT,
+      message:
+        'Evidence pack ready — awaiting human QA sign-off to close the STLC run',
+      data: signoffSummary.totals,
+    });
+    await waitForContinueSignal(executionId);
+
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'DONE' },
+    });
 
     await setExecution(executionId, {
       status: ExecutionStatus.COMPLETED,
       phase: ExecutionPhase.DONE,
       finishedAt: new Date(),
-      scores: {
-        functional: dbCases.length
-          ? Math.round((manual.passed / dbCases.length) * 100)
-          : 0,
-        passed: totalPassed,
-        failed: totalFailed,
-        total: dbCases.length,
-        retestPassed,
-        retestFailed,
-        bugs: bugsRows.length,
-      },
+      scores,
     });
 
     await ctx.emit({
       type: 'stlc.completed',
       phase: ExecutionPhase.DONE,
-      message: `STLC complete — manual ${manual.passed}/${dbCases.length} passed, retest ${retestPassed} recovered, ${bugsRows.length} bug(s)`,
+      message: `STLC signed off — manual ${manual.passed}/${dbCases.length} passed, retest ${retestPassed} recovered, ${bugsRows.length} bug(s)`,
       data: {
         passed: manual.passed,
         failed: manual.failed,
         retestPassed,
         retestFailed,
         total: dbCases.length,
+        signedOff: true,
       },
     });
   } catch (err) {

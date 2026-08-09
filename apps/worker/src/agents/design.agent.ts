@@ -34,7 +34,7 @@ export const designAgent: AgentHandler<
     await ctx.emit({
       type: 'design.planning',
       phase: 'TEST_DESIGN',
-      message: 'Designing test cases and test data from strategy',
+      message: 'Designing test cases from strategy (data finalized in Stage 4)',
     });
 
     const strategy = await ctx.getArtifactJson(ArtifactType.TEST_STRATEGY_JSON);
@@ -132,7 +132,7 @@ export const designAgent: AgentHandler<
     await ctx.emit({
       type: 'design.ready',
       phase: 'TEST_DESIGN',
-      message: `Designed ${cases.length} test case(s) with data`,
+      message: `Designed ${cases.length} test case(s); Stage 4 will finalize data`,
       data: { count: cases.length },
     });
 

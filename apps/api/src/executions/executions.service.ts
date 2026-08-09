@@ -189,6 +189,432 @@ export class ExecutionsService {
     return this.get(user.id, orgId, executionId);
   }
 
+  async approveTestPlan(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_PLAN_APPROVAL) {
+      throw new ForbiddenException(
+        `Cannot approve test plan from status ${execution.status}`,
+      );
+    }
+
+    const approvedAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        testPlanApprovedAt: approvedAt,
+        testPlanApprovedBy: user.id,
+        stlcStage: 'DESIGN',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'TEST_DESIGN',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.plan_approved',
+      phase: 'TEST_STRATEGY',
+      message: 'Human approved test strategy; continuing to Test Design',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.plan.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
+  async approveTestDesign(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_DESIGN_APPROVAL) {
+      throw new ForbiddenException(
+        `Cannot approve test design from status ${execution.status}`,
+      );
+    }
+
+    const approvedAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        testDesignApprovedAt: approvedAt,
+        testDesignApprovedBy: user.id,
+        stlcStage: 'DATA',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'TEST_DATA',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.design_approved',
+      phase: 'TEST_DESIGN',
+      message: 'Human approved test design; continuing to Test Data',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.design.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
+  async approveTestData(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_DATA_APPROVAL) {
+      throw new ForbiddenException(
+        `Cannot approve test data from status ${execution.status}`,
+      );
+    }
+
+    const approvedAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        testDataApprovedAt: approvedAt,
+        testDataApprovedBy: user.id,
+        stlcStage: 'EXECUTION',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'AUTHENTICATION',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.data_approved',
+      phase: 'TEST_DATA',
+      message: 'Human approved test data; continuing to Test Execution',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.data.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
+  async approveTestExecution(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_EXECUTION_APPROVAL) {
+      throw new ForbiddenException(
+        `Cannot approve test execution from status ${execution.status}`,
+      );
+    }
+
+    const approvedAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        testExecutionApprovedAt: approvedAt,
+        testExecutionApprovedBy: user.id,
+        stlcStage: 'DEFECTS',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'BUG_ANALYSIS',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.execution_approved',
+      phase: 'MANUAL_TEST',
+      message:
+        'Human approved test execution results; continuing to Defect Management',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.execution.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
+  async approveDefects(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_DEFECT_APPROVAL) {
+      throw new ForbiddenException(
+        `Cannot approve defects from status ${execution.status}`,
+      );
+    }
+
+    const approvedAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        defectsApprovedAt: approvedAt,
+        defectsApprovedBy: user.id,
+        stlcStage: 'REGRESSION',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'RETEST',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.defects_approved',
+      phase: 'BUG_ANALYSIS',
+      message: 'Human approved defect management; continuing to Regression',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.defects.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
+  async approveRegression(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_REGRESSION_APPROVAL) {
+      throw new ForbiddenException(
+        `Cannot approve regression from status ${execution.status}`,
+      );
+    }
+
+    const approvedAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        regressionApprovedAt: approvedAt,
+        regressionApprovedBy: user.id,
+        stlcStage: 'AUTOMATION',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'AUTOMATION',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.regression_approved',
+      phase: 'RETEST',
+      message: 'Human approved regression; continuing to Automation',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.regression.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
+  async approveAutomation(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_AUTOMATION_APPROVAL) {
+      throw new ForbiddenException(
+        `Cannot approve automation from status ${execution.status}`,
+      );
+    }
+
+    const approvedAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        automationApprovedAt: approvedAt,
+        automationApprovedBy: user.id,
+        stlcStage: 'SIGNOFF',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'REPORT',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.automation_approved',
+      phase: 'AUTOMATION',
+      message: 'Human approved automation; continuing to QA Sign-off',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.automation.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
+  async approveQaSignoff(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_QA_SIGNOFF) {
+      throw new ForbiddenException(
+        `Cannot sign off from status ${execution.status}`,
+      );
+    }
+
+    const signedOffAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        qaSignedOffAt: signedOffAt,
+        qaSignedOffBy: user.id,
+        stlcStage: 'DONE',
+        status: 'STLC_COMPLETE',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'DONE',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.qa_signed_off',
+      phase: 'REPORT',
+      message: 'Human QA sign-off recorded; closing STLC run',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.signoff.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
   async continueAfterLogin(user: SessionUser, orgId: string, executionId: string) {
     await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
     const execution = await this.get(user.id, orgId, executionId);

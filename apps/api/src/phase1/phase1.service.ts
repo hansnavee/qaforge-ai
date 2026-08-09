@@ -13,6 +13,7 @@ import {
   ExecutionStatus,
   Role,
   clarifyExecutionSchema,
+  evaluateRequirementsReadiness,
 } from '@qaforge/shared';
 import {
   buildZipPackage,
@@ -87,6 +88,46 @@ export class Phase1Service {
       Role.MEMBER,
     );
 
+    const [requirements, openQuestions] = await Promise.all([
+      prisma.requirement.findMany({
+        where: { projectId },
+        select: {
+          requirementKey: true,
+          title: true,
+          reviewStatus: true,
+          analysisStale: true,
+          businessImpact: true,
+        },
+      }),
+      prisma.requirementQuestion.findMany({
+        where: { projectId, status: 'OPEN' },
+        select: { priority: true, blocking: true, status: true },
+      }),
+    ]);
+
+    const readiness = evaluateRequirementsReadiness({
+      analysisStatus: project.analysisStatus,
+      staleRequirementCount: project.staleRequirementCount,
+      requirementsApprovedAt: project.requirementsApprovedAt,
+      requirements,
+      openQuestions,
+    });
+
+    if (!readiness.canStartPlanning) {
+      throw new BadRequestException({
+        message: readiness.approved
+          ? 'Requirements are no longer ready for Test Planning'
+          : 'Approve Step 2 requirements before starting Test Planning',
+        blockers: readiness.approved
+          ? readiness.blockers
+          : [
+              'Requirements not approved',
+              ...readiness.blockers,
+            ],
+        counts: readiness.counts,
+      });
+    }
+
     const execution = await prisma.execution.create({
       data: {
         projectId: project.id,
@@ -94,6 +135,29 @@ export class Phase1Service {
         phase: 'INIT',
         runMode: 'STLC',
         startedAt: new Date(),
+      },
+    });
+
+    await prisma.project.update({
+      where: { id: project.id },
+      data: {
+        stlcStage: 'PLANNING',
+        testPlanApprovedAt: null,
+        testPlanApprovedBy: null,
+        testDesignApprovedAt: null,
+        testDesignApprovedBy: null,
+        testDataApprovedAt: null,
+        testDataApprovedBy: null,
+        testExecutionApprovedAt: null,
+        testExecutionApprovedBy: null,
+        defectsApprovedAt: null,
+        defectsApprovedBy: null,
+        regressionApprovedAt: null,
+        regressionApprovedBy: null,
+        automationApprovedAt: null,
+        automationApprovedBy: null,
+        qaSignedOffAt: null,
+        qaSignedOffBy: null,
       },
     });
 
@@ -106,7 +170,7 @@ export class Phase1Service {
       executionId: execution.id,
       type: 'stlc.queued',
       phase: 'INIT',
-      message: 'STLC QA run queued',
+      message: 'STLC Test Planning queued from approved requirements',
       timestamp: new Date().toISOString(),
     });
 
@@ -116,7 +180,12 @@ export class Phase1Service {
       action: 'stlc.start',
       resource: 'execution',
       resourceId: execution.id,
-      metadata: { projectId, runMode: 'STLC' },
+      metadata: {
+        projectId,
+        runMode: 'STLC',
+        source: 'step2-reviewed',
+        analysisId: project.analysisId,
+      },
     });
 
     return execution;

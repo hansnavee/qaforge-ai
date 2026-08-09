@@ -54,6 +54,78 @@ export class ExecutionsController {
     return this.executions.clarify(user, orgId, executionId, body);
   }
 
+  @Post('orgs/:orgId/executions/:executionId/approve-test-plan')
+  approveTestPlan(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveTestPlan(user, orgId, executionId);
+  }
+
+  @Post('orgs/:orgId/executions/:executionId/approve-test-design')
+  approveTestDesign(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveTestDesign(user, orgId, executionId);
+  }
+
+  @Post('orgs/:orgId/executions/:executionId/approve-test-data')
+  approveTestData(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveTestData(user, orgId, executionId);
+  }
+
+  @Post('orgs/:orgId/executions/:executionId/approve-test-execution')
+  approveTestExecution(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveTestExecution(user, orgId, executionId);
+  }
+
+  @Post('orgs/:orgId/executions/:executionId/approve-defects')
+  approveDefects(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveDefects(user, orgId, executionId);
+  }
+
+  @Post('orgs/:orgId/executions/:executionId/approve-regression')
+  approveRegression(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveRegression(user, orgId, executionId);
+  }
+
+  @Post('orgs/:orgId/executions/:executionId/approve-automation')
+  approveAutomation(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveAutomation(user, orgId, executionId);
+  }
+
+  @Post('orgs/:orgId/executions/:executionId/approve-qa-signoff')
+  approveQaSignoff(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveQaSignoff(user, orgId, executionId);
+  }
+
   @Post('orgs/:orgId/executions/:executionId/continue-after-login')
   continueAfterLogin(
     @CurrentUser() user: SessionUser,
