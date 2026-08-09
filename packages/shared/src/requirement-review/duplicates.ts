@@ -622,25 +622,10 @@ function classifyNormalized(
     });
   }
 
-  // Generic flowStep sequential only for remaining same-family adjacent pairs
-  // (excludes filter/OTP which were handled as RELATED above)
-  if (areSequentialCapabilities(a, b)) {
-    const [from, to] = a.flowStep! < b.flowStep! ? [a, b] : [b, a];
-    const skip =
-      from.capability === 'product_filtering' ||
-      to.capability === 'product_filtering' ||
-      from.capability === 'otp_delivery' ||
-      to.capability === 'otp_delivery' ||
-      from.capability === 'password_reset' ||
-      to.capability === 'password_reset';
-    if (!skip && Math.abs(from.flowStep! - to.flowStep!) === 1) {
-      return pairResult(from, to, {
-        kind: 'SEQUENTIAL',
-        relationType: 'SEQUENTIAL',
-        reason: `${from.title} precedes ${to.title} in the business workflow (${from.capability} → ${to.capability}).`,
-      });
-    }
-  }
+  // No generic flowStep / business-area sequencing.
+  // SEQUENTIAL requires an explicit workflow chain above (discovery, purchase,
+  // registration→login, order history→details). Adjacent admin CRUD / access
+  // capabilities are RELATED when evidenced, never SEQUENTIAL by index alone.
 
   // 6) RELATED — evidence required (never a fallback)
 

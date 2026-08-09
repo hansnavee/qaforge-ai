@@ -343,6 +343,129 @@ describe('truncated titles', () => {
   });
 });
 
+describe('REQ-047 mobile title vs account extraction', () => {
+  it('pure Mobile Support text is not user_account/create and not DUPLICATE of unique email', async () => {
+    const {
+      extractStructuredSemanticsHeuristic,
+      resolveStructuredSemantics,
+      structuredSemanticsCompatibleWithText,
+    } = await import('./structured-semantics.js');
+    const mobile = {
+      requirementKey: 'REQ-047',
+      title: 'Mobile Support',
+      description: 'The application should support mobile devices.',
+      sourceText: 'The application should support mobile devices.',
+      type: 'NON_FUNCTIONAL',
+    };
+    const uniqueEmail = {
+      requirementKey: 'REQ-002',
+      title: 'Unique Email Address',
+      description: 'The email address must be unique.',
+      type: 'BUSINESS_RULE',
+    };
+    // Invented LLM account semantics must be rejected
+    const badLlm = {
+      actor: 'customer',
+      action: 'create',
+      object: 'user_account',
+      condition: 'EMAIL_UNIQUE',
+      polarity: 'REQUIRED' as const,
+      requirementType: 'BUSINESS_RULE' as const,
+      capability: 'email_uniqueness',
+      confidence: 0.99,
+      uncertain: false,
+      source: 'llm' as const,
+    };
+    expect(structuredSemanticsCompatibleWithText(mobile, badLlm)).toBe(false);
+    const resolved = resolveStructuredSemantics(mobile, badLlm);
+    expect(resolved.object).not.toBe('user_account');
+    expect(resolved.capability).not.toBe('email_uniqueness');
+    const heur = extractStructuredSemanticsHeuristic(mobile);
+    expect(heur.object).not.toBe('user_account');
+    expect(analyzeRelationship(mobile, uniqueEmail)).toBe('NOT_RELATED');
+  });
+
+  it('email body under Mobile Support section is retitled, not kept as Mobile Support', async () => {
+    const { generateSemanticTitle, titleAgreesWithBody } = await import(
+      '../requirement-extraction/normalize-requirements.js'
+    );
+    const body = 'An email address can only be associated with one user account.';
+    expect(titleAgreesWithBody('Mobile Support', body)).toBe(false);
+    expect(generateSemanticTitle(body, 'Mobile Support', 'BUSINESS_RULE')).toBe(
+      'One Account Per Email',
+    );
+  });
+});
+
+describe('REQ-036 / REQ-035 not SEQUENTIAL without explicit workflow', () => {
+  it('Prevent Normal Users From Accessing Product ↛ Update Product Inventory', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-036',
+          title: 'Prevent Normal Users From Accessing Product',
+          description:
+            'The system should prevent normal users from accessing product management functionality.',
+          type: 'BUSINESS_RULE',
+        },
+        {
+          requirementKey: 'REQ-035',
+          title: 'Update Product Inventory',
+          description: 'Administrators should be able to update product inventory.',
+        },
+      ),
+    ).not.toBe('SEQUENTIAL');
+  });
+
+  it('keeps discovery SEQUENTIAL and admin CRUD RELATED', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-010',
+          title: 'Product Search',
+          description:
+            'Users should be able to search for products using the search bar.',
+        },
+        {
+          requirementKey: 'REQ-013',
+          title: 'Product Details',
+          description: 'The product details page should display product information.',
+        },
+      ),
+    ).toBe('SEQUENTIAL');
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-032',
+          title: 'Add Product',
+          description: 'Administrators should be able to add new products.',
+        },
+        {
+          requirementKey: 'REQ-033',
+          title: 'Update Product',
+          description: 'Administrators should be able to update product information.',
+        },
+      ),
+    ).toBe('RELATED');
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-001',
+          title: 'User Registration',
+          description:
+            'The user should be able to create an account using their email address and password.',
+        },
+        {
+          requirementKey: 'REQ-003',
+          title: 'Registration Redirect',
+          description:
+            'After successful registration, the user should be redirected to the login page.',
+        },
+      ),
+    ).toBe('RELATED');
+  });
+});
+
 describe('RELATED is not a catch-all', () => {
   it('canonical graph omits cross-domain NFR↔admin edges', () => {
     const rels = toCanonicalRelationships([

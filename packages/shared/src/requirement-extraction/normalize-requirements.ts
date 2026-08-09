@@ -88,6 +88,14 @@ export function generateSemanticTitle(
 
   // Auth / account
   if (/\bunique\b/.test(d) && /\bemail\b/.test(d)) return 'Unique Email Address';
+  if (
+    /\bemail\b/.test(d) &&
+    (/\bonly.*(one|single).*account/.test(d) ||
+      /\bone (user )?account/.test(d) ||
+      /\bassociated with one\b/.test(d))
+  ) {
+    return 'One Account Per Email';
+  }
   if (/\bredirect/.test(d) && /\b(login|registration)\b/.test(d)) return 'Registration Redirect';
   if (/\b(create an account|register)\b/.test(d) && !/\blogin\b/.test(d)) {
     return 'User Registration';
@@ -241,7 +249,27 @@ export function generateSemanticTitle(
     if (!isTruncatedTitle(title)) return title;
   }
 
-  return section && !isTruncatedTitle(section) ? section : 'Requirement';
+  // Never adopt a section heading that is unrelated to the requirement body
+  // (e.g. email uniqueness under "Mobile Support").
+  if (section && !isTruncatedTitle(section) && sectionMatchesBody(section, d)) {
+    return section;
+  }
+  return 'Requirement';
+}
+
+function sectionMatchesBody(section: string, descriptionLower: string): boolean {
+  const tokens = section
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 2 && !/^(the|and|for|with|from)$/.test(t));
+  if (tokens.length === 0) return false;
+  const hit = tokens.filter((t) => descriptionLower.includes(t)).length;
+  return hit / tokens.length >= 0.5;
+}
+
+/** True when a title/section heading is lexically supported by the requirement body. */
+export function titleAgreesWithBody(title: string, description: string): boolean {
+  return sectionMatchesBody(title, description.toLowerCase());
 }
 
 /**

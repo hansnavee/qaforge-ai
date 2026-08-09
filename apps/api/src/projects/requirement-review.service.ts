@@ -20,6 +20,7 @@ import {
   groupRequirementsIntoFeatures,
   interpretAnswer,
   isTruncatedTitle,
+  titleAgreesWithBody,
   questionBucket,
   summarizeFeature,
   SEMANTIC_ANALYSIS_ENGINE,
@@ -185,11 +186,13 @@ export class RequirementReviewService {
       },
     });
 
-    // Repair truncated / mid-phrase titles before grouping + relationships
+    // Repair truncated / section-mismatched titles before grouping + relationships.
+    // Derive from description only (null section) so headings like "Mobile Support"
+    // cannot retitle an email-uniqueness body.
     for (const r of requirements) {
       const improved = generateSemanticTitle(
         r.description,
-        r.sourceSection,
+        null,
         (r.type as 'FUNCTIONAL' | 'NON_FUNCTIONAL' | 'BUSINESS_RULE') ||
           'FUNCTIONAL',
       );
@@ -197,7 +200,9 @@ export class RequirementReviewService {
         improved &&
         improved !== 'Requirement' &&
         improved !== r.title &&
-        (isTruncatedTitle(r.title) || improved.length < r.title.length)
+        (isTruncatedTitle(r.title) ||
+          !titleAgreesWithBody(r.title, r.description) ||
+          improved.length < r.title.length)
       ) {
         await prisma.requirement.update({
           where: { id: r.id },

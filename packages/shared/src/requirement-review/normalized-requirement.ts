@@ -231,7 +231,10 @@ function refineCapability(
       t,
     ) ||
     profileCapability === 'access_control' ||
-    (/\bnormal users?\b/.test(t) && /administrator/.test(t))
+    (/\bnormal users?\b/.test(t) && /administrator/.test(t)) ||
+    (/\b(prevent|should not|must not|cannot)\b/.test(t) &&
+      /\b(normal users?|non-?admin)\b/.test(t) &&
+      /\b(product management|administrative|administrator)\b/.test(t))
   ) {
     return 'access_control';
   }
@@ -461,14 +464,18 @@ export function areSequentialCapabilities(
 ): boolean {
   if (a.flowStep == null || b.flowStep == null) return false;
   if (a.flowStep === b.flowStep) return false;
-  // Stock / uniqueness business rules are constraints, not workflow steps
+  // Constraints / access / admin CRUD are never sequential by flow index alone
   if (
     a.capability === 'inventory' ||
     b.capability === 'inventory' ||
     a.capability === 'email_uniqueness' ||
     b.capability === 'email_uniqueness' ||
     a.capability === 'access_control' ||
-    b.capability === 'access_control'
+    b.capability === 'access_control' ||
+    a.capability === 'product_administration' ||
+    b.capability === 'product_administration' ||
+    a.capability === 'inventory_update' ||
+    b.capability === 'inventory_update'
   ) {
     return false;
   }

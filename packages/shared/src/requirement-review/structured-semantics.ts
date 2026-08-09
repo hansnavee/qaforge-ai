@@ -230,6 +230,119 @@ export function acceptStructuredSemantics(
   );
 }
 
+/**
+ * Evidence gate: entity/action/capability must be supported by requirement body
+ * (description + sourceText). Title alone is never enough — prevents section
+ * headings like "Mobile Support" from laundering unrelated account semantics,
+ * and blocks LLM inventing user_account/create for pure NFR text.
+ */
+export function structuredSemanticsCompatibleWithText(
+  input: StructuredExtractionInput,
+  s: StructuredRequirementSemantics,
+): boolean {
+  const body = `${input.description}\n${input.sourceText ?? ''}`.toLowerCase();
+  const title = (input.title ?? '').toLowerCase();
+  const text = `${title}\n${body}`;
+  if (!body.trim() && !title.trim()) return false;
+
+  const object = s.object;
+  const action = s.action;
+  const capability = s.capability;
+
+  // Strong NFR title/section cues without matching body evidence → reject
+  // account/CRUD extractions (the Mobile Support ↔ email uniqueness failure mode).
+  const titleLooksMobileNfr =
+    /\bmobile\b/.test(title) &&
+    !/\b(email|account|register|password|order|cart|payment)\b/.test(title);
+  const bodySupportsAccount =
+    /\b(email|account|register|password|profile|login|sign[\s-]?up)\b/.test(
+      body,
+    );
+  if (
+    titleLooksMobileNfr &&
+    !bodySupportsAccount &&
+    (object === 'user_account' ||
+      capability === 'email_uniqueness' ||
+      capability === 'user_registration' ||
+      action === 'create')
+  ) {
+    return false;
+  }
+
+  // Body is the source of truth for entity/action evidence.
+  const evidence = body.trim() ? body : text;
+
+  const objectEvidence: Record<string, RegExp> = {
+    user_account:
+      /\b(email|account|password|profile|register|registration|login|sign[\s-]?up|user)\b/,
+    password: /\bpasswords?\b/,
+    otp: /\botp\b/,
+    product: /\bproducts?\b/,
+    product_catalog: /\b(products?|catalog)\b/,
+    inventory: /\b(inventory|stock)\b/,
+    cart_item: /\b(cart|quantity)\b/,
+    order: /\borders?\b/,
+    order_confirmation: /\b(order confirmation|confirmation)\b/,
+    payment: /\bpayment\b/,
+    checkout: /\bcheckout\b/,
+    search_result: /\b(search result|search)\b/,
+    review: /\b(review|rating)\b/,
+    application: /\b(application|system|browser|mobile|error|performance)\b/,
+  };
+
+  if (object !== 'general') {
+    const re = objectEvidence[object];
+    if (re && !re.test(evidence)) return false;
+  }
+
+  const actionEvidence: Record<string, RegExp> = {
+    create: /\b(create|add|register|sign[\s-]?up|submit|associated)\b/,
+    update: /\b(update|edit|modify|change|increase|decrease)\b/,
+    delete: /\b(delete|remove)\b/,
+    read: /\b(view|open|display|show|access|see)\b/,
+    search: /\b(search|find)\b/,
+    filter: /\bfilter\b/,
+    purchase: /\b(buy|purchase|purchased)\b/,
+    pay: /\b(pay|payment|checkout)\b/,
+    login: /\b(login|sign[\s-]?in)\b/,
+    reset: /\breset\b/,
+    store: /\b(store|stored|hash|encrypt|secur)/,
+    support: /\b(support|compatible|friendly|responsive|usab)/,
+    navigate: /\b(redirect|navigate)/,
+    notify: /\b(send|sent|deliver|notify|email)\b/,
+    expire: /\b(expire|expiry|expires)\b/,
+    verify: /\b(enter|verify|input)\b/,
+    select: /\b(select|choose)\b/,
+    deny: /\b(prevent|deny|cannot|should not|must not|not be allowed)\b/,
+  };
+
+  if (action !== 'unspecified') {
+    const re = actionEvidence[action];
+    if (re && !re.test(evidence)) return false;
+  }
+
+  if (capability === 'email_uniqueness') {
+    if (!/\bemail\b/.test(evidence)) return false;
+    if (!/\b(unique|only|one account|single account|associated)\b/.test(evidence))
+      return false;
+  }
+  if (capability === 'mobile_usability' || capability === 'browser_compatibility') {
+    if (
+      !/\b(mobile|browser|usab|friendly|compatible|device|responsive)\b/.test(
+        evidence,
+      )
+    ) {
+      return false;
+    }
+  }
+  if (capability === 'user_registration') {
+    if (!/\b(register|registration|sign[\s-]?up|create an account)\b/.test(evidence))
+      return false;
+  }
+
+  return true;
+}
+
 /** Normalize a raw LLM/heuristic object into StructuredRequirementSemantics. */
 export function coerceStructuredSemantics(
   raw: Record<string, unknown>,
@@ -521,12 +634,20 @@ export function extractStructuredSemanticsHeuristic(
   } else if (
     /administrative functionality|administrator permissions|admin(istrator)? access|normal users? should not/.test(
       t,
-    )
+    ) ||
+    (/\b(prevent|must not|should not|cannot)\b/.test(t) &&
+      /\b(normal users?|non-?admin|customers?)\b/.test(t) &&
+      /\b(product management|admin|administrator|administrative)\b/.test(t))
   ) {
-    object = 'user_account';
-    action = /not|cannot|denied/.test(t) ? 'deny' : 'read';
+    object = /product management|inventory|catalog/.test(t)
+      ? 'product_catalog'
+      : 'user_account';
+    action = /not|cannot|prevent|denied/.test(t) ? 'deny' : 'read';
     capability = 'access_control';
-    confidence = 0.9;
+    polarity =
+      /not|cannot|prevent|denied/.test(t) ? 'NOT_ALLOWED' : polarity;
+    requirementType = 'BUSINESS_RULE';
+    confidence = 0.92;
   } else if (/\breview\b|\brating\b/.test(t) && !/code review|review status/.test(t)) {
     object = 'review';
     action = 'create';
@@ -538,7 +659,10 @@ export function extractStructuredSemanticsHeuristic(
     capability = 'browser_compatibility';
     requirementType = 'NON_FUNCTIONAL';
     confidence = 0.92;
-  } else if (/\bmobile\b/.test(t) && /usab|friendly|responsive|easy/.test(t)) {
+  } else if (
+    /\bmobile\b/.test(t) &&
+    /usab|friendly|responsive|easy|support|device/.test(t)
+  ) {
     object = 'application';
     action = 'support';
     capability = 'mobile_usability';
@@ -708,7 +832,11 @@ export function resolveStructuredSemantics(
   llm?: StructuredRequirementSemantics | null,
 ): StructuredRequirementSemantics {
   const heuristic = extractStructuredSemanticsHeuristic(input);
-  if (llm && acceptStructuredSemantics(llm)) {
+  const llmOk =
+    !!llm &&
+    acceptStructuredSemantics(llm) &&
+    structuredSemanticsCompatibleWithText(input, llm);
+  if (llmOk && llm) {
     return {
       actor: llm.actor,
       action: llm.action,
@@ -723,8 +851,8 @@ export function resolveStructuredSemantics(
     };
   }
   if (llm && !llm.uncertain && llm.confidence >= 0.7) {
-    // Partial trust — merge object/action when heuristic is weaker
-    return {
+    // Partial trust — merge only fields that are text-compatible
+    const merged: StructuredRequirementSemantics = {
       ...heuristic,
       actor: llm.actor || heuristic.actor,
       action: llm.action !== 'unspecified' ? llm.action : heuristic.action,
@@ -740,6 +868,21 @@ export function resolveStructuredSemantics(
       confidence: Math.max(heuristic.confidence, llm.confidence * 0.9),
       uncertain: true,
       source: 'merged',
+    };
+    if (structuredSemanticsCompatibleWithText(input, merged)) {
+      return merged;
+    }
+    // Incompatible merge — fall through to validated heuristic
+  }
+  if (!structuredSemanticsCompatibleWithText(input, heuristic)) {
+    return {
+      ...heuristic,
+      object: 'general',
+      action: 'unspecified',
+      capability: 'general',
+      confidence: Math.min(heuristic.confidence, 0.7),
+      uncertain: true,
+      source: heuristic.source,
     };
   }
   return heuristic;
