@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, test } from 'vitest';
 import {
+  analyzeRelationship,
   detectDuplicatePairs,
   detectSemanticRelations,
+  toCanonicalRelationships,
 } from './duplicates.js';
 import { normalizeRequirement } from './normalized-requirement.js';
 
@@ -184,5 +186,192 @@ describe('Piece 2.2 semantic relations', () => {
       description: 'Admin can update product information',
     });
     expect(n.actor[0]).toBe('administrator');
+  });
+
+  it('analyzeRelationship helper matches Piece 2.3 acceptance', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-032',
+          title: 'Add Product',
+          description: 'Administrators should be able to add new products.',
+        },
+        {
+          requirementKey: 'REQ-014',
+          title: 'Add Product To Cart',
+          description:
+            'Users should be able to add an available product to their cart.',
+        },
+      ),
+    ).toBe('NOT_DUPLICATE');
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-032',
+          title: 'Add Product',
+          description: 'Administrators should be able to add new products.',
+        },
+        {
+          requirementKey: 'REQ-034',
+          title: 'Remove Product',
+          description: 'Administrators should be able to remove products.',
+        },
+      ),
+    ).toBe('RELATED');
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-033',
+          title: 'Update Product',
+          description:
+            'Administrators should be able to update product information.',
+        },
+        {
+          requirementKey: 'REQ-035',
+          title: 'Update Product Inventory',
+          description:
+            'Administrators should be able to update product inventory.',
+        },
+      ),
+    ).toBe('RELATED');
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-026',
+          title: 'Order Confirmation',
+          description:
+            'The confirmation page should display product information.',
+        },
+        {
+          requirementKey: 'REQ-027',
+          title: 'Order Confirmation',
+          description: 'The user should receive an order confirmation email.',
+        },
+      ),
+    ).toBe('RELATED');
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-010',
+          title: 'Product Search',
+          description:
+            'Users should be able to search for products using the search bar.',
+        },
+        {
+          requirementKey: 'REQ-011',
+          title: 'Product Search Results',
+          description:
+            'Users can select a product from search results to view its details.',
+        },
+      ),
+    ).toMatch(/RELATED|PRECEDES/);
+  });
+
+  it('canonical relationships never include similarity-led POSSIBLE_DUPLICATE for cart vs admin', () => {
+    const rels = toCanonicalRelationships([
+      {
+        requirementKey: 'REQ-014',
+        title: 'Add Product To Cart',
+        description:
+          'Users should be able to add an available product to their cart.',
+      },
+      {
+        requirementKey: 'REQ-032',
+        title: 'Add Product',
+        description: 'Administrators should be able to add new products.',
+      },
+    ]);
+    const hit = rels.find(
+      (r) =>
+        (r.sourceRequirementId === 'REQ-014' &&
+          r.targetRequirementId === 'REQ-032') ||
+        (r.sourceRequirementId === 'REQ-032' &&
+          r.targetRequirementId === 'REQ-014'),
+    );
+    expect(hit?.relationship).toBe('NOT_DUPLICATE');
+    expect(hit?.confidence).toBeUndefined();
+  });
+});
+
+describe('Requirement semantic relationships', () => {
+  const adminAddProduct = {
+    requirementKey: 'REQ-032',
+    title: 'Add Product',
+    description: 'Administrators should be able to add new products.',
+  };
+  const addProductToCart = {
+    requirementKey: 'REQ-014',
+    title: 'Add Product To Cart',
+    description:
+      'Users should be able to add an available product to their cart.',
+  };
+  const createProduct = adminAddProduct;
+  const deleteProduct = {
+    requirementKey: 'REQ-034',
+    title: 'Remove Product',
+    description: 'Administrators should be able to remove products.',
+  };
+  const updateProduct = {
+    requirementKey: 'REQ-033',
+    title: 'Update Product',
+    description:
+      'Administrators should be able to update product information.',
+  };
+  const updateInventory = {
+    requirementKey: 'REQ-035',
+    title: 'Update Product Inventory',
+    description:
+      'Administrators should be able to update product inventory.',
+  };
+  const confirmationPage = {
+    requirementKey: 'REQ-026',
+    title: 'Order Confirmation',
+    description:
+      'The confirmation page should display product information.',
+  };
+  const confirmationEmail = {
+    requirementKey: 'REQ-027',
+    title: 'Order Confirmation',
+    description: 'The user should receive an order confirmation email.',
+  };
+  const search = {
+    requirementKey: 'REQ-010',
+    title: 'Product Search',
+    description:
+      'Users should be able to search for products using the search bar.',
+  };
+  const searchResultSelection = {
+    requirementKey: 'REQ-011',
+    title: 'Product Search Results',
+    description:
+      'Users can select a product from search results to view its details.',
+  };
+
+  test('admin add product is not duplicate of add to cart', () => {
+    expect(analyzeRelationship(adminAddProduct, addProductToCart)).toBe(
+      'NOT_DUPLICATE',
+    );
+  });
+
+  test('create and delete product are related', () => {
+    expect(analyzeRelationship(createProduct, deleteProduct)).toBe('RELATED');
+  });
+
+  test('product information and inventory update are related', () => {
+    expect(analyzeRelationship(updateProduct, updateInventory)).toBe(
+      'RELATED',
+    );
+  });
+
+  test('confirmation page and confirmation email are related', () => {
+    expect(analyzeRelationship(confirmationPage, confirmationEmail)).toBe(
+      'RELATED',
+    );
+  });
+
+  test('search and selecting search result are related', () => {
+    expect(
+      analyzeRelationship(search, searchResultSelection),
+    ).toMatch(/RELATED|PRECEDES/);
   });
 });

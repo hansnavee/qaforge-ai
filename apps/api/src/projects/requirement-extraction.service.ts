@@ -72,6 +72,8 @@ export class RequirementExtractionService {
     possibleDuplicateOf: string | null;
     duplicateSimilarity?: number | null;
     duplicateKind?: string | null;
+    duplicateReason?: string | null;
+    relationships?: unknown;
     featureGroupId?: string | null;
     reviewStatus?: string | null;
     businessReadiness?: string | null;
@@ -135,8 +137,11 @@ export class RequirementExtractionService {
       dependencies: asStringArray(row.dependencies),
       supportingInformation: asStringArray(row.supportingInformation),
       possibleDuplicateOf: row.possibleDuplicateOf,
-      duplicateSimilarity: row.duplicateSimilarity ?? null,
+      // Never expose similarity % — legacy UIs used this as "Possible duplicate (67%)"
+      duplicateSimilarity: null,
       duplicateKind: row.duplicateKind ?? null,
+      duplicateReason: row.duplicateReason ?? null,
+      relationships: Array.isArray(row.relationships) ? row.relationships : [],
       featureGroupId: row.featureGroupId ?? null,
       featureGroup: row.featureGroup
         ? {

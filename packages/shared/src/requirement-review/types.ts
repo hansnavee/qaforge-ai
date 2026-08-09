@@ -259,6 +259,34 @@ export type RelationDraft = {
   detail?: string;
 };
 
+/** Canonical relationship model — single source of truth for API + UI */
+export type RequirementRelationship = {
+  sourceRequirementId: string;
+  targetRequirementId: string;
+  relationship:
+    | 'DUPLICATE'
+    | 'RELATED'
+    | 'POSSIBLE_DUPLICATE'
+    | 'NOT_DUPLICATE'
+    | 'DEPENDS_ON'
+    | 'PRECEDES'
+    | 'CONFLICTS_WITH';
+  /** Optional supporting score only — never primary decision */
+  confidence?: number;
+  reason: string;
+  semanticAnalysis?: {
+    actorMatch: boolean;
+    entityMatch: boolean;
+    actionMatch: boolean;
+    capabilityMatch: boolean;
+    outcomeMatch: boolean;
+    contextMatch: boolean;
+  };
+};
+
+export const SEMANTIC_ANALYSIS_ENGINE = 'semantic-requirement-review';
+export const SEMANTIC_ANALYSIS_VERSION = '2.3';
+
 export function factStatusToIntentSource(
   status: ReviewFactStatus,
 ): IntentSource {

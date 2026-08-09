@@ -4,7 +4,12 @@
  * Never deletes or merges requirements.
  */
 
-import type { DuplicateKind, DuplicatePair, RelationType } from './types.js';
+import type {
+  DuplicateKind,
+  DuplicatePair,
+  RelationType,
+  RequirementRelationship,
+} from './types.js';
 import {
   buildSemanticProfile,
   type SemanticComparable,
@@ -417,6 +422,65 @@ export function detectDuplicatePairs(
     suggestedFeatureSplit: r.suggestedFeatureSplit,
     relationType: r.relationType,
   }));
+}
+
+/** Pairwise helper for unit tests / compare view. */
+export function analyzeRelationship(
+  a: DupComparable,
+  b: DupComparable,
+): DuplicateKind | 'PRECEDES' | 'DEPENDS_ON' | 'NOT_RELATED' {
+  const hit = detectSemanticRelations([a, b])[0];
+  return hit?.kind ?? 'NOT_RELATED';
+}
+
+function semanticDims(a: NormalizedRequirement, b: NormalizedRequirement) {
+  return {
+    actorMatch: sameActor(a, b),
+    entityMatch: sameEntity(a, b),
+    actionMatch: a.action[0] === b.action[0],
+    capabilityMatch: sameCapability(a, b) || capabilityFamily(a, b),
+    outcomeMatch: a.businessOutcome === b.businessOutcome,
+    contextMatch:
+      (a.channel ?? a.subFeature ?? null) === (b.channel ?? b.subFeature ?? null),
+  };
+}
+
+/** Convert semantic draft pairs into canonical RequirementRelationship rows. */
+export function toCanonicalRelationships(
+  requirements: DupComparable[],
+): RequirementRelationship[] {
+  const normalized = new Map(
+    requirements.map((r) => [r.requirementKey, normalizeRequirement(r)]),
+  );
+  const drafts = detectSemanticRelations(requirements);
+  const out: RequirementRelationship[] = [];
+
+  for (const d of drafts) {
+    if (d.kind === 'NOT_RELATED') continue;
+    const na = normalized.get(d.requirementKeyA);
+    const nb = normalized.get(d.requirementKeyB);
+    const relationship: RequirementRelationship['relationship'] =
+      d.relationType === 'PRECEDES' || d.kind === 'PRECEDES'
+        ? 'PRECEDES'
+        : d.kind === 'DEPENDS_ON'
+          ? 'DEPENDS_ON'
+          : (d.kind as RequirementRelationship['relationship']);
+
+    out.push({
+      sourceRequirementId: d.requirementKeyA,
+      targetRequirementId: d.requirementKeyB,
+      relationship,
+      reason: d.reason,
+      // confidence only for true duplicates as optional supporting evidence
+      confidence:
+        d.kind === 'DUPLICATE' && d.showConfidence
+          ? Math.min(100, Math.max(d.similarity, 90)) / 100
+          : undefined,
+      semanticAnalysis:
+        na && nb ? semanticDims(na, nb) : undefined,
+    });
+  }
+  return out;
 }
 
 export { buildSemanticProfile, normalizeRequirement };

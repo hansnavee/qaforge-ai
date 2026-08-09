@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { prisma } from '@qaforge/database';
@@ -10,6 +11,7 @@ import {
   computeReadinessScore,
   detectBusinessConflicts,
   detectSemanticRelations,
+  toCanonicalRelationships,
   detectRequirementRelations,
   dedupeQuestionsAgainstExisting,
   FEATURE_DEPENDENCY_EDGES,
@@ -18,10 +20,14 @@ import {
   interpretAnswer,
   questionBucket,
   summarizeFeature,
+  SEMANTIC_ANALYSIS_ENGINE,
+  SEMANTIC_ANALYSIS_VERSION,
   type BusinessReviewPayload,
   type FunctionalReviewPayload,
+  type RequirementRelationship,
   type ReviewFact,
 } from '@qaforge/shared';
+import { randomUUID } from 'node:crypto';
 import { AuditService } from '../common/audit.service';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
@@ -43,6 +49,8 @@ function asFacts(v: unknown): ReviewFact[] {
 
 @Injectable()
 export class RequirementReviewService {
+  private readonly logger = new Logger(RequirementReviewService.name);
+
   constructor(
     private readonly orgs: OrgsService,
     private readonly audit: AuditService,
@@ -140,6 +148,7 @@ export class RequirementReviewService {
     });
     await prisma.requirementRelation.deleteMany({ where: { projectId } });
     await prisma.featureGroup.deleteMany({ where: { projectId } });
+    // Invalidate ALL legacy duplicate fields so stale similarity % cannot resurface
     await prisma.requirement.updateMany({
       where: { projectId },
       data: {
@@ -148,6 +157,23 @@ export class RequirementReviewService {
         duplicateSimilarity: null,
         duplicateKind: null,
         duplicateReason: null,
+        relationships: [],
+      },
+    });
+
+    const analysisId = `ANL-${randomUUID().slice(0, 8)}`;
+    await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        analysisId,
+        analysisVersion: SEMANTIC_ANALYSIS_VERSION,
+        analysisEngine: SEMANTIC_ANALYSIS_ENGINE,
+        analysisMeta: {
+          status: 'RUNNING',
+          engine: SEMANTIC_ANALYSIS_ENGINE,
+          version: SEMANTIC_ANALYSIS_VERSION,
+          startedAt: new Date().toISOString(),
+        },
       },
     });
 
@@ -257,34 +283,94 @@ export class RequirementReviewService {
       businessArea: featureMetaByReq.get(r.requirementKey)?.businessArea,
       type: r.type,
     }));
-    const semanticPairs = detectSemanticRelations(comparable);
+    // Canonical semantic relationships (source of truth for API + UI)
+    const canonical = toCanonicalRelationships(comparable);
+    if (process.env.NODE_ENV !== 'production') {
+      const sampleKeys = [
+        'REQ-032',
+        'REQ-014',
+        'REQ-034',
+        'REQ-035',
+        'REQ-033',
+        'REQ-027',
+        'REQ-026',
+        'REQ-011',
+        'REQ-010',
+      ];
+      for (const key of sampleKeys) {
+        const hits = canonical.filter(
+          (r) =>
+            r.sourceRequirementId === key || r.targetRequirementId === key,
+        );
+        if (!hits.length) continue;
+        this.logger.debug(
+          `ANALYSIS DEBUG ${key} → ${hits
+            .map(
+              (h) =>
+                `${h.relationship} ${h.sourceRequirementId === key ? h.targetRequirementId : h.sourceRequirementId}`,
+            )
+            .join(' | ')}`,
+        );
+      }
+    }
+    const relsByKey = new Map<string, RequirementRelationship[]>();
+    for (const rel of canonical) {
+      const list = relsByKey.get(rel.sourceRequirementId) ?? [];
+      list.push(rel);
+      relsByKey.set(rel.sourceRequirementId, list);
+      // Mirror onto target for bidirectional UI lookup
+      const mirror: RequirementRelationship = {
+        ...rel,
+        sourceRequirementId: rel.targetRequirementId,
+        targetRequirementId: rel.sourceRequirementId,
+      };
+      const listB = relsByKey.get(rel.targetRequirementId) ?? [];
+      listB.push(mirror);
+      relsByKey.set(rel.targetRequirementId, listB);
+    }
 
+    for (const [reqKey, rels] of relsByKey) {
+      const reqId = keyToId.get(reqKey);
+      if (!reqId) continue;
+
+      // Legacy soft-flags ONLY for true/possible duplicates — never for RELATED.
+      // (Old UIs treated possibleDuplicateOf as "Possible duplicate (N%)".)
+      const dupLike = rels.find(
+        (r) =>
+          r.relationship === 'DUPLICATE' ||
+          r.relationship === 'POSSIBLE_DUPLICATE',
+      );
+      const related = rels.find(
+        (r) =>
+          r.relationship === 'RELATED' || r.relationship === 'PRECEDES',
+      );
+
+      await prisma.requirement.update({
+        where: { id: reqId },
+        data: {
+          relationships: rels as object[],
+          possibleDuplicateOf: dupLike?.targetRequirementId ?? null,
+          duplicateSimilarity: null,
+          duplicateKind: dupLike
+            ? dupLike.relationship
+            : related
+              ? 'RELATED'
+              : rels.some((r) => r.relationship === 'NOT_DUPLICATE')
+                ? 'NOT_DUPLICATE'
+                : null,
+          duplicateReason:
+            dupLike?.reason ?? related?.reason ?? rels[0]?.reason ?? null,
+        },
+      });
+    }
+
+    const semanticPairs = detectSemanticRelations(comparable);
     for (const pair of semanticPairs) {
       const aId = keyToId.get(pair.requirementKeyA);
       const bId = keyToId.get(pair.requirementKeyB);
       if (!aId || !bId) continue;
-
       if (pair.kind === 'NOT_DUPLICATE' || pair.kind === 'NOT_RELATED') {
         continue;
-      }
-
-      // Soft flags: never store similarity %. Kind drives UI (RELATED ≠ duplicate).
-      if (
-        pair.kind === 'DUPLICATE' ||
-        pair.kind === 'POSSIBLE_DUPLICATE' ||
-        pair.kind === 'RELATED' ||
-        pair.kind === 'PRECEDES'
-      ) {
-        await prisma.requirement.update({
-          where: { id: bId },
-          data: {
-            possibleDuplicateOf: pair.requirementKeyA,
-            duplicateSimilarity: null,
-            duplicateKind:
-              pair.kind === 'PRECEDES' ? 'RELATED' : pair.kind,
-            duplicateReason: pair.reason,
-          },
-        });
       }
 
       const relationType =
@@ -384,13 +470,26 @@ export class RequirementReviewService {
       data: { analysisStale: false },
     });
 
+    const completedAt = new Date();
     await prisma.project.update({
       where: { id: projectId },
       data: {
         analysisStatus: 'COMPLETED',
-        analysisCompletedAt: new Date(),
+        analysisCompletedAt: completedAt,
         analysisError: null,
         staleRequirementCount: 0,
+        analysisId,
+        analysisVersion: SEMANTIC_ANALYSIS_VERSION,
+        analysisEngine: SEMANTIC_ANALYSIS_ENGINE,
+        analysisMeta: {
+          status: 'COMPLETED',
+          engine: SEMANTIC_ANALYSIS_ENGINE,
+          version: SEMANTIC_ANALYSIS_VERSION,
+          analysisId,
+          analyzedAt: completedAt.toISOString(),
+          relationshipCount: canonical.length,
+          relationships: canonical,
+        },
       },
     });
 
@@ -445,7 +544,7 @@ export class RequirementReviewService {
   }
 
   async getSummary(userId: string, orgId: string, projectId: string) {
-    await this.requireProject(userId, orgId, projectId);
+    const project = await this.requireProject(userId, orgId, projectId);
     const requirements = await prisma.requirement.findMany({
       where: { projectId },
       include: {
@@ -520,6 +619,10 @@ export class RequirementReviewService {
       reviewed: reviewed.length,
       features,
       duplicates,
+      analysisId: project.analysisId ?? null,
+      analysisVersion: project.analysisVersion ?? null,
+      analysisEngine: project.analysisEngine ?? null,
+      analyzedAt: project.analysisCompletedAt ?? null,
       business,
       functional,
       questions,
@@ -649,6 +752,9 @@ export class RequirementReviewService {
         ],
         requirements: f.requirements.map((r) => {
           const biz = r.businessReview as BusinessReviewPayload | null;
+          const relationships = Array.isArray(r.relationships)
+            ? (r.relationships as RequirementRelationship[])
+            : [];
           return {
             id: r.id,
             requirementKey: r.requirementKey,
@@ -665,9 +771,10 @@ export class RequirementReviewService {
             highOpenCount: r.questions.filter((q) => q.priority === 'HIGH')
               .length,
             possibleDuplicateOf: r.possibleDuplicateOf,
-            duplicateSimilarity: r.duplicateSimilarity,
+            duplicateSimilarity: null,
             duplicateKind: r.duplicateKind,
             duplicateReason: r.duplicateReason,
+            relationships,
             semantic: biz?.semantic ?? null,
           };
         }),
@@ -1420,6 +1527,7 @@ export class RequirementReviewService {
     duplicateSimilarity?: number | null;
     duplicateKind?: string | null;
     duplicateReason?: string | null;
+    relationships?: unknown;
     featureGroupId?: string | null;
     reviewStatus: string | null;
     businessReadiness: string | null;
@@ -1482,9 +1590,21 @@ export class RequirementReviewService {
       dependencies: asStringArray(row.dependencies),
       supportingInformation: asStringArray(row.supportingInformation),
       possibleDuplicateOf: row.possibleDuplicateOf,
-      duplicateSimilarity: row.duplicateSimilarity ?? null,
+      // Never expose similarity as a decision signal (prevents legacy "67%" UI)
+      duplicateSimilarity: null,
       duplicateKind: row.duplicateKind ?? null,
       duplicateReason: row.duplicateReason ?? null,
+      relationships: Array.isArray(row.relationships)
+        ? (row.relationships as RequirementRelationship[])
+        : [],
+      analysisDetails: {
+        engine: SEMANTIC_ANALYSIS_ENGINE,
+        version: SEMANTIC_ANALYSIS_VERSION,
+        internalOverlap:
+          row.duplicateSimilarity != null
+            ? Number(row.duplicateSimilarity)
+            : null,
+      },
       semantic: biz?.semantic ?? null,
       featureGroupId: row.featureGroupId ?? null,
       featureGroup: row.featureGroup

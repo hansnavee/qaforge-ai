@@ -92,6 +92,21 @@ type ExtractedRequirement = {
   duplicateSimilarity?: number | null;
   duplicateKind?: string | null;
   duplicateReason?: string | null;
+  relationships?: Array<{
+    sourceRequirementId: string;
+    targetRequirementId: string;
+    relationship: string;
+    reason: string;
+    confidence?: number;
+    semanticAnalysis?: {
+      actorMatch: boolean;
+      entityMatch: boolean;
+      actionMatch: boolean;
+      capabilityMatch: boolean;
+      outcomeMatch: boolean;
+      contextMatch: boolean;
+    };
+  }>;
   semantic?: {
     actor: string;
     entity: string;
@@ -131,6 +146,10 @@ type ReviewSummary = {
   reviewed: number;
   features?: number;
   duplicates?: number;
+  analysisId?: string | null;
+  analysisVersion?: string | null;
+  analysisEngine?: string | null;
+  analyzedAt?: string | null;
   business: {
     ready: number;
     needsClarification: number;
@@ -212,6 +231,21 @@ type FeatureGroupView = {
     duplicateSimilarity?: number | null;
     duplicateKind?: string | null;
     duplicateReason?: string | null;
+    relationships?: Array<{
+      sourceRequirementId: string;
+      targetRequirementId: string;
+      relationship: string;
+      reason: string;
+      confidence?: number;
+      semanticAnalysis?: {
+        actorMatch: boolean;
+        entityMatch: boolean;
+        actionMatch: boolean;
+        capabilityMatch: boolean;
+        outcomeMatch: boolean;
+        contextMatch: boolean;
+      };
+    }>;
     semantic?: {
       actor: string;
       entity: string;
@@ -223,6 +257,25 @@ type FeatureGroupView = {
     } | null;
   }>;
 };
+
+function primaryRelationship(
+  rels?: ExtractedRequirement['relationships'],
+) {
+  if (!rels?.length) return null;
+  const rank = (r: string) =>
+    r === 'DUPLICATE'
+      ? 0
+      : r === 'POSSIBLE_DUPLICATE'
+        ? 1
+        : r === 'RELATED' || r === 'PRECEDES'
+          ? 2
+          : r === 'NOT_DUPLICATE'
+            ? 3
+            : 4;
+  return [...rels].sort(
+    (a, b) => rank(a.relationship) - rank(b.relationship),
+  )[0]!;
+}
 
 type ReviewConflict = {
   id: string;
@@ -279,9 +332,11 @@ type ProjectDetail = {
   analysisStatus?: string | null;
   analysisCompletedAt?: string | null;
   analysisError?: string | null;
+  analysisId?: string | null;
+  analysisVersion?: string | null;
+  analysisEngine?: string | null;
   staleRequirementCount?: number;
-  requirementCount?: number;
-  extractedRequirementCount?: number;
+  requirementCount?: number;  extractedRequirementCount?: number;
   questionCount?: number;
   featureGroupCount?: number;
   requirements?: RequirementDoc[];
@@ -910,6 +965,11 @@ export default function ProjectWorkspacePage() {
     if (extracted.length > 0) reviewMutation.mutate();
     else extractMutation.mutate();
   };
+  const analysisIsStaleEngine =
+    Boolean(reviewSummaryQuery.data?.reviewed) &&
+    (reviewSummaryQuery.data?.analysisVersion !== '2.3' ||
+      reviewSummaryQuery.data?.analysisEngine !==
+        'semantic-requirement-review');
   const openEditProject = () => {
     setProjectForm({
       name: project.name,
@@ -977,6 +1037,12 @@ export default function ProjectWorkspacePage() {
           <div className="mt-3 flex flex-wrap gap-2">
             <Badge tone="warning">Status: {status}</Badge>
             <Badge>Analysis: {analysisLabel(analysisStatus)}</Badge>
+            {project.analysisVersion ? (
+              <Badge tone="accent">
+                Engine {project.analysisEngine ?? 'semantic'} v
+                {project.analysisVersion}
+              </Badge>
+            ) : null}
             <Badge>
               {project.requirementCount ?? 0} Source Document
               {(project.requirementCount ?? 0) === 1 ? '' : 's'}
@@ -1037,6 +1103,22 @@ export default function ProjectWorkspacePage() {
           ))}
         </div>
       </Card>
+
+      {analysisIsStaleEngine ? (
+        <Card className="border-warning/40 bg-warning/10 p-3 text-sm">
+          Legacy analysis detected (missing engine v2.3). Stale “Possible
+          duplicate (N%)” data can still appear until you run a fresh semantic
+          analysis.
+          <Button
+            className="ml-3"
+            size="sm"
+            onClick={runAnalysis}
+            disabled={analysisBusy || extracted.length === 0}
+          >
+            Run Fresh Analysis
+          </Button>
+        </Card>
+      ) : null}
 
       {tab === 'overview' ? (
         <Card className="space-y-5">
@@ -1272,10 +1354,16 @@ export default function ProjectWorkspacePage() {
                 Import / Source
               </Button>
               <Button size="sm" onClick={runAnalysis} disabled={analysisBusy || (!sourceDoc?.originalContent && extracted.length === 0)}>
-                {extracted.length > 0 ? 'Run Analysis' : 'Analyze first'}
+                {extracted.length > 0 ? 'Run Fresh Analysis' : 'Analyze first'}
               </Button>
             </div>
           </div>
+          {analysisIsStaleEngine ? (
+            <p className="text-sm text-warning">
+              Analysis engine is outdated or missing. Run Fresh Analysis to
+              activate semantic relationship detection (v2.3).
+            </p>
+          ) : null}
           {analysisStatus === 'STALE' ? (
             <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
               Analysis is stale — requirements changed since the last run.
@@ -1912,87 +2000,143 @@ export default function ProjectWorkspacePage() {
                                         </Badge>
                                       </span>
                                     </button>
-                                    {r.possibleDuplicateOf &&
-                                    r.duplicateKind &&
-                                    r.duplicateKind !== 'NOT_DUPLICATE' ? (
-                                      <div className="mt-2 space-y-2 rounded-md border border-border bg-bg/40 p-2 text-xs">
-                                        <div className="font-medium text-fg">
-                                          {r.duplicateKind === 'RELATED'
-                                            ? 'RELATED TO'
-                                            : r.duplicateKind.replace(
-                                                /_/g,
-                                                ' ',
-                                              )}{' '}
-                                          {r.possibleDuplicateOf}
+                                    {(() => {
+                                      const rel = primaryRelationship(
+                                        r.relationships,
+                                      );
+                                      if (!rel) return null;
+                                      if (rel.relationship === 'NOT_DUPLICATE') {
+                                        return (
+                                          <div className="mt-2 text-xs text-muted">
+                                            NO DUPLICATE · {rel.targetRequirementId}
+                                            {rel.reason
+                                              ? ` — ${rel.reason.split('\n')[0]}`
+                                              : ''}
+                                          </div>
+                                        );
+                                      }
+                                      return (
+                                        <div className="mt-2 space-y-2 rounded-md border border-border bg-bg/40 p-2 text-xs">
+                                          <div className="font-medium text-fg">
+                                            {rel.relationship === 'RELATED' ||
+                                            rel.relationship === 'PRECEDES'
+                                              ? 'RELATED REQUIREMENT'
+                                              : rel.relationship.replace(
+                                                  /_/g,
+                                                  ' ',
+                                                )}
+                                          </div>
+                                          <div>{rel.targetRequirementId}</div>
+                                          {rel.reason ? (
+                                            <div className="whitespace-pre-wrap text-muted">
+                                              Why? {rel.reason}
+                                            </div>
+                                          ) : null}
+                                          {rel.semanticAnalysis &&
+                                          rel.relationship ===
+                                            'POSSIBLE_DUPLICATE' ? (
+                                            <div className="grid grid-cols-2 gap-1 text-muted">
+                                              <div>
+                                                Actor{' '}
+                                                {rel.semanticAnalysis.actorMatch
+                                                  ? '✓'
+                                                  : '✕'}
+                                              </div>
+                                              <div>
+                                                Entity{' '}
+                                                {rel.semanticAnalysis.entityMatch
+                                                  ? '✓'
+                                                  : '✕'}
+                                              </div>
+                                              <div>
+                                                Action{' '}
+                                                {rel.semanticAnalysis.actionMatch
+                                                  ? '✓'
+                                                  : '✕'}
+                                              </div>
+                                              <div>
+                                                Context{' '}
+                                                {rel.semanticAnalysis
+                                                  .contextMatch
+                                                  ? '✓'
+                                                  : '✕'}
+                                              </div>
+                                              <div>
+                                                Outcome{' '}
+                                                {rel.semanticAnalysis
+                                                  .outcomeMatch
+                                                  ? '✓'
+                                                  : '✕'}
+                                              </div>
+                                              <div className="font-medium text-fg">
+                                                AI Decision: {rel.relationship}
+                                              </div>
+                                            </div>
+                                          ) : null}
+                                          {(rel.relationship === 'DUPLICATE' ||
+                                            rel.relationship ===
+                                              'POSSIBLE_DUPLICATE') && (
+                                            <div className="flex flex-wrap gap-2 pt-1">
+                                              <Button
+                                                size="sm"
+                                                variant="secondary"
+                                                disabled={
+                                                  duplicateDecisionMutation.isPending
+                                                }
+                                                onClick={() =>
+                                                  duplicateDecisionMutation.mutate(
+                                                    {
+                                                      requirementKey:
+                                                        r.requirementKey,
+                                                      decision: 'keep_both',
+                                                    },
+                                                  )
+                                                }
+                                              >
+                                                Keep Both
+                                              </Button>
+                                              <Button
+                                                size="sm"
+                                                variant="secondary"
+                                                disabled={
+                                                  duplicateDecisionMutation.isPending
+                                                }
+                                                onClick={() =>
+                                                  duplicateDecisionMutation.mutate(
+                                                    {
+                                                      requirementKey:
+                                                        r.requirementKey,
+                                                      decision: 'merge',
+                                                    },
+                                                  )
+                                                }
+                                              >
+                                                Merge
+                                              </Button>
+                                              <Button
+                                                size="sm"
+                                                variant="secondary"
+                                                disabled={
+                                                  duplicateDecisionMutation.isPending
+                                                }
+                                                onClick={() =>
+                                                  duplicateDecisionMutation.mutate(
+                                                    {
+                                                      requirementKey:
+                                                        r.requirementKey,
+                                                      decision:
+                                                        'mark_not_duplicate',
+                                                    },
+                                                  )
+                                                }
+                                              >
+                                                Mark Not Duplicate
+                                              </Button>
+                                            </div>
+                                          )}
                                         </div>
-                                        {r.duplicateReason ? (
-                                          <div className="whitespace-pre-wrap text-muted">
-                                            Why? {r.duplicateReason}
-                                          </div>
-                                        ) : null}
-                                        {(r.duplicateKind === 'DUPLICATE' ||
-                                          r.duplicateKind ===
-                                            'POSSIBLE_DUPLICATE') && (
-                                          <div className="flex flex-wrap gap-2 pt-1">
-                                            <Button
-                                              size="sm"
-                                              variant="secondary"
-                                              disabled={
-                                                duplicateDecisionMutation.isPending
-                                              }
-                                              onClick={() =>
-                                                duplicateDecisionMutation.mutate(
-                                                  {
-                                                    requirementKey:
-                                                      r.requirementKey,
-                                                    decision: 'keep_both',
-                                                  },
-                                                )
-                                              }
-                                            >
-                                              Keep Both
-                                            </Button>
-                                            <Button
-                                              size="sm"
-                                              variant="secondary"
-                                              disabled={
-                                                duplicateDecisionMutation.isPending
-                                              }
-                                              onClick={() =>
-                                                duplicateDecisionMutation.mutate(
-                                                  {
-                                                    requirementKey:
-                                                      r.requirementKey,
-                                                    decision: 'merge',
-                                                  },
-                                                )
-                                              }
-                                            >
-                                              Merge
-                                            </Button>
-                                            <Button
-                                              size="sm"
-                                              variant="secondary"
-                                              disabled={
-                                                duplicateDecisionMutation.isPending
-                                              }
-                                              onClick={() =>
-                                                duplicateDecisionMutation.mutate(
-                                                  {
-                                                    requirementKey:
-                                                      r.requirementKey,
-                                                    decision:
-                                                      'mark_not_duplicate',
-                                                  },
-                                                )
-                                              }
-                                            >
-                                              Mark Not Duplicate
-                                            </Button>
-                                          </div>
-                                        )}
-                                      </div>
-                                    ) : null}
+                                      );
+                                    })()}
                                   </li>
                                 ))}
                               </ul>
@@ -2164,88 +2308,148 @@ export default function ProjectWorkspacePage() {
                 </div>
               </div>
             ) : null}
-            {selected.possibleDuplicateOf &&
-            selected.duplicateKind &&
-            selected.duplicateKind !== 'NOT_DUPLICATE' ? (
-              <div
-                className={`space-y-2 rounded-lg border p-3 text-sm ${
-                  selected.duplicateKind === 'RELATED'
-                    ? 'border-border bg-bg-elevated/40'
-                    : 'border-warning/40 bg-warning/10'
-                }`}
-              >
-                <div className="font-medium">
-                  {selected.duplicateKind === 'RELATED'
-                    ? 'RELATED TO'
-                    : selected.duplicateKind.replace(/_/g, ' ')}{' '}
-                  {selected.possibleDuplicateOf}
-                </div>
-                {selected.duplicateReason ? (
-                  <p className="whitespace-pre-wrap text-muted">
-                    Why? {selected.duplicateReason}
-                  </p>
-                ) : null}
-                <p className="text-xs text-muted">
-                  Original requirement IDs are preserved — nothing is deleted
-                  automatically.
-                </p>
-                <details className="text-xs text-muted">
-                  <summary className="cursor-pointer">AI Analysis Details</summary>
-                  <p className="mt-1">
-                    Decision is semantic (actor, entity, action, capability,
-                    outcome). Similarity percentage is not used as the primary
-                    signal.
-                    {selected.duplicateSimilarity != null
-                      ? ` Internal overlap: ${Math.round(selected.duplicateSimilarity)}%.`
-                      : ''}
-                  </p>
-                </details>
-                {(selected.duplicateKind === 'DUPLICATE' ||
-                  selected.duplicateKind === 'POSSIBLE_DUPLICATE') && (
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={duplicateDecisionMutation.isPending}
-                      onClick={() =>
-                        duplicateDecisionMutation.mutate({
-                          requirementKey: selected.requirementKey,
-                          decision: 'keep_both',
-                        })
-                      }
-                    >
-                      Keep Both
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={duplicateDecisionMutation.isPending}
-                      onClick={() =>
-                        duplicateDecisionMutation.mutate({
-                          requirementKey: selected.requirementKey,
-                          decision: 'merge',
-                        })
-                      }
-                    >
-                      Merge
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={duplicateDecisionMutation.isPending}
-                      onClick={() =>
-                        duplicateDecisionMutation.mutate({
-                          requirementKey: selected.requirementKey,
-                          decision: 'mark_not_duplicate',
-                        })
-                      }
-                    >
-                      Mark Not Duplicate
-                    </Button>
+            {(() => {
+              const rel = primaryRelationship(selected.relationships);
+              if (!rel) return null;
+              if (rel.relationship === 'NOT_DUPLICATE') {
+                return (
+                  <div className="rounded-lg border border-border bg-bg-elevated/40 p-3 text-sm">
+                    <div className="font-medium">NO DUPLICATE</div>
+                    <p className="mt-1 text-muted">
+                      {selected.requirementKey} is not a duplicate of{' '}
+                      {rel.targetRequirementId}.
+                    </p>
+                    {rel.reason ? (
+                      <p className="mt-2 whitespace-pre-wrap text-muted">
+                        Why? {rel.reason}
+                      </p>
+                    ) : null}
                   </div>
-                )}
-              </div>
-            ) : null}
+                );
+              }
+              return (
+                <div
+                  className={`space-y-2 rounded-lg border p-3 text-sm ${
+                    rel.relationship === 'RELATED' ||
+                    rel.relationship === 'PRECEDES'
+                      ? 'border-border bg-bg-elevated/40'
+                      : 'border-warning/40 bg-warning/10'
+                  }`}
+                >
+                  <div className="font-medium">
+                    {rel.relationship === 'RELATED' ||
+                    rel.relationship === 'PRECEDES'
+                      ? 'RELATED REQUIREMENT'
+                      : rel.relationship.replace(/_/g, ' ')}
+                  </div>
+                  <div>{rel.targetRequirementId}</div>
+                  {rel.reason ? (
+                    <p className="whitespace-pre-wrap text-muted">
+                      Why? {rel.reason}
+                    </p>
+                  ) : null}
+                  {rel.semanticAnalysis ? (
+                    <div className="grid gap-1 rounded-md border border-border/60 p-2 text-xs sm:grid-cols-2">
+                      <div>
+                        Actor {rel.semanticAnalysis.actorMatch ? '✓ Same' : '✕ Different'}
+                      </div>
+                      <div>
+                        Entity{' '}
+                        {rel.semanticAnalysis.entityMatch ? '✓ Same' : '✕ Different'}
+                      </div>
+                      <div>
+                        Action{' '}
+                        {rel.semanticAnalysis.actionMatch
+                          ? '✓ Same'
+                          : '✕ Different'}
+                      </div>
+                      <div>
+                        Capability{' '}
+                        {rel.semanticAnalysis.capabilityMatch
+                          ? '✓ Related/Same'
+                          : '✕ Different'}
+                      </div>
+                      <div>
+                        Context{' '}
+                        {rel.semanticAnalysis.contextMatch
+                          ? '✓ Same'
+                          : '✕ Different'}
+                      </div>
+                      <div>
+                        Outcome{' '}
+                        {rel.semanticAnalysis.outcomeMatch
+                          ? '✓ Same'
+                          : '✕ Different'}
+                      </div>
+                      <div className="font-medium text-fg sm:col-span-2">
+                        AI Decision: {rel.relationship}
+                      </div>
+                    </div>
+                  ) : null}
+                  <p className="text-xs text-muted">
+                    Original requirement IDs are preserved — nothing is deleted
+                    automatically.
+                  </p>
+                  <details className="text-xs text-muted">
+                    <summary className="cursor-pointer">
+                      AI Analysis Details
+                    </summary>
+                    <p className="mt-1">
+                      Decision comes from the semantic engine (
+                      {reviewSummaryQuery.data?.analysisEngine ??
+                        'semantic-requirement-review'}{' '}
+                      v
+                      {reviewSummaryQuery.data?.analysisVersion ?? '2.3'}).
+                      Similarity percentage is not used as the primary signal.
+                    </p>
+                  </details>
+                  {(rel.relationship === 'DUPLICATE' ||
+                    rel.relationship === 'POSSIBLE_DUPLICATE') && (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={duplicateDecisionMutation.isPending}
+                        onClick={() =>
+                          duplicateDecisionMutation.mutate({
+                            requirementKey: selected.requirementKey,
+                            decision: 'keep_both',
+                          })
+                        }
+                      >
+                        Keep Both
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={duplicateDecisionMutation.isPending}
+                        onClick={() =>
+                          duplicateDecisionMutation.mutate({
+                            requirementKey: selected.requirementKey,
+                            decision: 'merge',
+                          })
+                        }
+                      >
+                        Merge
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={duplicateDecisionMutation.isPending}
+                        onClick={() =>
+                          duplicateDecisionMutation.mutate({
+                            requirementKey: selected.requirementKey,
+                            decision: 'mark_not_duplicate',
+                          })
+                        }
+                      >
+                        Mark Not Duplicate
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <div>
               <div className="text-xs uppercase tracking-wide text-muted">
                 Description
@@ -2661,23 +2865,32 @@ export default function ProjectWorkspacePage() {
                             {r.analysisStale ? (
                               <div className="text-xs text-warning">Stale</div>
                             ) : null}
-                            {r.possibleDuplicateOf &&
-                            r.duplicateKind &&
-                            r.duplicateKind !== 'NOT_DUPLICATE' ? (
-                              <div className="text-xs text-muted">
-                                {r.duplicateKind === 'RELATED'
-                                  ? 'RELATED to '
-                                  : r.duplicateKind === 'DUPLICATE'
-                                    ? 'DUPLICATE of '
-                                    : r.duplicateKind === 'POSSIBLE_DUPLICATE'
-                                      ? 'POSSIBLE DUPLICATE of '
-                                      : `${r.duplicateKind} · `}
-                                {r.possibleDuplicateOf}
-                                {r.duplicateReason
-                                  ? ` — ${r.duplicateReason.split('\n')[0]}`
-                                  : ''}
-                              </div>
-                            ) : null}
+                            {(() => {
+                              const rel = primaryRelationship(r.relationships);
+                              if (!rel) {
+                                // Do not fall back to legacy possibleDuplicateOf + %
+                                return null;
+                              }
+                              if (rel.relationship === 'NOT_DUPLICATE') {
+                                return (
+                                  <div className="text-xs text-muted">
+                                    NO DUPLICATE · {rel.targetRequirementId}
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div className="text-xs text-muted">
+                                  {rel.relationship === 'RELATED' ||
+                                  rel.relationship === 'PRECEDES'
+                                    ? 'RELATED to '
+                                    : `${rel.relationship.replace(/_/g, ' ')} · `}
+                                  {rel.targetRequirementId}
+                                  {rel.reason
+                                    ? ` — ${rel.reason.split('\n')[0]}`
+                                    : ''}
+                                </div>
+                              );
+                            })()}
                           </td>
                           <td className="px-3 py-2">
                             {typeLabel(r.primaryType ?? r.type)}

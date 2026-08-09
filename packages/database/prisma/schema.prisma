@@ -100,6 +100,14 @@ model Project {
   analysisStartedAt   DateTime?
   analysisCompletedAt DateTime?
   analysisError   String?                @db.Text
+  /// e.g. ANL-cuid — identifies a fresh analysis run
+  analysisId      String?
+  /// e.g. 2.3 — invalidates stale UI assumptions after engine upgrades
+  analysisVersion String?
+  /// e.g. semantic-requirement-review
+  analysisEngine  String?
+  /// Snapshot: relationships[], analyzedAt, counts (canonical review output)
+  analysisMeta    Json?
   staleRequirementCount Int              @default(0)
   loginUrl        String?
   framework       String                 @default("PLAYWRIGHT")
@@ -202,12 +210,14 @@ model Requirement {
   dependencies         Json?
   supportingInformation Json?
   possibleDuplicateOf  String?
-  /// 0–100 internal confidence when shown for DUPLICATE / POSSIBLE_DUPLICATE
+  /// DEPRECATED as decision signal — kept nullable; API must not use as primary
   duplicateSimilarity  Float?
   /// DUPLICATE | POSSIBLE_DUPLICATE | RELATED | NOT_DUPLICATE | null
   duplicateKind        String?
   /// Semantic reason for the duplicate/related classification
   duplicateReason      String?  @db.Text
+  /// Canonical RequirementRelationship[] from semantic engine (source of truth)
+  relationships        Json?
   featureGroupId       String?
   /// BLOCKED | NEEDS_CLARIFICATION | REVIEW_RECOMMENDED | READY_FOR_TEST_DESIGN
   reviewStatus         String?
