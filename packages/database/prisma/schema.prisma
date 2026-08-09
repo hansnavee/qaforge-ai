@@ -202,10 +202,12 @@ model Requirement {
   dependencies         Json?
   supportingInformation Json?
   possibleDuplicateOf  String?
-  /// 0–100 similarity when possibleDuplicateOf set
+  /// 0–100 internal confidence when shown for DUPLICATE / POSSIBLE_DUPLICATE
   duplicateSimilarity  Float?
-  /// DUPLICATE | OVERLAPPING | RELATED | null
+  /// DUPLICATE | POSSIBLE_DUPLICATE | RELATED | NOT_DUPLICATE | null
   duplicateKind        String?
+  /// Semantic reason for the duplicate/related classification
+  duplicateReason      String?  @db.Text
   featureGroupId       String?
   /// BLOCKED | NEEDS_CLARIFICATION | REVIEW_RECOMMENDED | READY_FOR_TEST_DESIGN
   reviewStatus         String?

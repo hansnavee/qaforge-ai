@@ -147,6 +147,7 @@ export class RequirementReviewService {
         possibleDuplicateOf: null,
         duplicateSimilarity: null,
         duplicateKind: null,
+        duplicateReason: null,
       },
     });
 
@@ -234,13 +235,27 @@ export class RequirementReviewService {
       }
     }
 
-    // Duplicate / related soft flags (never delete; RELATED ≠ duplicate)
+    // Semantic duplicate / related soft flags (never delete or merge)
+    const featureMetaByReq = new Map<
+      string,
+      { featureName: string; businessArea: string }
+    >();
+    for (const fg of featureDrafts) {
+      for (const rk of fg.requirementKeys) {
+        featureMetaByReq.set(rk, {
+          featureName: fg.name,
+          businessArea: fg.businessArea,
+        });
+      }
+    }
     const dupPairs = detectDuplicatePairs(
       requirements.map((r) => ({
         requirementKey: r.requirementKey,
         title: r.title,
         description: r.description,
         sourceText: r.sourceText,
+        featureName: featureMetaByReq.get(r.requirementKey)?.featureName,
+        businessArea: featureMetaByReq.get(r.requirementKey)?.businessArea,
       })),
     );
     for (const pair of dupPairs) {
@@ -248,17 +263,22 @@ export class RequirementReviewService {
       const bId = keyToId.get(pair.requirementKeyB);
       if (!aId || !bId) continue;
 
-      const isDupLike =
-        pair.kind === 'DUPLICATE' || pair.kind === 'POSSIBLE_DUPLICATE';
-      if (isDupLike) {
+      // Persist relationship signal for DUPLICATE / POSSIBLE / RELATED
+      if (pair.kind !== 'NOT_DUPLICATE') {
         await prisma.requirement.update({
           where: { id: bId },
           data: {
             possibleDuplicateOf: pair.requirementKeyA,
             duplicateSimilarity: pair.showConfidence ? pair.similarity : null,
             duplicateKind: pair.kind,
+            duplicateReason: pair.reason ?? pair.recommendation,
           },
         });
+      }
+
+      if (pair.kind === 'NOT_DUPLICATE') {
+        // No relation row — different business behavior
+        continue;
       }
 
       await prisma.requirementRelation.create({
@@ -272,9 +292,9 @@ export class RequirementReviewService {
               : pair.kind === 'POSSIBLE_DUPLICATE'
                 ? 'OVERLAPS'
                 : 'RELATED_TO',
-          confidence: pair.similarity / 100,
+          confidence: pair.showConfidence ? pair.similarity / 100 : null,
           source: 'REVIEW',
-          detail: pair.recommendation,
+          detail: pair.reason ?? pair.recommendation,
         },
       });
     }
@@ -585,25 +605,113 @@ export class RequirementReviewService {
                 r.duplicateKind === 'POSSIBLE_DUPLICATE'),
           )
           .map((r) => r.requirementKey),
-        requirements: f.requirements.map((r) => ({
-          id: r.id,
-          requirementKey: r.requirementKey,
-          title: r.title,
-          type: r.primaryType ?? r.type,
-          primaryType: r.primaryType ?? r.type,
-          secondaryType: r.secondaryType,
-          businessImpact: r.businessImpact,
-          reviewStatus: r.reviewStatus,
-          criticalOpenCount: r.questions.filter((q) => q.priority === 'CRITICAL')
-            .length,
-          highOpenCount: r.questions.filter((q) => q.priority === 'HIGH')
-            .length,
-          possibleDuplicateOf: r.possibleDuplicateOf,
-          duplicateSimilarity: r.duplicateSimilarity,
-          duplicateKind: r.duplicateKind,
-        })),
+        actors: [
+          ...new Set(
+            f.requirements
+              .map((r) => {
+                const biz = r.businessReview as BusinessReviewPayload | null;
+                return biz?.semantic?.actor;
+              })
+              .filter(Boolean),
+          ),
+        ],
+        entities: [
+          ...new Set(
+            f.requirements
+              .map((r) => {
+                const biz = r.businessReview as BusinessReviewPayload | null;
+                return biz?.semantic?.entity;
+              })
+              .filter(Boolean),
+          ),
+        ],
+        requirements: f.requirements.map((r) => {
+          const biz = r.businessReview as BusinessReviewPayload | null;
+          return {
+            id: r.id,
+            requirementKey: r.requirementKey,
+            title: r.title,
+            type: r.primaryType ?? r.type,
+            primaryType: r.primaryType ?? r.type,
+            secondaryType: r.secondaryType,
+            businessImpact: r.businessImpact,
+            reviewStatus: r.reviewStatus,
+            openQuestionCount: r.questions.length,
+            criticalOpenCount: r.questions.filter(
+              (q) => q.priority === 'CRITICAL',
+            ).length,
+            highOpenCount: r.questions.filter((q) => q.priority === 'HIGH')
+              .length,
+            possibleDuplicateOf: r.possibleDuplicateOf,
+            duplicateSimilarity: r.duplicateSimilarity,
+            duplicateKind: r.duplicateKind,
+            duplicateReason: r.duplicateReason,
+            semantic: biz?.semantic ?? null,
+          };
+        }),
       };
     });
+  }
+
+  /**
+   * User decision on a potential duplicate — never auto-merges content.
+   * keep_both | mark_not_duplicate → clear flags
+   * merge → soft link only (keeps both IDs; records user intent)
+   */
+  async resolveDuplicateDecision(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+    requirementKey: string,
+    decision: 'keep_both' | 'mark_not_duplicate' | 'merge',
+  ) {
+    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
+    const req = await prisma.requirement.findFirst({
+      where: { projectId, requirementKey },
+    });
+    if (!req) throw new NotFoundException('Requirement not found');
+
+    if (decision === 'merge') {
+      await prisma.requirement.update({
+        where: { id: req.id },
+        data: {
+          duplicateKind: 'DUPLICATE',
+          duplicateReason: `${req.duplicateReason ?? ''}\nUser chose Merge — both requirement IDs retained pending manual consolidation.`.trim(),
+        },
+      });
+    } else {
+      await prisma.requirement.update({
+        where: { id: req.id },
+        data: {
+          possibleDuplicateOf: null,
+          duplicateSimilarity: null,
+          duplicateKind: 'NOT_DUPLICATE',
+          duplicateReason:
+            decision === 'mark_not_duplicate'
+              ? 'User marked as not duplicate.'
+              : 'User chose to keep both requirements.',
+        },
+      });
+    }
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'requirement.duplicate_decision',
+      resource: 'requirement',
+      resourceId: req.id,
+      metadata: { requirementKey, decision },
+    });
+
+    const mapped = await prisma.requirement.findUniqueOrThrow({
+      where: { id: req.id },
+      include: {
+        sourceDocument: { select: { filename: true } },
+        questions: { orderBy: { questionKey: 'asc' } },
+        featureGroup: true,
+      },
+    });
+    return this.mapRequirement(mapped);
   }
 
   async listQuestions(
@@ -1289,6 +1397,7 @@ export class RequirementReviewService {
     possibleDuplicateOf: string | null;
     duplicateSimilarity?: number | null;
     duplicateKind?: string | null;
+    duplicateReason?: string | null;
     featureGroupId?: string | null;
     reviewStatus: string | null;
     businessReadiness: string | null;
@@ -1353,6 +1462,8 @@ export class RequirementReviewService {
       possibleDuplicateOf: row.possibleDuplicateOf,
       duplicateSimilarity: row.duplicateSimilarity ?? null,
       duplicateKind: row.duplicateKind ?? null,
+      duplicateReason: row.duplicateReason ?? null,
+      semantic: biz?.semantic ?? null,
       featureGroupId: row.featureGroupId ?? null,
       featureGroup: row.featureGroup
         ? {

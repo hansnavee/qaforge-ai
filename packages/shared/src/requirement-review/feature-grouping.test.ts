@@ -172,8 +172,8 @@ describe('business-driven feature grouping', () => {
   });
 });
 
-describe('business-semantic duplicates', () => {
-  it('marks identical order confirmation titles as DUPLICATE 100%', () => {
+describe('business-semantic duplicates (legacy suite)', () => {
+  it('marks identical order confirmation behavior as DUPLICATE', () => {
     const pairs = detectDuplicatePairs([
       {
         requirementKey: 'REQ-026',
@@ -187,7 +187,6 @@ describe('business-semantic duplicates', () => {
       },
     ]);
     expect(pairs[0]?.kind).toBe('DUPLICATE');
-    expect(pairs[0]?.similarity).toBe(100);
     expect(pairs[0]?.showConfidence).toBe(true);
   });
 

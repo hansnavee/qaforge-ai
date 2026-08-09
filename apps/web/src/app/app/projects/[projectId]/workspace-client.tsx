@@ -91,6 +91,16 @@ type ExtractedRequirement = {
   possibleDuplicateOf?: string | null;
   duplicateSimilarity?: number | null;
   duplicateKind?: string | null;
+  duplicateReason?: string | null;
+  semantic?: {
+    actor: string;
+    entity: string;
+    action: string;
+    businessCapability: string;
+    businessOutcome: string;
+    channel?: string | null;
+    crudOp?: string | null;
+  } | null;
   featureGroup?: {
     id: string;
     featureKey: string;
@@ -184,6 +194,8 @@ type FeatureGroupView = {
   questionCount: number;
   dependsOn?: string[];
   businessRules?: Array<{ text: string; source: string }>;
+  actors?: string[];
+  entities?: string[];
   duplicateRequirements: string[];
   requirements: Array<{
     id: string;
@@ -193,11 +205,22 @@ type FeatureGroupView = {
     primaryType?: string | null;
     businessImpact?: string | null;
     reviewStatus?: string | null;
+    openQuestionCount?: number;
     criticalOpenCount?: number;
     highOpenCount?: number;
     possibleDuplicateOf?: string | null;
     duplicateSimilarity?: number | null;
     duplicateKind?: string | null;
+    duplicateReason?: string | null;
+    semantic?: {
+      actor: string;
+      entity: string;
+      action: string;
+      businessCapability: string;
+      businessOutcome: string;
+      channel?: string | null;
+      crudOp?: string | null;
+    } | null;
   }>;
 };
 
@@ -801,6 +824,27 @@ export default function ProjectWorkspacePage() {
     },
   });
 
+  const duplicateDecisionMutation = useMutation({
+    mutationFn: async ({
+      requirementKey,
+      decision,
+    }: {
+      requirementKey: string;
+      decision: 'keep_both' | 'mark_not_duplicate' | 'merge';
+    }) => {
+      return api(
+        `/api/v1/projects/${projectId}/extracted-requirements/${requirementKey}/duplicate-decision`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ decision }),
+        },
+      );
+    },
+    onSuccess: async () => {
+      await invalidateReviewQueries();
+    },
+  });
+
   useEffect(() => {
     if (!reviewMutation.isPending) return;
     setReviewProgressStep(0);
@@ -953,7 +997,15 @@ export default function ProjectWorkspacePage() {
           <Button
             variant={tab !== 'overview' ? 'primary' : 'secondary'}
             size="sm"
-            onClick={() => setView(extracted.length ? 'list' : 'source')}
+            onClick={() =>
+              setView(
+                (reviewSummaryQuery.data?.features ?? 0) > 0
+                  ? 'features'
+                  : extracted.length
+                    ? 'list'
+                    : 'source',
+              )
+            }
           >
             Requirements
           </Button>
@@ -1009,7 +1061,15 @@ export default function ProjectWorkspacePage() {
               <Button
                 size="sm"
                 variant="secondary"
-                onClick={() => setView(extracted.length ? 'list' : 'source')}
+                onClick={() =>
+              setView(
+                (reviewSummaryQuery.data?.features ?? 0) > 0
+                  ? 'features'
+                  : extracted.length
+                    ? 'list'
+                    : 'source',
+              )
+            }
               >
                 Open Requirements
               </Button>
@@ -1598,12 +1658,12 @@ export default function ProjectWorkspacePage() {
       !extractMutation.isPending &&
       !reviewMutation.isPending &&
       view === 'features' ? (
-        <Card className="space-y-4">
+        <Card className="space-y-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h2 className="text-base font-medium">Features</h2>
+              <h2 className="text-base font-medium">Feature review</h2>
               <p className="mt-1 text-sm text-muted">
-                Business Area → Feature → Requirements (logical grouping only)
+                Business Area → Feature → Requirements
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1614,7 +1674,11 @@ export default function ProjectWorkspacePage() {
               >
                 Dashboard
               </Button>
-              <Button size="sm" onClick={() => setView('list')}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setView('list')}
+              >
                 Flat list
               </Button>
             </div>
@@ -1625,195 +1689,323 @@ export default function ProjectWorkspacePage() {
               No feature groups yet. Run Analysis to generate feature groups.
             </p>
           ) : (
-            <div className="space-y-3">
-              {(featuresQuery.data ?? []).map((f) => {
-                const open = expandedFeatures[f.id] ?? true;
-                const impact = f.impactCounts ?? {
-                  critical: f.criticalQuestions ?? 0,
-                  high: f.highQuestions ?? 0,
-                  medium: 0,
-                  low: 0,
-                };
-                const status = f.statusCounts ?? {
-                  blocked: 0,
-                  needsClarification: 0,
-                  reviewRecommended: 0,
-                  ready: 0,
-                };
-                const openQs = f.openQuestionCount ?? f.questionCount ?? 0;
-                return (
-                  <div
-                    key={f.id}
-                    className="rounded-lg border border-border bg-bg-elevated/30"
-                  >
-                    <button
-                      type="button"
-                      className="flex w-full flex-wrap items-start justify-between gap-3 px-3 py-3 text-left text-sm"
-                      onClick={() =>
-                        setExpandedFeatures((prev) => ({
-                          ...prev,
-                          [f.id]: !open,
-                        }))
-                      }
-                    >
-                      <div className="min-w-0 flex-1 space-y-2">
-                        <div className="font-medium">
-                          {open ? '▼' : '▶'} {f.name}
-                        </div>
-                        <div className="text-xs text-muted">
-                          {f.businessArea ?? 'Other'}
-                          {f.businessCapability
-                            ? ` · ${f.businessCapability}`
-                            : ''}
-                        </div>
-                        <div className="text-xs">
-                          {f.requirementCount} Requirements
-                        </div>
-                        <div className="grid gap-2 text-xs sm:grid-cols-2">
-                          <div className="space-y-0.5 text-muted">
-                            <div className="font-medium text-fg">Impact</div>
-                            <div>🔴 {impact.critical} Critical</div>
-                            <div>🟠 {impact.high} High</div>
-                            {(impact.medium > 0 || impact.low > 0) && (
-                              <div>
-                                🟡 {impact.medium} Medium
-                                {impact.low > 0 ? ` · ${impact.low} Low` : ''}
+            <div className="space-y-6">
+              {Object.entries(
+                (featuresQuery.data ?? []).reduce<
+                  Record<string, FeatureGroupView[]>
+                >((acc, f) => {
+                  const area = f.businessArea ?? 'Other';
+                  (acc[area] ??= []).push(f);
+                  return acc;
+                }, {}),
+              ).map(([area, features]) => (
+                <section key={area} className="space-y-2">
+                  <h3 className="text-sm font-medium tracking-wide text-muted">
+                    {area}
+                  </h3>
+                  <div className="space-y-2">
+                    {features.map((f) => {
+                      const open = expandedFeatures[f.id] ?? false;
+                      const impact = f.impactCounts ?? {
+                        critical: 0,
+                        high: 0,
+                        medium: 0,
+                        low: 0,
+                      };
+                      const status = f.statusCounts ?? {
+                        blocked: 0,
+                        needsClarification: 0,
+                        reviewRecommended: 0,
+                        ready: 0,
+                      };
+                      const openQs =
+                        f.openQuestionCount ?? f.questionCount ?? 0;
+                      return (
+                        <div
+                          key={f.id}
+                          className="rounded-lg border border-border bg-bg-elevated/30"
+                        >
+                          <button
+                            type="button"
+                            className="flex w-full flex-wrap items-start justify-between gap-3 px-3 py-3 text-left text-sm"
+                            onClick={() =>
+                              setExpandedFeatures((prev) => ({
+                                ...prev,
+                                [f.id]: !open,
+                              }))
+                            }
+                          >
+                            <div className="min-w-0 space-y-1">
+                              <div className="font-medium">
+                                {open ? '▼' : '▶'} {f.name}
                               </div>
-                            )}
-                          </div>
-                          <div className="space-y-0.5 text-muted">
-                            <div className="font-medium text-fg">Review</div>
-                            {status.blocked > 0 ? (
-                              <div>🔴 {status.blocked} Blocked</div>
-                            ) : null}
-                            {status.needsClarification > 0 ? (
-                              <div>
-                                🟠 {status.needsClarification} Needs
-                                Clarification
+                              <div className="text-xs text-muted">
+                                {f.requirementCount} Requirements
+                                {f.featureRisk
+                                  ? ` · ${impactLabel(f.featureRisk)} Risk`
+                                  : ''}
+                                {openQs > 0
+                                  ? ` · ${openQs} Question${openQs === 1 ? '' : 's'}`
+                                  : ''}
                               </div>
-                            ) : null}
-                            {status.reviewRecommended > 0 ? (
-                              <div>
-                                🟡 {status.reviewRecommended} Review Recommended
+                              <div className="text-xs text-muted">
+                                {reviewStatusLabel(f.reviewStatus)}
                               </div>
-                            ) : null}
-                            <div>🟢 {status.ready} Ready</div>
-                          </div>
-                        </div>
-                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-                          <span>Open Questions: {openQs}</span>
-                          {f.featureRisk ? (
-                            <span>
-                              Feature Risk:{' '}
-                              <span className="text-fg">
-                                {impactLabel(f.featureRisk)}
-                              </span>
-                            </span>
-                          ) : null}
-                          <span>
-                            Status:{' '}
-                            <span className="text-fg">
-                              {reviewStatusLabel(f.reviewStatus)}
-                            </span>
-                          </span>
-                        </div>
-                      </div>
-                      <div className="flex flex-col items-end gap-2">
-                        {f.featureRisk ? (
-                          <Badge tone={impactTone(f.featureRisk)}>
-                            Risk: {impactLabel(f.featureRisk)}
-                          </Badge>
-                        ) : null}
-                        <Badge tone={reviewStatusTone(f.reviewStatus)}>
-                          {reviewStatusLabel(f.reviewStatus)}
-                        </Badge>
-                      </div>
-                    </button>
-                    {open ? (
-                      <ul className="space-y-1 border-t border-border px-3 py-2 text-sm">
-                        {f.businessIntent ? (
-                          <li className="mb-2 text-xs text-muted">
-                            <span className="font-medium text-fg">Intent:</span>{' '}
-                            {f.businessIntent}
-                          </li>
-                        ) : null}
-                        {f.featureRiskReason ? (
-                          <li className="mb-2 text-xs text-muted">
-                            <span className="font-medium text-fg">
-                              Risk reason:
-                            </span>{' '}
-                            {f.featureRiskReason}
-                          </li>
-                        ) : null}
-                        {(f.dependsOn?.length ?? 0) > 0 ? (
-                          <li className="mb-2 text-xs text-muted">
-                            Depends on: {f.dependsOn!.join(', ')}
-                          </li>
-                        ) : null}
-                        {(f.businessRules?.length ?? 0) > 0 ? (
-                          <li className="mb-2 space-y-1 text-xs text-muted">
-                            <div className="font-medium text-fg">
-                              Business Rules
                             </div>
-                            <ol className="list-decimal space-y-0.5 pl-4">
-                              {f.businessRules!.slice(0, 5).map((rule, idx) => (
-                                <li key={`${idx}-${rule.text.slice(0, 24)}`}>
-                                  {rule.text}
-                                  {rule.source === 'AI_INFERRED' ? (
-                                    <span className="text-warning">
-                                      {' '}
-                                      (Suggested · AI_INFERRED)
-                                    </span>
+                            <div className="flex flex-col items-end gap-1">
+                              {f.featureRisk ? (
+                                <Badge tone={impactTone(f.featureRisk)}>
+                                  {impactLabel(f.featureRisk)} Risk
+                                </Badge>
+                              ) : null}
+                              <Badge tone={reviewStatusTone(f.reviewStatus)}>
+                                {reviewStatusLabel(f.reviewStatus)}
+                              </Badge>
+                            </div>
+                          </button>
+                          {open ? (
+                            <div className="space-y-3 border-t border-border px-3 py-3 text-sm">
+                              <div className="grid gap-3 sm:grid-cols-2">
+                                <div className="space-y-1 text-xs text-muted">
+                                  <div>
+                                    <span className="font-medium text-fg">
+                                      Feature:
+                                    </span>{' '}
+                                    {f.name}
+                                  </div>
+                                  <div>
+                                    <span className="font-medium text-fg">
+                                      Business Area:
+                                    </span>{' '}
+                                    {f.businessArea ?? 'Other'}
+                                  </div>
+                                  {f.businessIntent ? (
+                                    <div>
+                                      <span className="font-medium text-fg">
+                                        Business Intent:
+                                      </span>{' '}
+                                      {f.businessIntent}
+                                    </div>
                                   ) : null}
-                                </li>
-                              ))}
-                            </ol>
-                          </li>
-                        ) : null}
-                        {f.requirements.map((r) => (
-                          <li key={r.id}>
-                            <button
-                              type="button"
-                              className="flex w-full flex-wrap items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-bg-elevated"
-                              onClick={() =>
-                                setView('detail', r.requirementKey)
-                              }
-                            >
-                              <span>
-                                <span className="font-mono text-xs text-muted">
-                                  {r.requirementKey}
-                                </span>{' '}
-                                {r.title}
-                                {r.possibleDuplicateOf &&
-                                (r.duplicateKind === 'DUPLICATE' ||
-                                  r.duplicateKind === 'POSSIBLE_DUPLICATE') ? (
-                                  <span className="ml-2 text-xs text-warning">
-                                    {r.duplicateKind === 'DUPLICATE'
-                                      ? 'DUPLICATE'
-                                      : 'POSSIBLE DUPLICATE'}{' '}
-                                    of {r.possibleDuplicateOf}
-                                    {r.duplicateSimilarity != null
-                                      ? ` · ${Math.round(r.duplicateSimilarity)}% confidence`
+                                  {(f.actors?.length ?? 0) > 0 ? (
+                                    <div>
+                                      <span className="font-medium text-fg">
+                                        Actors:
+                                      </span>{' '}
+                                      {f.actors!.join(', ')}
+                                    </div>
+                                  ) : null}
+                                  {(f.entities?.length ?? 0) > 0 ? (
+                                    <div>
+                                      <span className="font-medium text-fg">
+                                        Entities:
+                                      </span>{' '}
+                                      {f.entities!.join(', ')}
+                                    </div>
+                                  ) : null}
+                                  {(f.dependsOn?.length ?? 0) > 0 ? (
+                                    <div>
+                                      <span className="font-medium text-fg">
+                                        Depends on:
+                                      </span>{' '}
+                                      {f.dependsOn!.join(', ')}
+                                    </div>
+                                  ) : null}
+                                </div>
+                                <div className="space-y-2 text-xs text-muted">
+                                  <div>
+                                    <div className="font-medium text-fg">
+                                      Business Impact
+                                    </div>
+                                    <div>Critical: {impact.critical}</div>
+                                    <div>High: {impact.high}</div>
+                                    <div>Medium: {impact.medium}</div>
+                                    <div>Low: {impact.low}</div>
+                                  </div>
+                                  <div>
+                                    <div className="font-medium text-fg">
+                                      Review
+                                    </div>
+                                    <div>Blocked: {status.blocked}</div>
+                                    <div>
+                                      Needs Clarification:{' '}
+                                      {status.needsClarification}
+                                    </div>
+                                    <div>
+                                      Review Recommended:{' '}
+                                      {status.reviewRecommended}
+                                    </div>
+                                    <div>Ready: {status.ready}</div>
+                                  </div>
+                                  <div>
+                                    Open Questions: {openQs}
+                                    {f.featureRisk
+                                      ? ` · Feature Risk: ${impactLabel(f.featureRisk)}`
                                       : ''}
-                                  </span>
-                                ) : null}
-                              </span>
-                              <span className="flex gap-1">
-                                <Badge tone={impactTone(r.businessImpact)}>
-                                  {impactLabel(r.businessImpact)}
-                                </Badge>
-                                <Badge tone={reviewStatusTone(r.reviewStatus)}>
-                                  {reviewStatusLabel(r.reviewStatus)}
-                                </Badge>
-                              </span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
+                                  </div>
+                                </div>
+                              </div>
+                              {(f.businessRules?.length ?? 0) > 0 ? (
+                                <div className="text-xs text-muted">
+                                  <div className="font-medium text-fg">
+                                    Business Rules
+                                  </div>
+                                  <ol className="mt-1 list-decimal space-y-0.5 pl-4">
+                                    {f.businessRules!
+                                      .slice(0, 5)
+                                      .map((rule, idx) => (
+                                        <li
+                                          key={`${idx}-${rule.text.slice(0, 24)}`}
+                                        >
+                                          {rule.text}
+                                          {rule.source === 'AI_INFERRED' ? (
+                                            <span className="text-warning">
+                                              {' '}
+                                              (Suggested · AI_INFERRED)
+                                            </span>
+                                          ) : null}
+                                        </li>
+                                      ))}
+                                  </ol>
+                                </div>
+                              ) : null}
+                              <ul className="space-y-2">
+                                {f.requirements.map((r) => (
+                                  <li
+                                    key={r.id}
+                                    className="rounded-md border border-border/60 px-2 py-2"
+                                  >
+                                    <button
+                                      type="button"
+                                      className="flex w-full flex-wrap items-start justify-between gap-2 text-left hover:opacity-90"
+                                      onClick={() =>
+                                        setView('detail', r.requirementKey)
+                                      }
+                                    >
+                                      <span>
+                                        <span className="font-mono text-xs text-muted">
+                                          {r.requirementKey}
+                                        </span>{' '}
+                                        <span className="font-medium">
+                                          {r.title}
+                                        </span>
+                                        {r.semantic ? (
+                                          <div className="mt-1 text-xs text-muted">
+                                            Actor: {r.semantic.actor} · Entity:{' '}
+                                            {r.semantic.entity} · Action:{' '}
+                                            {r.semantic.action}
+                                          </div>
+                                        ) : null}
+                                      </span>
+                                      <span className="flex gap-1">
+                                        <Badge
+                                          tone={impactTone(r.businessImpact)}
+                                        >
+                                          {impactLabel(r.businessImpact)}
+                                        </Badge>
+                                        <Badge
+                                          tone={reviewStatusTone(
+                                            r.reviewStatus,
+                                          )}
+                                        >
+                                          {reviewStatusLabel(r.reviewStatus)}
+                                        </Badge>
+                                      </span>
+                                    </button>
+                                    {r.possibleDuplicateOf &&
+                                    r.duplicateKind &&
+                                    r.duplicateKind !== 'NOT_DUPLICATE' ? (
+                                      <div className="mt-2 space-y-2 rounded-md border border-warning/30 bg-warning/5 p-2 text-xs">
+                                        <div className="font-medium text-fg">
+                                          {r.duplicateKind.replace(/_/g, ' ')}
+                                        </div>
+                                        <div>{r.possibleDuplicateOf}</div>
+                                        {r.duplicateKind === 'DUPLICATE' &&
+                                        r.duplicateSimilarity != null ? (
+                                          <div>
+                                            Confidence:{' '}
+                                            {Math.round(r.duplicateSimilarity)}%
+                                          </div>
+                                        ) : null}
+                                        {r.duplicateReason ? (
+                                          <div className="text-muted whitespace-pre-wrap">
+                                            Reason: {r.duplicateReason}
+                                          </div>
+                                        ) : null}
+                                        {(r.duplicateKind === 'DUPLICATE' ||
+                                          r.duplicateKind ===
+                                            'POSSIBLE_DUPLICATE') && (
+                                          <div className="flex flex-wrap gap-2 pt-1">
+                                            <Button
+                                              size="sm"
+                                              variant="secondary"
+                                              disabled={
+                                                duplicateDecisionMutation.isPending
+                                              }
+                                              onClick={() =>
+                                                duplicateDecisionMutation.mutate(
+                                                  {
+                                                    requirementKey:
+                                                      r.requirementKey,
+                                                    decision: 'keep_both',
+                                                  },
+                                                )
+                                              }
+                                            >
+                                              Keep Both
+                                            </Button>
+                                            <Button
+                                              size="sm"
+                                              variant="secondary"
+                                              disabled={
+                                                duplicateDecisionMutation.isPending
+                                              }
+                                              onClick={() =>
+                                                duplicateDecisionMutation.mutate(
+                                                  {
+                                                    requirementKey:
+                                                      r.requirementKey,
+                                                    decision: 'merge',
+                                                  },
+                                                )
+                                              }
+                                            >
+                                              Merge
+                                            </Button>
+                                            <Button
+                                              size="sm"
+                                              variant="secondary"
+                                              disabled={
+                                                duplicateDecisionMutation.isPending
+                                              }
+                                              onClick={() =>
+                                                duplicateDecisionMutation.mutate(
+                                                  {
+                                                    requirementKey:
+                                                      r.requirementKey,
+                                                    decision:
+                                                      'mark_not_duplicate',
+                                                  },
+                                                )
+                                              }
+                                            >
+                                              Mark Not Duplicate
+                                            </Button>
+                                          </div>
+                                        )}
+                                      </div>
+                                    ) : null}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
+                </section>
+              ))}
             </div>
           )}
         </Card>
@@ -1864,9 +2056,15 @@ export default function ProjectWorkspacePage() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => setView('list')}
+                  onClick={() =>
+                    setView(
+                      (reviewSummaryQuery.data?.features ?? 0) > 0
+                        ? 'features'
+                        : 'list',
+                    )
+                  }
                 >
-                  Back to list
+                  Back
                 </Button>
               </div>
             </div>
@@ -1957,18 +2155,84 @@ export default function ProjectWorkspacePage() {
                 </p>
               </div>
             )}
+            {selected.semantic ? (
+              <div className="grid gap-2 rounded-lg border border-border bg-bg-elevated/40 p-3 text-xs sm:grid-cols-2">
+                <div>Actor: {selected.semantic.actor}</div>
+                <div>Entity: {selected.semantic.entity}</div>
+                <div>Action: {selected.semantic.action}</div>
+                <div>Capability: {selected.semantic.businessCapability}</div>
+                <div className="sm:col-span-2">
+                  Outcome: {selected.semantic.businessOutcome}
+                </div>
+              </div>
+            ) : null}
             {selected.possibleDuplicateOf &&
-            (selected.duplicateKind === 'DUPLICATE' ||
-              selected.duplicateKind === 'POSSIBLE_DUPLICATE') ? (
-              <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
-                {selected.duplicateKind === 'DUPLICATE'
-                  ? 'DUPLICATE'
-                  : 'POSSIBLE DUPLICATE'}{' '}
-                of {selected.possibleDuplicateOf}
-                {selected.duplicateSimilarity != null
-                  ? ` · ${Math.round(selected.duplicateSimilarity)}% confidence`
-                  : ''}
-                . Original IDs are preserved — no automatic delete/merge.
+            selected.duplicateKind &&
+            selected.duplicateKind !== 'NOT_DUPLICATE' ? (
+              <div className="space-y-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                <div className="font-medium">
+                  {selected.duplicateKind.replace(/_/g, ' ')}
+                </div>
+                <div>{selected.possibleDuplicateOf}</div>
+                {selected.duplicateKind === 'DUPLICATE' &&
+                selected.duplicateSimilarity != null ? (
+                  <div>
+                    Confidence: {Math.round(selected.duplicateSimilarity)}%
+                  </div>
+                ) : null}
+                {selected.duplicateReason ? (
+                  <p className="whitespace-pre-wrap text-muted">
+                    Reason: {selected.duplicateReason}
+                  </p>
+                ) : null}
+                <p className="text-xs text-muted">
+                  Original requirement IDs are preserved — nothing is deleted
+                  automatically.
+                </p>
+                {(selected.duplicateKind === 'DUPLICATE' ||
+                  selected.duplicateKind === 'POSSIBLE_DUPLICATE') && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={duplicateDecisionMutation.isPending}
+                      onClick={() =>
+                        duplicateDecisionMutation.mutate({
+                          requirementKey: selected.requirementKey,
+                          decision: 'keep_both',
+                        })
+                      }
+                    >
+                      Keep Both
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={duplicateDecisionMutation.isPending}
+                      onClick={() =>
+                        duplicateDecisionMutation.mutate({
+                          requirementKey: selected.requirementKey,
+                          decision: 'merge',
+                        })
+                      }
+                    >
+                      Merge
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={duplicateDecisionMutation.isPending}
+                      onClick={() =>
+                        duplicateDecisionMutation.mutate({
+                          requirementKey: selected.requirementKey,
+                          decision: 'mark_not_duplicate',
+                        })
+                      }
+                    >
+                      Mark Not Duplicate
+                    </Button>
+                  </div>
+                )}
               </div>
             ) : null}
             <div>
@@ -2028,20 +2292,6 @@ export default function ProjectWorkspacePage() {
                 ) : null}
               </div>
             </div>
-            {selected.possibleDuplicateOf &&
-            (selected.duplicateKind === 'DUPLICATE' ||
-              selected.duplicateKind === 'POSSIBLE_DUPLICATE') ? (
-              <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
-                ⚠{' '}
-                {selected.duplicateKind === 'DUPLICATE'
-                  ? 'Duplicate'
-                  : 'Possible duplicate'}{' '}
-                of {selected.possibleDuplicateOf}
-                {selected.duplicateSimilarity != null
-                  ? ` (${Math.round(selected.duplicateSimilarity)}% confidence)`
-                  : ''}
-              </div>
-            ) : null}
           </div>
 
           {selected.businessReview ? (

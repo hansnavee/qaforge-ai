@@ -222,5 +222,63 @@ export function detectBusinessConflicts(
     }
   }
 
+  // Duration / validity contradictions (OTP, session, token, etc.)
+  const durationRe =
+    /(\d+)\s*(minutes?|mins?|hours?|hrs?|seconds?|secs?)/gi;
+  const durationTopic = requirements.filter((r) =>
+    /otp|token|session|valid|expire|expires|validity|timeout/i.test(
+      `${r.title} ${r.description} ${r.rulesText}`,
+    ),
+  );
+  for (let i = 0; i < durationTopic.length; i++) {
+    for (let j = i + 1; j < durationTopic.length; j++) {
+      const a = durationTopic[i]!;
+      const b = durationTopic[j]!;
+      const textA = `${a.description} ${a.rulesText}`.toLowerCase();
+      const textB = `${b.description} ${b.rulesText}`.toLowerCase();
+      // Same topic family (e.g. both mention OTP)
+      const topicA = /otp/.test(textA)
+        ? 'otp'
+        : /session/.test(textA)
+          ? 'session'
+          : /token/.test(textA)
+            ? 'token'
+            : null;
+      const topicB = /otp/.test(textB)
+        ? 'otp'
+        : /session/.test(textB)
+          ? 'session'
+          : /token/.test(textB)
+            ? 'token'
+            : null;
+      if (!topicA || topicA !== topicB) continue;
+
+      const numsA = [...textA.matchAll(durationRe)].map((m) => ({
+        n: Number(m[1]),
+        u: String(m[2]).toLowerCase(),
+      }));
+      const numsB = [...textB.matchAll(durationRe)].map((m) => ({
+        n: Number(m[1]),
+        u: String(m[2]).toLowerCase(),
+      }));
+      if (!numsA.length || !numsB.length) continue;
+      const toMinutes = (n: number, u: string) => {
+        if (u.startsWith('hour') || u.startsWith('hr')) return n * 60;
+        if (u.startsWith('sec')) return n / 60;
+        return n;
+      };
+      const aMin = toMinutes(numsA[0]!.n, numsA[0]!.u);
+      const bMin = toMinutes(numsB[0]!.n, numsB[0]!.u);
+      if (aMin !== bMin) {
+        conflicts.push({
+          keyA: a.requirementKey,
+          keyB: b.requirementKey,
+          summary: `BUSINESS CONFLICT: ${topicA.toUpperCase()} validity period differs`,
+          detail: `${a.requirementKey} conflicts with ${b.requirementKey} on ${topicA} validity (${aMin} vs ${bMin} minutes). Do not decide automatically. Question: What should the ${topicA.toUpperCase()} validity period be?`,
+        });
+      }
+    }
+  }
+
   return conflicts;
 }

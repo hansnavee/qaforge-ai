@@ -12,6 +12,7 @@ import {
   computeReadinessScore,
   deriveStatuses,
 } from './scoring.js';
+import { buildSemanticProfile } from './semantic-profile.js';
 import {
   factStatusToIntentSource,
   type BusinessReviewPayload,
@@ -76,6 +77,7 @@ function emptyBusiness(): BusinessReviewPayload {
     outcomes: [],
     dependencies: [],
     permissions: [],
+    semantic: null,
   };
 }
 
@@ -214,6 +216,30 @@ export function analyzeRequirement(
     ...extractConfirmedRules(req),
     ...(req.knownDerivedRules ?? []),
   ];
+  const semantic = buildSemanticProfile({
+    requirementKey: req.requirementKey,
+    title: req.title,
+    description: req.description,
+    sourceText: req.sourceText,
+  });
+  business.semantic = {
+    actor: semantic.actor,
+    entity: semantic.entity,
+    action: semantic.action,
+    businessCapability: semantic.capability,
+    businessOutcome: semantic.outcome,
+    channel: semantic.channel,
+    crudOp: semantic.crudOp,
+  };
+  if (semantic.outcome && semantic.outcome !== 'general') {
+    business.outcomes.push(
+      fact(
+        `Business outcome: ${semantic.outcome.replace(/_/g, ' ')}`,
+        'INFERRED',
+        source,
+      ),
+    );
+  }
 
   // --- Domain heuristics: gaps → questions (never invent confirmed rules) ---
 

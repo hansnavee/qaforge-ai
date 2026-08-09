@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -248,6 +249,33 @@ export class ProjectsController {
     @Param('projectId') projectId: string,
   ) {
     return this.review.listFeatures(user.id, orgId, projectId);
+  }
+
+  @Post(':projectId/extracted-requirements/:requirementKey/duplicate-decision')
+  resolveDuplicate(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('requirementKey') requirementKey: string,
+    @Body() body: { decision?: string },
+  ) {
+    const decision = body?.decision;
+    if (
+      decision !== 'keep_both' &&
+      decision !== 'mark_not_duplicate' &&
+      decision !== 'merge'
+    ) {
+      throw new BadRequestException(
+        'decision must be keep_both | mark_not_duplicate | merge',
+      );
+    }
+    return this.review.resolveDuplicateDecision(
+      user,
+      orgId,
+      projectId,
+      requirementKey,
+      decision,
+    );
   }
 
   @Get(':projectId/review-relations')

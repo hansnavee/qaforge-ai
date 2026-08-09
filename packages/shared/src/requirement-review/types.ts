@@ -160,6 +160,16 @@ export type BusinessReviewPayload = {
   outcomes: ReviewFact[];
   dependencies: ReviewFact[];
   permissions: ReviewFact[];
+  /** Structured semantic fingerprint used by duplicate/feature intelligence */
+  semantic?: {
+    actor: string;
+    entity: string;
+    action: string;
+    businessCapability: string;
+    businessOutcome: string;
+    channel?: string | null;
+    crudOp?: string | null;
+  } | null;
 };
 
 export type FunctionalReviewPayload = {
@@ -210,11 +220,32 @@ export type FeatureGroupDraft = {
 export type DuplicatePair = {
   requirementKeyA: string;
   requirementKeyB: string;
+  /** Internal signal only — not primary UI decision */
   similarity: number;
   kind: DuplicateKind;
   recommendation: string;
-  /** Only show % when business meaning is confidently duplicate-like */
+  /** User-facing semantic reason */
+  reason?: string;
+  /** Only show % for true/possible duplicates when useful */
   showConfidence?: boolean;
+  sameFeatureDifferentOps?: boolean;
+  suggestedFeatureSplit?: string[];
+  semanticA?: {
+    actor: string;
+    entity: string;
+    action: string;
+    capability: string;
+    outcome: string;
+    channel: string | null;
+  };
+  semanticB?: {
+    actor: string;
+    entity: string;
+    action: string;
+    capability: string;
+    outcome: string;
+    channel: string | null;
+  };
 };
 
 export type RelationDraft = {
