@@ -71,9 +71,9 @@ export function extractEntity(text: string): string {
     return 'cart_item';
   if (/search result/.test(t)) return 'search_result';
   if (
-    /product catalog|catalog product|new products?\b|manage products?|add product(?! to cart)|remove product|delete product|update product(?! inventory)/.test(
+    /product catalog|catalog product|new products?\b|manage products?|product management|add product(?! to cart)|remove product|delete product|update product(?! inventory)/.test(
       t,
-    ) && /\b(administrators?|admins?|managers?)\b/.test(t)
+    ) && /\b(administrators?|admins?|managers?|only administrators?)\b/.test(t)
   )
     return 'product_catalog';
   if (/inventory|stock level|stock quantity|out of stock|out-of-stock/.test(t))
@@ -95,13 +95,16 @@ export function extractEntity(text: string): string {
   if (/\borders?\b/.test(t) && !/\bproducts?\b/.test(t)) return 'order';
   if (/\bpayment\b|pay for|checkout payment/.test(t)) return 'payment';
   if (
-    /user account|user profile|email address|password|\botp\b|credential/.test(t)
+    /user account|user profile|email address|password|\botp\b|credentials?|invalid login|\blogin\b|sign[\s-]?in|administrative functionality|administrator permissions/.test(
+      t,
+    )
   )
     return 'user_account';
   if (/\breview\b|rating/.test(t)) return 'review';
   if (/\bcheckout\b/.test(t)) return 'checkout';
   if (/\bproducts?\b/.test(t)) {
-    if (/\b(administrators?|admins?|managers?)\b/.test(t)) return 'product_catalog';
+    if (/\b(administrators?|admins?|managers?|manage|management)\b/.test(t))
+      return 'product_catalog';
     return 'product';
   }
   if (/\b(account|profile)\b/.test(t)) return 'user_account';

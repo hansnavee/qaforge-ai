@@ -190,6 +190,9 @@ export function canonicalizeAction(raw: string): string {
     select: 'select',
     navigate: 'navigate',
     redirect: 'navigate',
+    manage: 'update',
+    access: 'read',
+    deny: 'deny',
   };
   return map[key] ?? (key || 'unspecified');
 }
@@ -274,11 +277,11 @@ export function structuredSemanticsCompatibleWithText(
 
   const objectEvidence: Record<string, RegExp> = {
     user_account:
-      /\b(email|account|password|profile|register|registration|login|sign[\s-]?up|user)\b/,
+      /\b(email|account|password|profile|register|registration|login|sign[\s-]?up|user|credentials?|administrative|administrator|admin)\b/,
     password: /\bpasswords?\b/,
     otp: /\botp\b/,
     product: /\bproducts?\b/,
-    product_catalog: /\b(products?|catalog)\b/,
+    product_catalog: /\b(products?|catalog|manage)\b/,
     inventory: /\b(inventory|stock)\b/,
     cart_item: /\b(cart|quantity)\b/,
     order: /\borders?\b/,
@@ -304,7 +307,7 @@ export function structuredSemanticsCompatibleWithText(
     filter: /\bfilter\b/,
     purchase: /\b(buy|purchase|purchased)\b/,
     pay: /\b(pay|payment|checkout)\b/,
-    login: /\b(login|sign[\s-]?in)\b/,
+    login: /\b(login|sign[\s-]?in|credentials?)\b/,
     reset: /\breset\b/,
     store: /\b(store|stored|hash|encrypt|secur)/,
     support: /\b(support|compatible|friendly|responsive|usab|easy|device|mobile|browser)/,
@@ -551,7 +554,9 @@ export function extractStructuredSemanticsHeuristic(
     capability = 'user_registration';
     confidence = 0.93;
   } else if (
-    /\b(login|sign in)\b/.test(t) &&
+    (/\b(login|sign[\s-]?in)\b/.test(t) ||
+      /\b(invalid )?credentials?\b/.test(t) ||
+      /\binvalid login\b/.test(t)) &&
     !/\b(register|registration|sign up|create an account)\b/.test(t)
   ) {
     object = 'user_account';
@@ -582,17 +587,20 @@ export function extractStructuredSemanticsHeuristic(
     capability = 'order_details';
     confidence = 0.91;
   } else if (
-    /\b(administrators?|admins?)\b/.test(t) &&
-    /product/.test(t) &&
+    (/\b(administrators?|admins?)\b/.test(t) ||
+      /\bonly administrators?\b/.test(t)) &&
+    /\bproducts?\b/.test(t) &&
     !/cart/.test(t)
   ) {
     // Admin catalog/inventory before generic "product details"
     object = /inventory|stock/.test(t) ? 'inventory' : 'product_catalog';
     action = /remove|delete/.test(t)
       ? 'delete'
-      : /update|edit|modify|inventory/.test(t)
-        ? 'update'
-        : 'create';
+      : /add|create|new/.test(t)
+        ? 'create'
+        : /update|edit|modify|inventory|manage|management/.test(t)
+          ? 'update'
+          : 'update';
     capability = /inventory|stock/.test(t)
       ? 'inventory_update'
       : 'product_administration';
@@ -650,12 +658,15 @@ export function extractStructuredSemanticsHeuristic(
     }
     confidence = 0.9;
   } else if (
-    /administrative functionality|administrator permissions|admin(istrator)? access|normal users? should not/.test(
+    /administrative functionality|administrator permissions|admin(istrator)? access|have access to administrative|normal users? should not/.test(
       t,
     ) ||
     (/\b(prevent|must not|should not|cannot)\b/.test(t) &&
       /\b(normal users?|non-?admin|customers?)\b/.test(t) &&
-      /\b(product management|admin|administrator|administrative)\b/.test(t))
+      /\b(product management|admin|administrator|administrative)\b/.test(t)) ||
+    (/\badministrators?\b/.test(t) &&
+      /\b(access|permissions?|functionality)\b/.test(t) &&
+      !/\bproducts?\b/.test(t))
   ) {
     object = /product management|inventory|catalog/.test(t)
       ? 'product_catalog'
@@ -695,7 +706,11 @@ export function extractStructuredSemanticsHeuristic(
     capability = 'application_performance';
     requirementType = 'NON_FUNCTIONAL';
     confidence = 0.9;
-  } else if (/error message|clear error|display.*error/.test(t)) {
+  } else if (
+    /error message|clear error|display.*error/.test(t) &&
+    !/\b(login|sign[\s-]?in|credentials?)\b/.test(t)
+  ) {
+    // Generic error UX — login/credential errors stay on user_account above
     object = 'application';
     action = 'display';
     capability = 'error_messaging';
@@ -769,17 +784,30 @@ function recoverImplicitObjectAction(
 
   if (/\bpasswords?\b/.test(t) && /\b(store|stored|secur|hash|encrypt)/.test(t)) {
     object = 'password';
-  } else if (/\bemail\b/.test(t)) object = 'user_account';
-  else if (/\bpasswords?\b/.test(t)) object = 'user_account';
+  } else if (
+    /\b(email|credentials?|login|sign[\s-]?in|profile|account)\b/.test(t) ||
+    /\badministrative (functionality|permissions?|access)\b/.test(t)
+  ) {
+    object = 'user_account';
+  } else if (/\bpasswords?\b/.test(t)) object = 'user_account';
   else if (/\botp\b/.test(t)) object = 'otp';
   else if (/\bcart\b/.test(t) || /\bquantity\b/.test(t)) object = 'cart_item';
   else if (/\border\b/.test(t)) object = 'order';
-  else if (/\bproduct\b/.test(t)) object = 'product';
+  else if (
+    /\bproducts?\b/.test(t) &&
+    /\b(administrators?|admins?|manage|management)\b/.test(t)
+  ) {
+    object = 'product_catalog';
+  } else if (/\bproduct\b/.test(t)) object = 'product';
   else if (/\bpayment\b/.test(t)) object = 'payment';
   else if (/\bprofile\b/.test(t)) object = 'user_account';
 
   if (/\b(store|stored|hash|encrypt|secur)/.test(t) && /\bpasswords?\b/.test(t)) {
     action = 'store';
+  } else if (/\b(login|sign[\s-]?in|credentials?)\b/.test(t)) {
+    action = 'login';
+  } else if (/\b(manage|management)\b/.test(t) && object === 'product_catalog') {
+    action = 'update';
   } else if (/\b(change|update|edit|modify|increase|decrease)\b/.test(t)) {
     action = 'update';
   } else if (/\b(create|add|register)\b/.test(t)) action = 'create';
@@ -812,9 +840,51 @@ function recoverImplicitObjectAction(
     capability = 'shopping_cart';
   } else if (object === 'user_account' && action === 'update' && /\bprofile\b/.test(t)) {
     capability = 'profile_update';
+  } else if (object === 'user_account' && action === 'login') {
+    capability = 'user_login';
+  } else if (
+    object === 'user_account' &&
+    /\b(administrative|administrator permissions|admin)\b/.test(t)
+  ) {
+    capability = 'access_control';
+    if (action === 'unspecified') {
+      action = /not|cannot|prevent|denied/.test(t) ? 'deny' : 'read';
+    }
+  } else if (object === 'product_catalog') {
+    capability = 'product_administration';
   }
 
   return { object, action, capability, condition, requirementType };
+}
+
+/** Prefer concrete heuristic entity/action/capability over LLM placeholders. */
+function fillPlaceholdersFromHeuristic(
+  primary: StructuredRequirementSemantics,
+  heuristic: StructuredRequirementSemantics,
+): StructuredRequirementSemantics {
+  return {
+    ...primary,
+    actor:
+      primary.actor && primary.actor !== 'unspecified'
+        ? primary.actor
+        : heuristic.actor,
+    object:
+      primary.object && primary.object !== 'general'
+        ? primary.object
+        : heuristic.object,
+    action:
+      primary.action && primary.action !== 'unspecified'
+        ? primary.action
+        : heuristic.action,
+    capability:
+      primary.capability && primary.capability !== 'general'
+        ? primary.capability
+        : heuristic.capability,
+    condition: primary.condition ?? heuristic.condition,
+    polarity:
+      primary.polarity !== 'UNSPECIFIED' ? primary.polarity : heuristic.polarity,
+    requirementType: primary.requirementType || heuristic.requirementType,
+  };
 }
 
 export function parseStructuredSemanticsBatch(
@@ -855,38 +925,57 @@ export function resolveStructuredSemantics(
     acceptStructuredSemantics(llm) &&
     structuredSemanticsCompatibleWithText(input, llm);
   if (llmOk && llm) {
-    return {
-      actor: llm.actor,
-      action: llm.action,
-      object: llm.object,
-      condition: llm.condition,
-      polarity: llm.polarity,
-      requirementType: llm.requirementType,
-      capability: llm.capability,
-      confidence: llm.confidence,
-      uncertain: false,
-      source: 'llm',
-    };
+    // Never keep LLM "general"/"unspecified" when heuristic mapped a domain entity
+    const filled = fillPlaceholdersFromHeuristic(
+      {
+        actor: llm.actor,
+        action: llm.action,
+        object: llm.object,
+        condition: llm.condition,
+        polarity: llm.polarity,
+        requirementType: llm.requirementType,
+        capability: llm.capability,
+        confidence: llm.confidence,
+        uncertain: false,
+        source: 'llm',
+      },
+      heuristic,
+    );
+    if (structuredSemanticsCompatibleWithText(input, filled)) {
+      return {
+        ...filled,
+        source:
+          filled.object !== llm.object ||
+          filled.action !== llm.action ||
+          filled.capability !== llm.capability
+            ? 'merged'
+            : 'llm',
+        confidence: Math.max(filled.confidence, heuristic.confidence),
+      };
+    }
   }
   if (llm && !llm.uncertain && llm.confidence >= 0.7) {
     // Partial trust — merge only fields that are text-compatible
-    const merged: StructuredRequirementSemantics = {
-      ...heuristic,
-      actor: llm.actor || heuristic.actor,
-      action: llm.action !== 'unspecified' ? llm.action : heuristic.action,
-      object: llm.object !== 'general' ? llm.object : heuristic.object,
-      condition: llm.condition ?? heuristic.condition,
-      polarity:
-        llm.polarity !== 'UNSPECIFIED' ? llm.polarity : heuristic.polarity,
-      capability:
-        llm.capability && llm.capability !== 'general'
-          ? llm.capability
-          : heuristic.capability,
-      requirementType: llm.requirementType || heuristic.requirementType,
-      confidence: Math.max(heuristic.confidence, llm.confidence * 0.9),
-      uncertain: true,
-      source: 'merged',
-    };
+    const merged = fillPlaceholdersFromHeuristic(
+      {
+        ...heuristic,
+        actor: llm.actor || heuristic.actor,
+        action: llm.action !== 'unspecified' ? llm.action : heuristic.action,
+        object: llm.object !== 'general' ? llm.object : heuristic.object,
+        condition: llm.condition ?? heuristic.condition,
+        polarity:
+          llm.polarity !== 'UNSPECIFIED' ? llm.polarity : heuristic.polarity,
+        capability:
+          llm.capability && llm.capability !== 'general'
+            ? llm.capability
+            : heuristic.capability,
+        requirementType: llm.requirementType || heuristic.requirementType,
+        confidence: Math.max(heuristic.confidence, llm.confidence * 0.9),
+        uncertain: true,
+        source: 'merged',
+      },
+      heuristic,
+    );
     if (structuredSemanticsCompatibleWithText(input, merged)) {
       return merged;
     }

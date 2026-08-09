@@ -64,6 +64,67 @@ describe('structured semantic extraction', () => {
     expect(s.requirementType).toBe('BUSINESS_RULE');
   });
 
+  it('Invalid Login Error → user_account / login (not general)', () => {
+    const s = extractStructuredSemanticsHeuristic({
+      requirementKey: 'REQ-005',
+      title: 'Invalid Login Error',
+      description:
+        'The system should display an appropriate error message when invalid credentials are entered.',
+    });
+    expect(s.object).toBe('user_account');
+    expect(s.action).toBe('login');
+    expect(s.capability).toBe('user_login');
+    expect(s.object).not.toBe('general');
+  });
+
+  it('Admin administrative access → user_account (not general)', () => {
+    const s = extractStructuredSemanticsHeuristic({
+      requirementKey: 'REQ-041',
+      title: 'Have Access To Administrative Functionality',
+      description:
+        'Administrators should have access to administrative functionality.',
+    });
+    expect(s.object).toBe('user_account');
+    expect(s.capability).toBe('access_control');
+    expect(s.actor).toBe('administrator');
+  });
+
+  it('Admin Product Management → product_catalog (not general)', () => {
+    const s = extractStructuredSemanticsHeuristic({
+      requirementKey: 'REQ-049',
+      title: 'Admin Product Management',
+      description: 'Only administrators can manage products.',
+    });
+    expect(s.object).toBe('product_catalog');
+    expect(s.capability).toBe('product_administration');
+    expect(s.action).not.toBe('unspecified');
+  });
+
+  it('LLM general placeholders do not override heuristic domain entities', () => {
+    const resolved = resolveStructuredSemantics(
+      {
+        requirementKey: 'REQ-005',
+        title: 'Invalid Login Error',
+        description:
+          'The system should display an appropriate error message when invalid credentials are entered.',
+      },
+      {
+        actor: 'customer',
+        action: 'unspecified',
+        object: 'general',
+        condition: null,
+        polarity: 'UNSPECIFIED',
+        requirementType: 'FUNCTIONAL',
+        capability: 'general',
+        confidence: 0.95,
+        uncertain: false,
+        source: 'llm',
+      },
+    );
+    expect(resolved.object).toBe('user_account');
+    expect(resolved.action).toBe('login');
+  });
+
   it('low-confidence LLM is marked uncertain and falls back', () => {
     const resolved = resolveStructuredSemantics(
       {
