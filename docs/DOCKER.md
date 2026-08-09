@@ -94,7 +94,8 @@ Compose uses defaults suitable for local/CI. Override via `.env` at repo root:
 ```env
 BETTER_AUTH_SECRET=...
 ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
-OPENROUTER_API_KEY=   # optional; mock LLM used when empty
+OPENROUTER_API_KEY=          # optional; mock LLM used when empty
+OPENROUTER_USE_FREE=true     # default free OpenRouter models (not Cursor plan models)
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_API_URL=http://localhost:4000
 ```

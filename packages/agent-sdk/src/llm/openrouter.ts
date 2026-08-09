@@ -3,10 +3,34 @@ import type { LlmClient } from '../types.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
-const MODEL_MAP = {
-  fast: 'openai/gpt-4o-mini',
-  reasoning: 'anthropic/claude-sonnet-4',
-} as const;
+/**
+ * Default to OpenRouter free-tier models for testing (no paid GPT/Claude).
+ * Override anytime with:
+ *   OPENROUTER_MODEL_FAST
+ *   OPENROUTER_MODEL_REASONING
+ * Or set OPENROUTER_USE_FREE=false and paid IDs to restore previous behavior.
+ *
+ * Note: Cursor subscription models are not available as an external API —
+ * this stack uses OpenRouter only.
+ */
+function resolveModelMap(): Record<'fast' | 'reasoning', string> {
+  const useFree = (process.env.OPENROUTER_USE_FREE ?? 'true').toLowerCase() !== 'false';
+  const paid = {
+    fast: 'openai/gpt-4o-mini',
+    reasoning: 'anthropic/claude-sonnet-4',
+  } as const;
+  const free = {
+    // Fast/general JSON-friendly free model (availability rotates on OpenRouter)
+    fast: 'google/gemma-4-26b-a4b-it:free',
+    // Stronger free model for design / case generation
+    reasoning: 'openai/gpt-oss-20b:free',
+  } as const;
+  const base = useFree ? free : paid;
+  return {
+    fast: process.env.OPENROUTER_MODEL_FAST?.trim() || base.fast,
+    reasoning: process.env.OPENROUTER_MODEL_REASONING?.trim() || base.reasoning,
+  };
+}
 
 function mockComplete(opts: {
   system?: string;
@@ -422,20 +446,19 @@ export class OpenRouterLlmClient implements LlmClient {
       return mockComplete(opts);
     }
 
-    const model = MODEL_MAP[opts.model ?? 'fast'];
+    const models = resolveModelMap();
+    const preferred = models[opts.model ?? 'fast'];
+    // Fallback router picks any currently available free model if the pinned
+    // free ID was delisted (OpenRouter free catalog churns often).
+    const candidates = [preferred, 'openrouter/free'].filter(
+      (m, i, arr) => Boolean(m) && arr.indexOf(m) === i,
+    );
+
     const messages: Array<{ role: string; content: string }> = [];
     if (opts.system) {
       messages.push({ role: 'system', content: opts.system });
     }
     messages.push({ role: 'user', content: opts.prompt });
-
-    const body: Record<string, unknown> = {
-      model,
-      messages,
-    };
-    if (opts.json) {
-      body.response_format = { type: 'json_object' };
-    }
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
@@ -446,16 +469,36 @@ export class OpenRouterLlmClient implements LlmClient {
     }
     headers['X-Title'] = this.appName;
 
-    const response = await fetch(this.baseUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
+    let response: Response | null = null;
+    let lastErr = '';
+    for (const model of candidates) {
+      const body: Record<string, unknown> = {
+        model,
+        messages,
+      };
+      // Some free models reject response_format — only request it on first try.
+      if (opts.json && model !== 'openrouter/free') {
+        body.response_format = { type: 'json_object' };
+      }
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
+      response = await fetch(this.baseUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      if (response.ok) break;
+      lastErr = await response.text().catch(() => '');
+      // Retry next candidate on model-not-found / unavailable
+      if (![404, 400, 502, 503].includes(response.status)) {
+        throw new Error(
+          `OpenRouter request failed (${response.status}): ${lastErr || response.statusText}`,
+        );
+      }
+    }
+
+    if (!response?.ok) {
       throw new Error(
-        `OpenRouter request failed (${response.status}): ${errText || response.statusText}`,
+        `OpenRouter request failed (${response?.status ?? 'n/a'}): ${lastErr || response?.statusText}`,
       );
     }
 
