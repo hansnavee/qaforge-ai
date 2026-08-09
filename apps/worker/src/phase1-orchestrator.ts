@@ -10,11 +10,11 @@ import type { AgentContext, AgentHandler } from '@qaforge/agent-sdk';
 import { BrowserSessionManager } from '@qaforge/browser-session';
 import { buildZipPackage } from '@qaforge/report-engine';
 import { createAgentContext, putBinaryArtifact } from './context.js';
+import { AwaitingHumanError } from './awaiting-human.js';
 import {
   ExecutionCancelledError,
   getRedis,
   publishClarificationQuestions,
-  waitForClarifySignal,
   waitForContinueSignal,
 } from './redis.js';
 import { requirementAgent } from './agents/requirement.agent.js';
@@ -409,7 +409,20 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       message: 'STLC run started',
     });
 
-    // 1. Requirements — prefer Step 2 reviewed requirements when approved
+    const loadGates = () =>
+      prisma.project.findUniqueOrThrow({
+        where: { id: project.id },
+        select: {
+          testDesignApprovedAt: true,
+          environmentApprovedAt: true,
+          testDataApprovedAt: true,
+        },
+      });
+
+    let gates = await loadGates();
+
+    // 1–4. Requirements → strategy → design (async pause; skip on resume)
+    if (!gates.testDesignApprovedAt) {
     let requirementsJson: unknown;
     if (useStep2Reviewed) {
       await setExecution(executionId, {
@@ -498,6 +511,31 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       let round = 0;
       while (!clear && round < MAX_CLARIFY_ROUNDS) {
         round += 1;
+        const priorRound = await prisma.clarificationRound.findFirst({
+          where: { executionId, round },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (priorRound?.answeredAt) {
+          const priorQuestions =
+            (priorRound.questions as Array<{ id: string }>) ?? [];
+          const skip = Boolean(priorRound.skipped);
+          const answers = (priorRound.answers ?? {}) as Record<string, string>;
+          await ctx.putArtifactJson(ArtifactType.CLARIFICATION_ANSWERS, {
+            round,
+            skip,
+            answers,
+          });
+          clear = requirementsSeemClear(priorQuestions, skip, round);
+          continue;
+        }
+        if (priorRound && !priorRound.answeredAt) {
+          await setExecution(executionId, {
+            status: ExecutionStatus.AWAITING_CLARIFICATION,
+            phase: ExecutionPhase.CLARIFICATION,
+          });
+          throw new AwaitingHumanError(ExecutionStatus.AWAITING_CLARIFICATION);
+        }
+
         const clarifyOut = (await runAgent(
           ctx,
           {
@@ -530,38 +568,13 @@ export async function runStlcExecution(executionId: string): Promise<void> {
           status: ExecutionStatus.AWAITING_CLARIFICATION,
           phase: ExecutionPhase.CLARIFICATION,
         });
-
         await ctx.emit({
           type: 'stlc.awaiting_clarification',
           phase: ExecutionPhase.CLARIFICATION,
           message: `Awaiting clarification answers (round ${round})`,
           data: { round, questionCount: questions.length },
         });
-
-        const signal = await waitForClarifySignal(executionId);
-        const skip = Boolean(signal?.skip);
-        const answers = (signal?.answers ?? {}) as Record<string, string>;
-
-        await prisma.clarificationRound.updateMany({
-          where: { executionId, round, answeredAt: null },
-          data: {
-            answers: answers as never,
-            skipped: skip,
-            answeredAt: new Date(),
-          },
-        });
-
-        await ctx.putArtifactJson(ArtifactType.CLARIFICATION_ANSWERS, {
-          round,
-          skip,
-          answers,
-        });
-
-        clear = requirementsSeemClear(questions, skip, round);
-        await setExecution(executionId, {
-          status: ExecutionStatus.RUNNING,
-          phase: ExecutionPhase.CLARIFICATION,
-        });
+        throw new AwaitingHumanError(ExecutionStatus.AWAITING_CLARIFICATION);
       }
     }
 
@@ -770,7 +783,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       validation: designValidation,
     });
 
-    // Stage 3 human gate — pause for test design approval
+    // Stage 3 human gate — release worker slot for other STLC runs
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_DESIGN_APPROVAL,
       phase: ExecutionPhase.TEST_DESIGN,
@@ -782,22 +795,19 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         'Test design ready — awaiting human approval before Environment Setup',
       data: { count: cases.length },
     });
-    await waitForContinueSignal(executionId);
-    await setExecution(executionId, {
-      status: ExecutionStatus.RUNNING,
-      phase: ExecutionPhase.ENVIRONMENT,
-    });
-    await prisma.project.update({
-      where: { id: project.id },
-      data: { stlcStage: 'ENVIRONMENT' },
-    });
-    await ctx.emit({
-      type: 'stlc.design_approved',
-      phase: ExecutionPhase.ENVIRONMENT,
-      message: 'Test design approved — continuing to Environment Setup',
-    });
+    throw new AwaitingHumanError(ExecutionStatus.AWAITING_DESIGN_APPROVAL);
+    } else {
+      await ctx.emit({
+        type: 'stlc.resume_skip',
+        phase: ExecutionPhase.TEST_DESIGN,
+        message: 'Skipping requirements/strategy/design — already approved',
+      });
+    }
+
+    gates = await loadGates();
 
     // Stage 4 — Environment Setup
+    if (!gates.environmentApprovedAt) {
     const envOut = (await runAgent(
       ctx,
       {
@@ -842,22 +852,19 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       message:
         'Environment checklist ready — awaiting human approval before Test Data',
     });
-    await waitForContinueSignal(executionId);
-    await setExecution(executionId, {
-      status: ExecutionStatus.RUNNING,
-      phase: ExecutionPhase.TEST_DATA,
-    });
-    await prisma.project.update({
-      where: { id: project.id },
-      data: { stlcStage: 'DATA' },
-    });
-    await ctx.emit({
-      type: 'stlc.env_approved',
-      phase: ExecutionPhase.TEST_DATA,
-      message: 'Environment approved — continuing to Test Data',
-    });
+    throw new AwaitingHumanError(ExecutionStatus.AWAITING_ENV_APPROVAL);
+    } else {
+      await ctx.emit({
+        type: 'stlc.resume_skip',
+        phase: ExecutionPhase.ENVIRONMENT,
+        message: 'Skipping environment setup — already approved',
+      });
+    }
+
+    gates = await loadGates();
 
     // Stage 5 — Test Data
+    if (!gates.testDataApprovedAt) {
     const dbCasesForData = await prisma.testCase.findMany({
       where: { executionId },
       orderBy: { createdAt: 'asc' },
@@ -926,7 +933,6 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
     });
 
-    // Stage 5 human gate — pause for test data approval
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_DATA_APPROVAL,
       phase: ExecutionPhase.TEST_DATA,
@@ -938,20 +944,14 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         'Test data ready — awaiting human approval before Test Execution',
       data: { count: dataOut?.cases?.length ?? 0 },
     });
-    await waitForContinueSignal(executionId);
-    await setExecution(executionId, {
-      status: ExecutionStatus.RUNNING,
-      phase: ExecutionPhase.AUTHENTICATION,
-    });
-    await prisma.project.update({
-      where: { id: project.id },
-      data: { stlcStage: 'EXECUTION' },
-    });
-    await ctx.emit({
-      type: 'stlc.data_approved',
-      phase: ExecutionPhase.AUTHENTICATION,
-      message: 'Test data approved — continuing to Test Execution',
-    });
+    throw new AwaitingHumanError(ExecutionStatus.AWAITING_DATA_APPROVAL);
+    } else {
+      await ctx.emit({
+        type: 'stlc.resume_skip',
+        phase: ExecutionPhase.TEST_DATA,
+        message: 'Skipping test data — already approved',
+      });
+    }
 
     // 5. Authentication pause
     await setExecution(executionId, {
@@ -1599,6 +1599,10 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
     });
   } catch (err) {
+    // Human gates release the BullMQ slot — status already set to AWAITING_*.
+    if (err instanceof AwaitingHumanError) {
+      throw err;
+    }
     const message = err instanceof Error ? err.message : String(err);
     if (err instanceof ExecutionCancelledError) {
       await setExecution(executionId, {

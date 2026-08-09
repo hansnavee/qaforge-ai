@@ -25,6 +25,24 @@ export class ExecutionsService {
     private readonly audit: AuditService,
   ) {}
 
+  /**
+   * Resume after a human gate.
+   * - requeue=true (pre-browser): worker released the slot; enqueue a fresh job.
+   * - requeue=false (post-login): worker is still blocked on Redis continue.
+   */
+  private async resumeStlc(
+    executionId: string,
+    runMode = 'STLC',
+    opts?: { requeue?: boolean },
+  ) {
+    await this.queue.publishContinue(executionId);
+    if (opts?.requeue === false) return;
+    await this.queue.enqueueRunExecution(executionId, {
+      jobId: `stlc-resume-${executionId}-${Date.now()}`,
+      runMode,
+    });
+  }
+
   private async assertUsageLimit(orgId: string) {
     const subscription = await prisma.subscription.findUnique({
       where: { organizationId: orgId },
@@ -163,7 +181,22 @@ export class ExecutionsService {
     const skip = Boolean(input.skip);
     const answers = input.answers ?? {};
 
+    await prisma.clarificationRound.updateMany({
+      where: { executionId, answeredAt: null },
+      data: {
+        answers: answers as never,
+        skipped: skip,
+        answeredAt: new Date(),
+      },
+    });
+
+    await prisma.execution.update({
+      where: { id: executionId },
+      data: { status: ExecutionStatus.RUNNING, phase: 'CLARIFICATION' },
+    });
+
     await this.queue.publishClarify(executionId, { skip, answers });
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC');
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: skip
@@ -221,7 +254,7 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC');
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.plan_approved',
@@ -315,7 +348,7 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC');
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.design_approved',
@@ -368,7 +401,7 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC');
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.env_approved',
@@ -421,7 +454,7 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC');
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.data_approved',
@@ -474,7 +507,9 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC', {
+      requeue: false,
+    });
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.execution_approved',
@@ -528,7 +563,9 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC', {
+      requeue: false,
+    });
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.defects_approved',
@@ -582,7 +619,9 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC', {
+      requeue: false,
+    });
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.regression_approved',
@@ -635,7 +674,9 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC', {
+      requeue: false,
+    });
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.automation_approved',
@@ -688,7 +729,9 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC', {
+      requeue: false,
+    });
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.report_approved',
@@ -742,7 +785,9 @@ export class ExecutionsService {
       },
     });
 
-    await this.queue.publishContinue(executionId);
+    await this.resumeStlc(executionId, execution.runMode ?? 'STLC', {
+      requeue: false,
+    });
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
       type: 'stlc.qa_signed_off',
@@ -784,7 +829,7 @@ export class ExecutionsService {
       },
     });
 
-    // Unblock the waiting worker via Redis — do not re-enqueue a full run.
+    // Login gate keeps the worker slot (browser session live) — only unblock Redis.
     await this.queue.publishContinue(executionId);
     await this.queue.publishExecutionEvent(executionId, {
       executionId,

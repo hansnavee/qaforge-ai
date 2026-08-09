@@ -1,0 +1,24 @@
+# Sauce Demo — Login Only (v1)
+
+App under test: https://www.saucedemo.com
+
+## Feature: Login
+
+### REQ-001: Valid Login
+As a shopper, I want to log in with a valid username and password so that I can see the product inventory.
+
+Acceptance Criteria:
+1. User can enter username and password on the login page.
+2. Valid credentials (standard_user / secret_sauce) redirect to the inventory page.
+3. Password field masks entered characters.
+
+Business Rules:
+- Only registered users can log in.
+
+### REQ-002: Invalid Login
+As a shopper, I want clear feedback when login fails so that I know credentials were rejected.
+
+Acceptance Criteria:
+1. Invalid password shows an error message.
+2. User remains on the login page.
+3. Empty username or password must not allow login.
