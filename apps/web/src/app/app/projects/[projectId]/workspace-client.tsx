@@ -21,6 +21,50 @@ type RequirementDoc = {
   createdAt: string;
 };
 
+type ReviewFact = {
+  text: string;
+  status: string;
+  source?: string | null;
+};
+
+type BusinessReviewPayload = {
+  intent: ReviewFact | null;
+  actors: ReviewFact[];
+  rules: ReviewFact[];
+  preconditions: ReviewFact[];
+  flow: ReviewFact[];
+  states: ReviewFact[];
+  transitions: ReviewFact[];
+  exceptions: ReviewFact[];
+  outcomes: ReviewFact[];
+  dependencies: ReviewFact[];
+  permissions: ReviewFact[];
+};
+
+type FunctionalReviewPayload = {
+  inputs: ReviewFact[];
+  outputs: ReviewFact[];
+  validations: ReviewFact[];
+  successBehavior: ReviewFact[];
+  failureBehavior: ReviewFact[];
+  errorHandling: ReviewFact[];
+  navigation: ReviewFact[];
+  dataHandling: ReviewFact[];
+};
+
+type ReviewQuestion = {
+  id: string;
+  questionKey: string;
+  category: string;
+  priority: string;
+  question: string;
+  reason: string;
+  blocking: boolean;
+  status: string;
+  answer?: string | null;
+  answeredAt?: string | null;
+};
+
 type ExtractedRequirement = {
   id: string;
   requirementKey: string;
@@ -38,6 +82,56 @@ type ExtractedRequirement = {
   dependencies: string[];
   supportingInformation?: string[];
   possibleDuplicateOf?: string | null;
+  reviewStatus?: string | null;
+  businessReadiness?: string | null;
+  functionalCompleteness?: string | null;
+  businessReview?: BusinessReviewPayload | null;
+  functionalReview?: FunctionalReviewPayload | null;
+  readinessScore?: number | null;
+  reviewedAt?: string | null;
+  openQuestionCount?: number;
+  criticalOpenCount?: number;
+  highOpenCount?: number;
+  questions?: ReviewQuestion[];
+};
+
+type ReviewSummary = {
+  total: number;
+  reviewed: number;
+  business: {
+    ready: number;
+    needsClarification: number;
+    blocked: number;
+  };
+  functional: {
+    complete: number;
+    partial: number;
+    incomplete: number;
+  };
+  questions: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
+  openConflicts: number;
+  businessReadinessPct: number;
+  functionalReadinessPct: number;
+  byReviewStatus: {
+    blocked: number;
+    needsClarification: number;
+    reviewRecommended: number;
+    readyForTestDesign: number;
+  };
+};
+
+type ReviewConflict = {
+  id: string;
+  summary: string;
+  detail: string;
+  status: string;
+  requirementA: { requirementKey: string; title: string };
+  requirementB: { requirementKey: string; title: string };
 };
 
 type ExtractionSummary = {
@@ -106,6 +200,15 @@ const EXTRACT_STEPS = [
   'Structuring requirements',
 ];
 
+const REVIEW_STEPS = [
+  'Business intent',
+  'Business rules',
+  'Actors & permissions',
+  'States & transitions',
+  'Functional completeness',
+  'Clarifying questions',
+];
+
 function formatDate(value: string) {
   try {
     return new Date(value).toLocaleDateString(undefined, {
@@ -129,6 +232,80 @@ function emptyField(values: string[] | null | undefined) {
   return values.join('\n');
 }
 
+function reviewStatusLabel(status?: string | null) {
+  if (!status) return 'Not reviewed';
+  if (status === 'READY_FOR_TEST_DESIGN') return 'Ready for test design';
+  if (status === 'NEEDS_CLARIFICATION') return 'Needs clarification';
+  if (status === 'REVIEW_RECOMMENDED') return 'Review recommended';
+  if (status === 'BLOCKED') return 'Blocked';
+  return status;
+}
+
+function reviewStatusTone(
+  status?: string | null,
+): 'success' | 'warning' | 'danger' | 'accent' | undefined {
+  if (!status) return undefined;
+  if (status === 'READY_FOR_TEST_DESIGN') return 'success';
+  if (status === 'BLOCKED') return 'danger';
+  if (status === 'NEEDS_CLARIFICATION') return 'warning';
+  return 'accent';
+}
+
+function factStatusTone(
+  status: string,
+): 'success' | 'warning' | 'danger' | 'accent' | undefined {
+  if (status === 'CONFIRMED' || status === 'DERIVED_FROM_USER_ANSWER') {
+    return 'success';
+  }
+  if (status === 'INFERRED') return 'accent';
+  if (status === 'MISSING') return 'warning';
+  return undefined;
+}
+
+function isBusinessQuestionCategory(category: string) {
+  return [
+    'BUSINESS_RULE',
+    'BUSINESS_FLOW',
+    'ACTOR',
+    'ROLE_PERMISSION',
+    'PRECONDITION',
+    'STATE',
+    'STATE_TRANSITION',
+    'EXCEPTION',
+    'BUSINESS_OUTCOME',
+  ].includes(category);
+}
+
+function FactList({
+  title,
+  facts,
+}: {
+  title: string;
+  facts: ReviewFact[] | null | undefined;
+}) {
+  if (!facts || facts.length === 0) {
+    return (
+      <div>
+        <div className="text-xs uppercase tracking-wide text-muted">{title}</div>
+        <p className="mt-1 text-muted">None identified</p>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-wide text-muted">{title}</div>
+      <ul className="mt-1 space-y-1.5">
+        {facts.map((f, i) => (
+          <li key={`${f.text}-${i}`} className="flex flex-wrap items-start gap-2">
+            <Badge tone={factStatusTone(f.status)}>{f.status}</Badge>
+            <span>{f.text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export default function ProjectWorkspacePage() {
   const params = useParams<{ projectId: string }>();
   const projectId = params.projectId;
@@ -143,8 +320,12 @@ export default function ProjectWorkspacePage() {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('ALL');
   const [progressStep, setProgressStep] = useState(0);
+  const [reviewProgressStep, setReviewProgressStep] = useState(0);
   const [summary, setSummary] = useState<ExtractionSummary | null>(null);
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
+  const [answerError, setAnswerError] = useState<string | null>(null);
   const [debugDecisions, setDebugDecisions] = useState<ExtractionDecision[]>(
     [],
   );
@@ -190,6 +371,36 @@ export default function ProjectWorkspacePage() {
       }
     },
     enabled: Boolean(projectId) && SHOW_EXTRACTION_DEBUG,
+  });
+
+  const reviewSummaryQuery = useQuery({
+    queryKey: ['review-summary', projectId],
+    queryFn: async () => {
+      try {
+        return await api<ReviewSummary>(
+          `/api/v1/projects/${projectId}/review-summary`,
+        );
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 0) return null;
+        throw e;
+      }
+    },
+    enabled: Boolean(projectId),
+  });
+
+  const conflictsQuery = useQuery({
+    queryKey: ['review-conflicts', projectId],
+    queryFn: async () => {
+      try {
+        return await api<ReviewConflict[]>(
+          `/api/v1/projects/${projectId}/review-conflicts`,
+        );
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 0) return [] as ReviewConflict[];
+        throw e;
+      }
+    },
+    enabled: Boolean(projectId),
   });
 
   const project = projectQuery.data;
@@ -266,6 +477,108 @@ export default function ProjectWorkspacePage() {
     ];
     return () => timers.forEach((t) => window.clearTimeout(t));
   }, [extractMutation.isPending]);
+
+  const reviewMutation = useMutation({
+    mutationFn: async () => {
+      setReviewError(null);
+      setReviewProgressStep(0);
+      return api<{ ok: boolean; summary: ReviewSummary }>(
+        `/api/v1/projects/${projectId}/review-requirements`,
+        { method: 'POST', body: '{}' },
+      );
+    },
+    onSuccess: async () => {
+      setReviewProgressStep(REVIEW_STEPS.length);
+      await queryClient.invalidateQueries({
+        queryKey: ['extracted-requirements', projectId],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['review-summary', projectId],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['review-conflicts', projectId],
+      });
+      router.replace(`?tab=requirements&view=review-dashboard`, {
+        scroll: false,
+      });
+    },
+    onError: (e) => {
+      setReviewError(
+        e instanceof ApiError
+          ? e.message
+          : 'Business review could not be completed.',
+      );
+    },
+  });
+
+  const reanalyzeMutation = useMutation({
+    mutationFn: async (requirementKey: string) => {
+      return api<{ ok: boolean }>(
+        `/api/v1/projects/${projectId}/extracted-requirements/${requirementKey}/review`,
+        { method: 'POST', body: '{}' },
+      );
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ['extracted-requirements', projectId],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['review-summary', projectId],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['review-conflicts', projectId],
+      });
+    },
+  });
+
+  const answerMutation = useMutation({
+    mutationFn: async ({
+      questionId,
+      answer,
+    }: {
+      questionId: string;
+      answer: string;
+    }) => {
+      setAnswerError(null);
+      return api(
+        `/api/v1/projects/${projectId}/review-questions/${questionId}/answer`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ answer }),
+        },
+      );
+    },
+    onSuccess: async (_data, vars) => {
+      setAnswerDrafts((prev) => {
+        const next = { ...prev };
+        delete next[vars.questionId];
+        return next;
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['extracted-requirements', projectId],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['review-summary', projectId],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ['review-conflicts', projectId],
+      });
+    },
+    onError: (e) => {
+      setAnswerError(
+        e instanceof ApiError ? e.message : 'Could not save the answer.',
+      );
+    },
+  });
+
+  useEffect(() => {
+    if (!reviewMutation.isPending) return;
+    setReviewProgressStep(0);
+    const timers = REVIEW_STEPS.map((_, idx) =>
+      window.setTimeout(() => setReviewProgressStep(idx + 1), 350 * (idx + 1)),
+    );
+    return () => timers.forEach((t) => window.clearTimeout(t));
+  }, [reviewMutation.isPending]);
 
   const setView = (next: string, req?: string | null) => {
     const params = new URLSearchParams();
@@ -490,12 +803,60 @@ export default function ProjectWorkspacePage() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => setView('list')}>View Requirements</Button>
+            <Button
+              variant="secondary"
+              onClick={() => reviewMutation.mutate()}
+              disabled={reviewMutation.isPending}
+            >
+              Start Business Review
+            </Button>
             {SHOW_EXTRACTION_DEBUG ? (
               <Button variant="secondary" onClick={() => setView('debug')}>
                 Extraction Debug
               </Button>
             ) : null}
           </div>
+          {reviewError ? (
+            <p className="text-sm text-danger">{reviewError}</p>
+          ) : (
+            <p className="text-xs text-muted">
+              Business review analyzes intent, rules, actors, states, and
+              functional gaps — it does not invent confirmed business rules.
+            </p>
+          )}
+        </Card>
+      ) : null}
+
+      {tab !== 'overview' && reviewMutation.isPending ? (
+        <Card className="space-y-4">
+          <div>
+            <h2 className="text-base font-medium">Business + Functional Review</h2>
+            <p className="mt-1 text-sm text-muted">
+              Analyzing extracted requirements…
+            </p>
+          </div>
+          <ul className="space-y-2 text-sm">
+            {REVIEW_STEPS.map((label, idx) => {
+              const done = reviewProgressStep > idx;
+              const active = reviewProgressStep === idx;
+              return (
+                <li key={label} className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      done && 'text-success',
+                      active && 'text-accent',
+                      !done && !active && 'text-muted',
+                    )}
+                  >
+                    {done ? '✓' : active ? '●' : '○'}
+                  </span>
+                  <span className={cn(!done && !active && 'text-muted')}>
+                    {label}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
         </Card>
       ) : null}
 
@@ -568,7 +929,154 @@ export default function ProjectWorkspacePage() {
           </ul>
         </Card>
       ) : null}
-      {tab !== 'overview' && !extractMutation.isPending && view === 'detail' && selected ? (
+      {tab !== 'overview' &&
+      !extractMutation.isPending &&
+      !reviewMutation.isPending &&
+      view === 'review-dashboard' ? (
+        <Card className="space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-medium">
+                Business + Functional Review
+              </h2>
+              <p className="mt-1 text-sm text-muted">
+                Readiness across extracted requirements (no test design yet)
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => reviewMutation.mutate()}
+                disabled={reviewMutation.isPending || extracted.length === 0}
+              >
+                Re-run Review
+              </Button>
+              <Button size="sm" onClick={() => setView('list')}>
+                View Requirements
+              </Button>
+            </div>
+          </div>
+
+          {(conflictsQuery.data?.length ?? 0) > 0 ? (
+            <div className="rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm">
+              <div className="font-medium text-danger">
+                {conflictsQuery.data!.length} open conflict
+                {conflictsQuery.data!.length === 1 ? '' : 's'}
+              </div>
+              <ul className="mt-2 space-y-1 text-muted">
+                {conflictsQuery.data!.slice(0, 5).map((c) => (
+                  <li key={c.id}>
+                    {c.requirementA.requirementKey} ↔{' '}
+                    {c.requirementB.requirementKey}: {c.summary}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {reviewSummaryQuery.data ? (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="rounded-lg border border-border p-3">
+                  <div className="text-xs uppercase tracking-wide text-muted">
+                    Reviewed
+                  </div>
+                  <div className="mt-1 text-xl font-semibold">
+                    {reviewSummaryQuery.data.reviewed}/
+                    {reviewSummaryQuery.data.total}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border p-3">
+                  <div className="text-xs uppercase tracking-wide text-muted">
+                    Business readiness
+                  </div>
+                  <div className="mt-1 text-xl font-semibold">
+                    {reviewSummaryQuery.data.businessReadinessPct}%
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border p-3">
+                  <div className="text-xs uppercase tracking-wide text-muted">
+                    Functional readiness
+                  </div>
+                  <div className="mt-1 text-xl font-semibold">
+                    {reviewSummaryQuery.data.functionalReadinessPct}%
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border p-3">
+                  <div className="text-xs uppercase tracking-wide text-muted">
+                    Ready for test design
+                  </div>
+                  <div className="mt-1 text-xl font-semibold">
+                    {reviewSummaryQuery.data.byReviewStatus.readyForTestDesign}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2 text-sm">
+                  <h3 className="font-medium">Business readiness</h3>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>Ready: {reviewSummaryQuery.data.business.ready}</div>
+                    <div>
+                      Needs clarification:{' '}
+                      {reviewSummaryQuery.data.business.needsClarification}
+                    </div>
+                    <div>Blocked: {reviewSummaryQuery.data.business.blocked}</div>
+                  </div>
+                </div>
+                <div className="space-y-2 text-sm">
+                  <h3 className="font-medium">Functional completeness</h3>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      Complete: {reviewSummaryQuery.data.functional.complete}
+                    </div>
+                    <div>
+                      Partial: {reviewSummaryQuery.data.functional.partial}
+                    </div>
+                    <div>
+                      Incomplete:{' '}
+                      {reviewSummaryQuery.data.functional.incomplete}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2 text-sm">
+                <h3 className="font-medium">Open questions by priority</h3>
+                <div className="flex flex-wrap gap-2">
+                  <Badge tone="danger">
+                    Critical {reviewSummaryQuery.data.questions.critical}
+                  </Badge>
+                  <Badge tone="warning">
+                    High {reviewSummaryQuery.data.questions.high}
+                  </Badge>
+                  <Badge tone="accent">
+                    Medium {reviewSummaryQuery.data.questions.medium}
+                  </Badge>
+                  <Badge>
+                    Low {reviewSummaryQuery.data.questions.low}
+                  </Badge>
+                </div>
+              </div>
+            </>
+          ) : (
+            <p className="text-sm text-muted">
+              No review data yet. Start Business Review from the extraction
+              summary or requirements list.
+            </p>
+          )}
+          {reviewError ? (
+            <p className="text-sm text-danger">{reviewError}</p>
+          ) : null}
+        </Card>
+      ) : null}
+
+      {tab !== 'overview' &&
+      !extractMutation.isPending &&
+      !reviewMutation.isPending &&
+      view === 'detail' &&
+      selected ? (
         <Card className="space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -577,19 +1085,57 @@ export default function ProjectWorkspacePage() {
               </div>
               <h2 className="mt-1 text-xl font-semibold">{selected.title}</h2>
             </div>
-            <Button variant="secondary" size="sm" onClick={() => setView('list')}>
-              Back to list
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              {selected.reviewedAt ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() =>
+                    reanalyzeMutation.mutate(selected.requirementKey)
+                  }
+                  disabled={reanalyzeMutation.isPending}
+                >
+                  Re-analyze
+                </Button>
+              ) : null}
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setView('list')}
+              >
+                Back to list
+              </Button>
+            </div>
           </div>
 
+          {(conflictsQuery.data ?? []).filter(
+            (c) =>
+              c.requirementA.requirementKey === selected.requirementKey ||
+              c.requirementB.requirementKey === selected.requirementKey,
+          ).length > 0 ? (
+            <div className="rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm">
+              Open conflicts involve this requirement. Resolve conflicting
+              answers manually — nothing is auto-resolved.
+            </div>
+          ) : null}
+
           <div className="space-y-3 text-sm">
-            <div>
-              <div className="text-xs uppercase tracking-wide text-muted">
-                Status
-              </div>
-              <div className="mt-1">
-                <Badge tone="accent">Extracted</Badge>
-              </div>
+            <div className="flex flex-wrap gap-2">
+              <Badge tone="accent">Extracted</Badge>
+              <Badge tone={reviewStatusTone(selected.reviewStatus)}>
+                {reviewStatusLabel(selected.reviewStatus)}
+              </Badge>
+              {selected.businessReadiness ? (
+                <Badge>Business: {selected.businessReadiness}</Badge>
+              ) : null}
+              {selected.functionalCompleteness ? (
+                <Badge>Functional: {selected.functionalCompleteness}</Badge>
+              ) : null}
+              {selected.readinessScore != null ? (
+                <Badge tone="accent">
+                  Readiness {selected.readinessScore}%
+                </Badge>
+              ) : null}
             </div>
             <div>
               <div className="text-xs uppercase tracking-wide text-muted">
@@ -621,7 +1167,7 @@ export default function ProjectWorkspacePage() {
             </div>
             <div>
               <div className="text-xs uppercase tracking-wide text-muted">
-                Business Rules
+                Business Rules (from extraction)
               </div>
               <p className="mt-1 whitespace-pre-wrap text-muted">
                 {emptyField(selected.businessRules)}
@@ -660,11 +1206,195 @@ export default function ProjectWorkspacePage() {
               </div>
             ) : null}
           </div>
+
+          {selected.businessReview ? (
+            <div className="space-y-3 border-t border-border pt-4 text-sm">
+              <h3 className="font-medium">Business Review</h3>
+              {selected.businessReview.intent ? (
+                <div className="flex flex-wrap items-start gap-2">
+                  <Badge
+                    tone={factStatusTone(selected.businessReview.intent.status)}
+                  >
+                    {selected.businessReview.intent.status}
+                  </Badge>
+                  <span>
+                    <span className="text-muted">Intent:</span>{' '}
+                    {selected.businessReview.intent.text}
+                  </span>
+                </div>
+              ) : null}
+              <FactList title="Actors" facts={selected.businessReview.actors} />
+              <FactList title="Rules" facts={selected.businessReview.rules} />
+              <FactList
+                title="Preconditions"
+                facts={selected.businessReview.preconditions}
+              />
+              <FactList title="Flow" facts={selected.businessReview.flow} />
+              <FactList title="States" facts={selected.businessReview.states} />
+              <FactList
+                title="Transitions"
+                facts={selected.businessReview.transitions}
+              />
+              <FactList
+                title="Exceptions"
+                facts={selected.businessReview.exceptions}
+              />
+              <FactList
+                title="Outcomes"
+                facts={selected.businessReview.outcomes}
+              />
+              <FactList
+                title="Permissions"
+                facts={selected.businessReview.permissions}
+              />
+              <FactList
+                title="Dependencies"
+                facts={selected.businessReview.dependencies}
+              />
+            </div>
+          ) : null}
+
+          {selected.functionalReview ? (
+            <div className="space-y-3 border-t border-border pt-4 text-sm">
+              <h3 className="font-medium">Functional Review</h3>
+              <FactList
+                title="Inputs"
+                facts={selected.functionalReview.inputs}
+              />
+              <FactList
+                title="Outputs"
+                facts={selected.functionalReview.outputs}
+              />
+              <FactList
+                title="Validations"
+                facts={selected.functionalReview.validations}
+              />
+              <FactList
+                title="Success behavior"
+                facts={selected.functionalReview.successBehavior}
+              />
+              <FactList
+                title="Failure behavior"
+                facts={selected.functionalReview.failureBehavior}
+              />
+              <FactList
+                title="Error handling"
+                facts={selected.functionalReview.errorHandling}
+              />
+              <FactList
+                title="Navigation"
+                facts={selected.functionalReview.navigation}
+              />
+              <FactList
+                title="Data handling"
+                facts={selected.functionalReview.dataHandling}
+              />
+            </div>
+          ) : null}
+
+          <div className="space-y-3 border-t border-border pt-4 text-sm">
+            <h3 className="font-medium">Questions</h3>
+            {!selected.questions?.length ? (
+              <p className="text-muted">
+                {selected.reviewedAt
+                  ? 'No open clarification questions.'
+                  : 'Run Business Review to generate clarifying questions.'}
+              </p>
+            ) : (
+              <ul className="space-y-4">
+                {[...selected.questions]
+                  .sort((a, b) => {
+                    const biz =
+                      Number(isBusinessQuestionCategory(b.category)) -
+                      Number(isBusinessQuestionCategory(a.category));
+                    if (biz !== 0) return biz;
+                    const rank = (p: string) =>
+                      p === 'CRITICAL'
+                        ? 0
+                        : p === 'HIGH'
+                          ? 1
+                          : p === 'MEDIUM'
+                            ? 2
+                            : 3;
+                    return rank(a.priority) - rank(b.priority);
+                  })
+                  .map((q) => (
+                    <li
+                      key={q.id}
+                      className="rounded-lg border border-border bg-bg-elevated/40 p-3"
+                    >
+                      <div className="flex flex-wrap gap-2">
+                        <Badge tone="accent">{q.questionKey}</Badge>
+                        <Badge
+                          tone={
+                            q.priority === 'CRITICAL'
+                              ? 'danger'
+                              : q.priority === 'HIGH'
+                                ? 'warning'
+                                : 'accent'
+                          }
+                        >
+                          {q.priority}
+                        </Badge>
+                        <Badge>{q.category}</Badge>
+                        <Badge
+                          tone={q.status === 'ANSWERED' ? 'success' : undefined}
+                        >
+                          {q.status}
+                        </Badge>
+                        {q.blocking ? <Badge tone="danger">Blocking</Badge> : null}
+                      </div>
+                      <p className="mt-2 font-medium">{q.question}</p>
+                      <p className="mt-1 text-xs text-muted">{q.reason}</p>
+                      {q.status === 'ANSWERED' && q.answer ? (
+                        <p className="mt-2 rounded-md border border-success/30 bg-success/10 p-2">
+                          Answer: {q.answer}
+                        </p>
+                      ) : null}
+                      {q.status === 'OPEN' ? (
+                        <div className="mt-3 space-y-2">
+                          <textarea
+                            className="min-h-[72px] w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm"
+                            placeholder="Your answer…"
+                            value={answerDrafts[q.id] ?? ''}
+                            onChange={(e) =>
+                              setAnswerDrafts((prev) => ({
+                                ...prev,
+                                [q.id]: e.target.value,
+                              }))
+                            }
+                          />
+                          <Button
+                            size="sm"
+                            disabled={
+                              answerMutation.isPending ||
+                              !(answerDrafts[q.id] ?? '').trim()
+                            }
+                            onClick={() =>
+                              answerMutation.mutate({
+                                questionId: q.id,
+                                answer: (answerDrafts[q.id] ?? '').trim(),
+                              })
+                            }
+                          >
+                            Submit answer
+                          </Button>
+                        </div>
+                      ) : null}
+                    </li>
+                  ))}
+              </ul>
+            )}
+            {answerError ? (
+              <p className="text-sm text-danger">{answerError}</p>
+            ) : null}
+          </div>
         </Card>
       ) : null}
 
       {tab !== 'overview' &&
       !extractMutation.isPending &&
+      !reviewMutation.isPending &&
       (view === 'list' || (view === 'detail' && !selected)) ? (
         <Card className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -683,6 +1413,23 @@ export default function ProjectWorkspacePage() {
               >
                 Source
               </Button>
+              {(reviewSummaryQuery.data?.reviewed ?? 0) > 0 ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setView('review-dashboard')}
+                >
+                  Review Dashboard
+                </Button>
+              ) : null}
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => reviewMutation.mutate()}
+                disabled={extracted.length === 0 || reviewMutation.isPending}
+              >
+                Start Business Review
+              </Button>
               <Button
                 size="sm"
                 onClick={() => extractMutation.mutate()}
@@ -692,6 +1439,14 @@ export default function ProjectWorkspacePage() {
               </Button>
             </div>
           </div>
+
+          {(conflictsQuery.data?.length ?? 0) > 0 ? (
+            <div className="rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm">
+              {conflictsQuery.data!.length} open review conflict
+              {conflictsQuery.data!.length === 1 ? '' : 's'} — open the review
+              dashboard for details.
+            </div>
+          ) : null}
 
           <div className="flex flex-wrap gap-3">
             <div className="min-w-[200px] flex-1">
@@ -720,14 +1475,15 @@ export default function ProjectWorkspacePage() {
                   <th className="px-3 py-2 font-medium">ID</th>
                   <th className="px-3 py-2 font-medium">Requirement</th>
                   <th className="px-3 py-2 font-medium">Type</th>
-                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">Review</th>
+                  <th className="px-3 py-2 font-medium">Open C/H</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={4}
+                      colSpan={5}
                       className="px-3 py-6 text-center text-muted"
                     >
                       No extracted requirements yet.
@@ -753,7 +1509,14 @@ export default function ProjectWorkspacePage() {
                       </td>
                       <td className="px-3 py-2">{typeLabel(r.type)}</td>
                       <td className="px-3 py-2">
-                        <Badge tone="accent">Extracted</Badge>
+                        <Badge tone={reviewStatusTone(r.reviewStatus)}>
+                          {reviewStatusLabel(r.reviewStatus)}
+                        </Badge>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs">
+                        {(r.criticalOpenCount ?? 0) + (r.highOpenCount ?? 0) > 0
+                          ? `${r.criticalOpenCount ?? 0}/${r.highOpenCount ?? 0}`
+                          : '—'}
                       </td>
                     </tr>
                   ))
@@ -761,6 +1524,9 @@ export default function ProjectWorkspacePage() {
               </tbody>
             </table>
           </div>
+          {reviewError ? (
+            <p className="text-sm text-danger">{reviewError}</p>
+          ) : null}
         </Card>
       ) : null}
 

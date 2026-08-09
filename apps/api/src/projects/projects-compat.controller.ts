@@ -16,8 +16,10 @@ import { CurrentUser } from '../auth/auth.decorator';
 import { SessionAuthGuard } from '../auth/auth.guard';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
+import { answerReviewQuestionSchema } from '@qaforge/shared';
 import { ProjectsService } from './projects.service';
 import { RequirementExtractionService } from './requirement-extraction.service';
+import { RequirementReviewService } from './requirement-review.service';
 
 const fileUpload = FileInterceptor('file', {
   storage: memoryStorage(),
@@ -34,6 +36,7 @@ export class ProjectsCompatController {
   constructor(
     private readonly projects: ProjectsService,
     private readonly extraction: RequirementExtractionService,
+    private readonly review: RequirementReviewService,
     private readonly orgs: OrgsService,
   ) {}
 
@@ -133,6 +136,70 @@ export class ProjectsCompatController {
   ) {
     const orgId = await this.defaultOrgId(user.id);
     return this.extraction.getExtractionDebug(user.id, orgId, projectId);
+  }
+
+  @Post(':projectId/review-requirements')
+  async reviewRequirements(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.review.reviewAll(user, orgId, projectId);
+  }
+
+  @Post(':projectId/extracted-requirements/:requirementKey/review')
+  async reviewOne(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+    @Param('requirementKey') requirementKey: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.review.reviewOne(user, orgId, projectId, requirementKey);
+  }
+
+  @Get(':projectId/review-summary')
+  async reviewSummary(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.review.getSummary(user.id, orgId, projectId);
+  }
+
+  @Get(':projectId/review-questions')
+  async reviewQuestions(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.review.listQuestions(user.id, orgId, projectId);
+  }
+
+  @Post(':projectId/review-questions/:questionId/answer')
+  async answerReviewQuestion(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+    @Param('questionId') questionId: string,
+    @Body() body: unknown,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    const parsed = answerReviewQuestionSchema.parse(body);
+    return this.review.answerQuestion(
+      user,
+      orgId,
+      projectId,
+      questionId,
+      parsed.answer,
+    );
+  }
+
+  @Get(':projectId/review-conflicts')
+  async reviewConflicts(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.review.listConflicts(user.id, orgId, projectId);
   }
 
   @Get(':projectId')

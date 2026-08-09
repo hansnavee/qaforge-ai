@@ -61,12 +61,32 @@ export class RequirementExtractionService {
     dependencies: unknown;
     supportingInformation?: unknown;
     possibleDuplicateOf: string | null;
+    reviewStatus?: string | null;
+    businessReadiness?: string | null;
+    functionalCompleteness?: string | null;
+    businessReview?: unknown;
+    functionalReview?: unknown;
+    readinessScore?: number | null;
+    reviewedAt?: Date | null;
     createdAt: Date;
     updatedAt: Date;
     sourceDocument?: { filename: string } | null;
+    questions?: Array<{
+      id: string;
+      questionKey: string;
+      category: string;
+      priority: string;
+      question: string;
+      reason: string;
+      blocking: boolean;
+      status: string;
+      answer: string | null;
+      answeredAt: Date | null;
+    }>;
   }) {
     const asStringArray = (v: unknown): string[] =>
       Array.isArray(v) ? v.map(String) : [];
+    const openQuestions = (row.questions ?? []).filter((q) => q.status === 'OPEN');
 
     return {
       id: row.id,
@@ -86,6 +106,29 @@ export class RequirementExtractionService {
       dependencies: asStringArray(row.dependencies),
       supportingInformation: asStringArray(row.supportingInformation),
       possibleDuplicateOf: row.possibleDuplicateOf,
+      reviewStatus: row.reviewStatus ?? null,
+      businessReadiness: row.businessReadiness ?? null,
+      functionalCompleteness: row.functionalCompleteness ?? null,
+      businessReview: row.businessReview ?? null,
+      functionalReview: row.functionalReview ?? null,
+      readinessScore: row.readinessScore ?? null,
+      reviewedAt: row.reviewedAt ?? null,
+      openQuestionCount: openQuestions.length,
+      criticalOpenCount: openQuestions.filter((q) => q.priority === 'CRITICAL')
+        .length,
+      highOpenCount: openQuestions.filter((q) => q.priority === 'HIGH').length,
+      questions: (row.questions ?? []).map((q) => ({
+        id: q.id,
+        questionKey: q.questionKey,
+        category: q.category,
+        priority: q.priority,
+        question: q.question,
+        reason: q.reason,
+        blocking: q.blocking,
+        status: q.status,
+        answer: q.answer,
+        answeredAt: q.answeredAt,
+      })),
       sourceDocumentName: row.sourceDocument?.filename ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
@@ -96,7 +139,10 @@ export class RequirementExtractionService {
     await this.requireProject(userId, orgId, projectId);
     const rows = await prisma.requirement.findMany({
       where: { projectId },
-      include: { sourceDocument: { select: { filename: true } } },
+      include: {
+        sourceDocument: { select: { filename: true } },
+        questions: true,
+      },
       orderBy: { requirementKey: 'asc' },
     });
     return rows.map((r) => this.mapRequirement(r));
@@ -114,7 +160,10 @@ export class RequirementExtractionService {
       where: {
         projectId_requirementKey: { projectId, requirementKey: key },
       },
-      include: { sourceDocument: { select: { filename: true } } },
+      include: {
+        sourceDocument: { select: { filename: true } },
+        questions: { orderBy: { questionKey: 'asc' } },
+      },
     });
     if (!row) throw new NotFoundException('Requirement not found');
     return this.mapRequirement(row);

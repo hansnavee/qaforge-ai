@@ -106,6 +106,8 @@ model Project {
   organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   requirements    RequirementDocument[]
   extractedRequirements Requirement[]
+  requirementQuestions RequirementQuestion[]
+  requirementConflicts RequirementConflict[]
   executions      Execution[]
   requirementSnapshots ProjectRequirementSnapshot[]
   clarificationRounds  ClarificationRound[]
@@ -137,7 +139,8 @@ model RequirementDocument {
 }
 
 /// Structured requirements extracted from an original document (Piece 2+).
-/// Status values may grow: DRAFT | EXTRACTED | ANALYZING | CLARIFICATION_REQUIRED | ...
+/// status: EXTRACTED | ...
+/// reviewStatus: BLOCKED | NEEDS_CLARIFICATION | REVIEW_RECOMMENDED | READY_FOR_TEST_DESIGN
 model Requirement {
   id                   String   @id @default(cuid())
   projectId            String
@@ -156,14 +159,72 @@ model Requirement {
   dependencies         Json?
   supportingInformation Json?
   possibleDuplicateOf  String?
+  /// BLOCKED | NEEDS_CLARIFICATION | REVIEW_RECOMMENDED | READY_FOR_TEST_DESIGN
+  reviewStatus         String?
+  /// READY | NEEDS_CLARIFICATION | BLOCKED
+  businessReadiness    String?
+  /// COMPLETE | PARTIAL | INCOMPLETE
+  functionalCompleteness String?
+  businessReview       Json?
+  functionalReview     Json?
+  readinessScore       Int?
+  reviewedAt           DateTime?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @default(now()) @updatedAt
   project              Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   sourceDocument       RequirementDocument? @relation(fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+  questions            RequirementQuestion[]
+  conflictsAsA         RequirementConflict[] @relation("ConflictA")
+  conflictsAsB         RequirementConflict[] @relation("ConflictB")
 
   @@unique([projectId, requirementKey])
   @@index([projectId])
   @@index([sourceDocumentId])
+  @@index([reviewStatus])
+}
+
+/// Clarification questions from Business + Functional review (not STLC ClarificationRound).
+model RequirementQuestion {
+  id             String   @id @default(cuid())
+  projectId      String
+  requirementId  String
+  questionKey    String
+  category       String
+  priority       String   // CRITICAL | HIGH | MEDIUM | LOW
+  question       String   @db.Text
+  reason         String   @db.Text
+  blocking       Boolean  @default(false)
+  status         String   @default("OPEN") // OPEN | ANSWERED | DISMISSED
+  answer         String?  @db.Text
+  interpretation Json?
+  answeredAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @default(now()) @updatedAt
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  requirement    Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, questionKey])
+  @@index([projectId])
+  @@index([requirementId])
+  @@index([status])
+}
+
+model RequirementConflict {
+  id              String   @id @default(cuid())
+  projectId       String
+  requirementAId  String
+  requirementBId  String
+  summary         String
+  detail          String   @db.Text
+  status          String   @default("OPEN") // OPEN | RESOLVED
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  requirementA    Requirement @relation("ConflictA", fields: [requirementAId], references: [id], onDelete: Cascade)
+  requirementB    Requirement @relation("ConflictB", fields: [requirementBId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([status])
 }
 
 model ProjectRequirementSnapshot {

@@ -117,3 +117,145 @@ export const clarifyExecutionSchema = z.object({
 });
 
 export type ClarifyExecutionInput = z.infer<typeof clarifyExecutionSchema>;
+
+export const reviewQuestionPrioritySchema = z.enum([
+  'CRITICAL',
+  'HIGH',
+  'MEDIUM',
+  'LOW',
+]);
+
+export const reviewQuestionCategorySchema = z.enum([
+  'BUSINESS_RULE',
+  'BUSINESS_FLOW',
+  'ACTOR',
+  'ROLE_PERMISSION',
+  'PRECONDITION',
+  'STATE',
+  'STATE_TRANSITION',
+  'EXCEPTION',
+  'BUSINESS_OUTCOME',
+  'FUNCTIONAL_BEHAVIOR',
+  'VALIDATION',
+  'ERROR_HANDLING',
+  'INPUT',
+  'OUTPUT',
+  'NAVIGATION',
+  'DATA',
+]);
+
+export const answerReviewQuestionSchema = z.object({
+  answer: z.string().trim().min(1),
+});
+
+export type AnswerReviewQuestionInput = z.infer<
+  typeof answerReviewQuestionSchema
+>;
+
+export const reviewFactStatusSchema = z.enum([
+  'CONFIRMED',
+  'INFERRED',
+  'MISSING',
+  'DERIVED_FROM_USER_ANSWER',
+]);
+
+export const reviewFactSchema = z.object({
+  text: z.string(),
+  status: reviewFactStatusSchema,
+  source: z.string().nullish(),
+});
+
+export const businessReviewPayloadSchema = z.object({
+  intent: reviewFactSchema.nullable(),
+  actors: z.array(reviewFactSchema),
+  rules: z.array(reviewFactSchema),
+  preconditions: z.array(reviewFactSchema),
+  flow: z.array(reviewFactSchema),
+  states: z.array(reviewFactSchema),
+  transitions: z.array(reviewFactSchema),
+  exceptions: z.array(reviewFactSchema),
+  outcomes: z.array(reviewFactSchema),
+  dependencies: z.array(reviewFactSchema),
+  permissions: z.array(reviewFactSchema),
+});
+
+export const functionalReviewPayloadSchema = z.object({
+  inputs: z.array(reviewFactSchema),
+  outputs: z.array(reviewFactSchema),
+  validations: z.array(reviewFactSchema),
+  successBehavior: z.array(reviewFactSchema),
+  failureBehavior: z.array(reviewFactSchema),
+  errorHandling: z.array(reviewFactSchema),
+  navigation: z.array(reviewFactSchema),
+  dataHandling: z.array(reviewFactSchema),
+});
+
+export const requirementReviewStatusSchema = z.enum([
+  'BLOCKED',
+  'NEEDS_CLARIFICATION',
+  'REVIEW_RECOMMENDED',
+  'READY_FOR_TEST_DESIGN',
+]);
+
+export const reviewQuestionSchema = z.object({
+  id: z.string(),
+  questionKey: z.string(),
+  category: reviewQuestionCategorySchema,
+  priority: reviewQuestionPrioritySchema,
+  question: z.string(),
+  reason: z.string(),
+  blocking: z.boolean(),
+  status: z.enum(['OPEN', 'ANSWERED', 'DISMISSED']),
+  answer: z.string().nullable().optional(),
+  answeredAt: z.union([z.string(), z.date()]).nullable().optional(),
+});
+
+export const reviewConflictSchema = z.object({
+  id: z.string(),
+  summary: z.string(),
+  detail: z.string(),
+  status: z.enum(['OPEN', 'RESOLVED']),
+  requirementA: z.object({
+    requirementKey: z.string(),
+    title: z.string(),
+  }),
+  requirementB: z.object({
+    requirementKey: z.string(),
+    title: z.string(),
+  }),
+  createdAt: z.union([z.string(), z.date()]).optional(),
+});
+
+export const reviewDashboardSummarySchema = z.object({
+  total: z.number(),
+  reviewed: z.number(),
+  business: z.object({
+    ready: z.number(),
+    needsClarification: z.number(),
+    blocked: z.number(),
+  }),
+  functional: z.object({
+    complete: z.number(),
+    partial: z.number(),
+    incomplete: z.number(),
+  }),
+  questions: z.object({
+    critical: z.number(),
+    high: z.number(),
+    medium: z.number(),
+    low: z.number(),
+  }),
+  openConflicts: z.number(),
+  businessReadinessPct: z.number(),
+  functionalReadinessPct: z.number(),
+  byReviewStatus: z.object({
+    blocked: z.number(),
+    needsClarification: z.number(),
+    reviewRecommended: z.number(),
+    readyForTestDesign: z.number(),
+  }),
+});
+
+export type ReviewDashboardSummary = z.infer<
+  typeof reviewDashboardSummarySchema
+>;
