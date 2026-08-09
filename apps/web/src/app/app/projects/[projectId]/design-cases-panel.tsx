@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { api } from '@/lib/api';
 import { getDefaultOrgId } from '@/lib/org';
 import { Button } from '@/components/Button';
@@ -41,6 +41,7 @@ export function DesignCasesPanel({
 }) {
   const qc = useQueryClient();
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [draft, setDraft] = useState({
     externalId: '',
     module: '',
@@ -193,56 +194,113 @@ export function DesignCasesPanel({
               </tr>
             </thead>
             <tbody>
-              {cases.map((row) => (
-                <tr key={row.id} className="border-t border-border align-top">
-                  <td className="px-3 py-2 font-mono text-xs">
-                    {row.externalId}
-                  </td>
-                  <td className="px-3 py-2 text-muted">{row.module ?? '—'}</td>
-                  <td className="px-3 py-2">
-                    <p className="font-medium text-fg">{row.scenario}</p>
-                    <p className="mt-1 line-clamp-2 text-xs text-muted">
-                      {row.expected}
-                    </p>
-                  </td>
-                  <td className="px-3 py-2 text-muted">
-                    {row.priority ?? '—'}
-                  </td>
-                  <td className="px-3 py-2 text-muted">{row.type ?? '—'}</td>
-                  {canEdit ? (
-                    <td className="px-3 py-2">
-                      <div className="flex flex-wrap gap-1">
-                        <Button
+              {cases.map((row) => {
+                const expanded = expandedId === row.id;
+                const steps = stepsToText(row.steps);
+                return (
+                  <Fragment key={row.id}>
+                    <tr className="border-t border-border align-top">
+                      <td className="px-3 py-2 font-mono text-xs">
+                        {row.externalId}
+                      </td>
+                      <td className="px-3 py-2 text-muted">
+                        {row.module ?? '—'}
+                      </td>
+                      <td className="px-3 py-2">
+                        <button
                           type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => startEdit(row)}
-                          disabled={showForm}
+                          className="text-left"
+                          onClick={() =>
+                            setExpandedId((id) =>
+                              id === row.id ? null : row.id,
+                            )
+                          }
                         >
-                          Edit
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => {
-                            if (
-                              window.confirm(
-                                `Delete ${row.externalId}? This cannot be undone.`,
-                              )
-                            ) {
-                              deleteMutation.mutate(row.id);
-                            }
-                          }}
-                          disabled={deleteMutation.isPending}
+                          <p className="font-medium text-fg">{row.scenario}</p>
+                          <p className="mt-1 line-clamp-2 text-xs text-muted">
+                            {row.expected}
+                          </p>
+                          <p className="mt-1 text-xs text-accent">
+                            {expanded ? 'Hide full details' : 'Show full details'}
+                          </p>
+                        </button>
+                      </td>
+                      <td className="px-3 py-2 text-muted">
+                        {row.priority ?? '—'}
+                      </td>
+                      <td className="px-3 py-2 text-muted">{row.type ?? '—'}</td>
+                      {canEdit ? (
+                        <td className="px-3 py-2">
+                          <div className="flex flex-wrap gap-1">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => startEdit(row)}
+                              disabled={showForm}
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => {
+                                if (
+                                  window.confirm(
+                                    `Delete ${row.externalId}? This cannot be undone.`,
+                                  )
+                                ) {
+                                  deleteMutation.mutate(row.id);
+                                }
+                              }}
+                              disabled={deleteMutation.isPending}
+                            >
+                              Delete
+                            </Button>
+                          </div>
+                        </td>
+                      ) : null}
+                    </tr>
+                    {expanded ? (
+                      <tr className="border-t border-border bg-panel/30">
+                        <td
+                          colSpan={canEdit ? 6 : 5}
+                          className="space-y-2 px-3 py-3 text-sm"
                         >
-                          Delete
-                        </Button>
-                      </div>
-                    </td>
-                  ) : null}
-                </tr>
-              ))}
+                          <div>
+                            <p className="text-xs font-medium uppercase text-muted">
+                              Preconditions
+                            </p>
+                            <p className="mt-1 text-fg">
+                              {row.preconditions?.trim() || '—'}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs font-medium uppercase text-muted">
+                              Steps
+                            </p>
+                            <ol className="mt-1 list-decimal space-y-1 pl-5 text-fg">
+                              {(steps
+                                ? steps.split(/\r?\n/).filter(Boolean)
+                                : []
+                              ).map((s) => (
+                                <li key={s}>{s.replace(/^\d+\.\s*/, '')}</li>
+                              ))}
+                            </ol>
+                          </div>
+                          <div>
+                            <p className="text-xs font-medium uppercase text-muted">
+                              Expected result
+                            </p>
+                            <p className="mt-1 text-fg">{row.expected}</p>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

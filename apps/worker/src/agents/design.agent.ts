@@ -49,15 +49,29 @@ export const designAgent: AgentHandler<
 
     try {
       const llm = await ctx.llm.complete({
-        system:
-          'You are a QA test designer. Expand test cases with realistic test data. Return JSON only.',
-        prompt: `App URL: ${input.appUrl}\nStrategy: ${JSON.stringify(strategy)}\nRequirements: ${JSON.stringify(requirements)}\nExisting cases: ${JSON.stringify(cases)}\n\nReturn JSON: { testCases: [{id,module,scenario,preconditions,steps:string[],expected,priority,severity,type,automationCandidate,testData:Record<string,string>}] }`,
+        system: `You are a Senior QA Test Design agent.
+Rewrite/expand every case into a fully documented executable test case.
+Required per case:
+- module, scenario (business outcome)
+- preconditions (>= 1 sentence: data, role, page state)
+- steps: 4+ concrete UI steps
+- expected: observable pass criteria
+- priority, severity, type, testingLevel (SMOKE|SANITY|FUNCTIONAL|NEGATIVE)
+- testData: realistic values for this app (Sauce Demo: standard_user / secret_sauce when applicable)
+No stub one-liners.`,
+        prompt: `App URL: ${input.appUrl}
+Strategy: ${JSON.stringify(strategy)?.slice(0, 6000)}
+Requirements: ${JSON.stringify(requirements)?.slice(0, 10000)}
+Draft cases: ${JSON.stringify(cases)}
+
+Return JSON only:
+{ "testCases": [{ "id","module","scenario","preconditions","steps":string[],"expected","priority","severity","type","testingLevel","automationCandidate":boolean,"testData":Record<string,string> }] }`,
         json: true,
-        model: 'fast',
+        model: 'reasoning',
       });
       const parsed = JSON.parse(llm.text) as { testCases?: DesignedCase[] };
       if (Array.isArray(parsed.testCases) && parsed.testCases.length) {
-        cases = parsed.testCases.map((tc, i) => ({
+        const next = parsed.testCases.map((tc, i) => ({
           id: tc.id || `TC-${String(i + 1).padStart(3, '0')}`,
           module: tc.module || 'General',
           scenario: tc.scenario || `Scenario ${i + 1}`,
@@ -73,6 +87,15 @@ export const designAgent: AgentHandler<
             password: '<<manual>>',
           },
         }));
+        const richEnough = next.filter(
+          (tc) =>
+            tc.steps.length >= 3 &&
+            tc.preconditions.length >= 20 &&
+            tc.expected.length >= 20,
+        );
+        if (richEnough.length >= Math.min(3, next.length)) {
+          cases = next;
+        }
       }
     } catch {
       /* keep heuristic enrichment */

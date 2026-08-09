@@ -53,14 +53,19 @@ function defaultCases(appUrl: string): TestCase[] {
     {
       id: 'TC-001',
       module: 'Authentication',
-      scenario: 'Successful login path',
-      preconditions: 'Valid user exists',
+      scenario: 'Valid user can log in and reach inventory',
+      preconditions:
+        `App URL ${appUrl} is reachable. Standard user credentials are available (e.g. standard_user). Browser cookies/session cleared.`,
       steps: [
-        `Navigate to ${appUrl}`,
-        'Enter valid credentials (manual)',
-        'Submit login',
+        `Open ${appUrl} in a supported browser`,
+        'Verify Login page shows Username, Password, and Login controls',
+        'Enter a valid username in the Username field',
+        'Enter the matching valid password in the Password field',
+        'Click the Login button',
+        'Wait for navigation to complete',
       ],
-      expected: 'User lands on authenticated home',
+      expected:
+        'User is authenticated, URL changes to the inventory/products page, and product catalog is visible without an error banner.',
       priority: 'P0',
       severity: 'critical',
       type: 'functional',
@@ -68,29 +73,52 @@ function defaultCases(appUrl: string): TestCase[] {
     },
     {
       id: 'TC-002',
-      module: 'Navigation',
-      scenario: 'Primary navigation reachable',
-      preconditions: 'Session available',
-      steps: ['Open home', 'Click each primary nav item'],
-      expected: 'Each target loads without error',
+      module: 'Authentication',
+      scenario: 'Invalid password shows login error and blocks access',
+      preconditions: `Login page at ${appUrl} is available. A known username exists but password used is incorrect.`,
+      steps: [
+        `Open ${appUrl}`,
+        'Enter a valid username',
+        'Enter an incorrect password',
+        'Click Login',
+      ],
+      expected:
+        'User remains on the login page, an error message is displayed, and inventory/products are not accessible.',
       priority: 'P0',
       severity: 'high',
-      type: 'smoke',
+      type: 'negative',
       automationCandidate: true,
     },
     {
       id: 'TC-003',
-      module: 'Accessibility',
-      scenario: 'Keyboard operable login',
-      preconditions: 'Login page available',
-      steps: ['Tab through controls', 'Activate submit with Enter'],
-      expected: 'Focus order logical; submit keyboard operable',
-      priority: 'P1',
-      severity: 'medium',
-      type: 'accessibility',
+      module: 'Cart',
+      scenario: 'Add a product to cart and verify cart badge/count',
+      preconditions: 'User is logged in and inventory page lists at least one product.',
+      steps: [
+        'On inventory, locate the first product card',
+        'Note the product name',
+        'Click Add to cart for that product',
+        'Observe the cart icon/badge in the header',
+        'Open the cart page',
+      ],
+      expected:
+        'Cart badge increments to 1 (or previous+1). Cart page lists the selected product with correct name and quantity.',
+      priority: 'P0',
+      severity: 'high',
+      type: 'functional',
       automationCandidate: true,
     },
   ];
+}
+
+function isDetailedCase(tc: TestCase): boolean {
+  return (
+    tc.preconditions.trim().length >= 20 &&
+    tc.steps.length >= 3 &&
+    tc.steps.every((s) => s.trim().length >= 8) &&
+    tc.expected.trim().length >= 20 &&
+    tc.scenario.trim().length >= 10
+  );
 }
 
 function normalizeCases(raw: unknown, appUrl: string): TestCase[] {
@@ -103,7 +131,7 @@ function normalizeCases(raw: unknown, appUrl: string): TestCase[] {
 
   if (!Array.isArray(arr) || arr.length === 0) return defaultCases(appUrl);
 
-  return arr.map((item, i) => {
+  const normalized = arr.map((item, i) => {
     const tc = (item ?? {}) as Record<string, unknown>;
     return {
       id: String(tc.id ?? `TC-${String(i + 1).padStart(3, '0')}`),
@@ -122,6 +150,12 @@ function normalizeCases(raw: unknown, appUrl: string): TestCase[] {
       ),
     };
   });
+
+  const detailed = normalized.filter(isDetailedCase);
+  // Prefer fully specified cases; if LLM returned thin stubs, use detailed defaults.
+  return detailed.length >= Math.min(3, normalized.length)
+    ? normalized.map((tc, i) => (isDetailedCase(tc) ? tc : defaultCases(appUrl)[i % 3]!))
+    : defaultCases(appUrl);
 }
 
 export const testcaseAgent: AgentHandler<{ appUrl: string }, unknown> = {
@@ -136,9 +170,22 @@ export const testcaseAgent: AgentHandler<{ appUrl: string }, unknown> = {
     let raw: unknown;
     try {
       const llm = await ctx.llm.complete({
-        system:
-          'Generate professional software test cases as JSON with full fields.',
-        prompt: `App: ${input.appUrl}\nRequirements: ${JSON.stringify(requirements)}\nMap: ${JSON.stringify(map)?.slice(0, 8000)}\nFunctional: ${JSON.stringify(functional)?.slice(0, 4000)}\n\nReturn JSON: { testCases: [{ id, module, scenario, preconditions, steps: string[], expected, priority, severity, type, automationCandidate: boolean }] }`,
+        system: `You are a Senior QA writing executable manual test cases for documentation and handoff.
+Each case MUST include full detail a tester can execute without guessing:
+- clear scenario title
+- preconditions (environment, data, login state)
+- 4+ numbered atomic steps (UI action + where)
+- observable expected result
+- priority (P0-P2), severity, type (smoke|sanity|functional|negative|boundary|accessibility)
+Do not return one-line stubs.`,
+        prompt: `App: ${input.appUrl}
+Requirements: ${JSON.stringify(requirements)?.slice(0, 12000)}
+Map: ${JSON.stringify(map)?.slice(0, 8000)}
+Functional: ${JSON.stringify(functional)?.slice(0, 4000)}
+
+Cover happy path, negative, and at least one CRUD/cart or core feature from requirements.
+Return JSON only:
+{ "testCases": [{ "id": "TC-001", "module", "scenario", "preconditions", "steps": ["1. ...","2. ..."], "expected", "priority", "severity", "type", "automationCandidate": true }] }`,
         json: true,
         model: 'reasoning',
       });
