@@ -194,9 +194,10 @@ async function main() {
 
   const gates = [
     {
-      wait: ['AWAITING_CLARIFICATION', 'AWAITING_PLAN_APPROVAL'],
+      // Strategy + design run continuously; only clarify may pause before Design.
+      wait: ['AWAITING_CLARIFICATION', 'AWAITING_DESIGN_APPROVAL'],
       path: null,
-      label: 'pre-plan',
+      label: 'pre-design',
       resolve: async (status) => {
         if (status === 'AWAITING_CLARIFICATION') {
           await postGate(
@@ -204,19 +205,14 @@ async function main() {
             'clarify-skip',
             JSON.stringify({ skip: true, answers: {} }),
           );
-          return false; // keep waiting for plan approval
+          return false; // keep waiting for design approval
         }
         await postGate(
-          `/api/v1/orgs/${ORG_ID}/executions/${executionId}/approve-test-plan`,
-          'approve-test-plan',
+          `/api/v1/orgs/${ORG_ID}/executions/${executionId}/approve-test-design`,
+          'approve-test-design',
         );
         return true;
       },
-    },
-    {
-      wait: ['AWAITING_DESIGN_APPROVAL'],
-      path: `/api/v1/orgs/${ORG_ID}/executions/${executionId}/approve-test-design`,
-      label: 'approve-test-design',
     },
     {
       wait: ['AWAITING_ENV_APPROVAL'],

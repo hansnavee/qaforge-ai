@@ -1,0 +1,33 @@
+# Sauce Demo — Simple Requirements (v1)
+
+App under test: https://www.saucedemo.com
+
+## Feature 1: Login
+
+### REQ-001: User Login
+As a shopper, I want to log in with a valid username and password so that I can see the product inventory.
+
+Acceptance Criteria:
+1. User can enter username and password on the login page.
+2. Valid credentials redirect the user to the inventory/products page.
+3. Invalid credentials show an error message and keep the user on the login page.
+4. Password field masks the entered characters.
+
+Business Rules:
+- Only registered users can log in.
+- Empty username or password must not allow login.
+
+## Feature 2: Add to Cart
+
+### REQ-002: Add Product to Cart
+As a logged-in shopper, I want to add a product from the inventory to my cart so that I can buy it later.
+
+Acceptance Criteria:
+1. Inventory page lists available products after login.
+2. Clicking "Add to cart" on a product adds that product to the cart.
+3. Cart badge/count increases after a successful add.
+4. User can open the cart and see the added product name and price.
+
+Business Rules:
+- User must be logged in before adding to cart.
+- Adding a product should update the cart visibly without page errors.

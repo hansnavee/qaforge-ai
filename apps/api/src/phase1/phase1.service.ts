@@ -12,8 +12,12 @@ import {
   ArtifactType,
   ExecutionStatus,
   Role,
+  buildPhaseDocState,
   clarifyExecutionSchema,
   evaluateRequirementsReadiness,
+  markPhaseAccepted,
+  upsertPhaseDoc,
+  type StlcPhaseDocsMap,
 } from '@qaforge/shared';
 import {
   buildZipPackage,
@@ -35,6 +39,19 @@ import {
 
 const updateRequirementsSchema = z.object({
   requirementText: z.string().min(1),
+});
+
+const testCaseWriteSchema = z.object({
+  externalId: z.string().min(1).max(64).optional(),
+  module: z.string().max(200).nullable().optional(),
+  scenario: z.string().min(1).max(2000).optional(),
+  preconditions: z.string().max(8000).nullable().optional(),
+  steps: z.array(z.string().max(2000)).max(100).optional(),
+  expected: z.string().min(1).max(8000).optional(),
+  priority: z.string().max(40).nullable().optional(),
+  severity: z.string().max(40).nullable().optional(),
+  type: z.string().max(80).nullable().optional(),
+  testData: z.record(z.string(), z.string()).nullable().optional(),
 });
 
 const STLC_RUN_MODES = ['STLC', 'PHASE1'] as const;
@@ -210,6 +227,44 @@ export class Phase1Service {
             'Cancelled — another STLC run is already in progress for this project',
         },
       });
+
+      // Legacy runs paused at plan approval: Start Planning continues into design.
+      if (existing.status === ExecutionStatus.AWAITING_PLAN_APPROVAL) {
+        const projectRow = await prisma.project.findUnique({
+          where: { id: projectId },
+          select: { stlcPhaseDocs: true },
+        });
+        const docs = markPhaseAccepted(
+          (projectRow?.stlcPhaseDocs ?? {}) as StlcPhaseDocsMap,
+          'PLANNING',
+        );
+        await prisma.project.update({
+          where: { id: projectId },
+          data: {
+            stlcPhaseDocs: docs as never,
+            testPlanApprovedAt: new Date(),
+            testPlanApprovedBy: user.id,
+            stlcStage: 'DESIGN',
+          },
+        });
+        const continued = await prisma.execution.update({
+          where: { id: existing.id },
+          data: {
+            status: ExecutionStatus.RUNNING,
+            phase: 'TEST_DESIGN',
+          },
+        });
+        await this.queue.publishContinue(existing.id);
+        await this.queue.publishExecutionEvent(existing.id, {
+          executionId: existing.id,
+          type: 'stlc.plan_approved',
+          phase: 'TEST_DESIGN',
+          message:
+            'Continuing into Test Design (strategy + cases from Start Planning)',
+          timestamp: new Date().toISOString(),
+        });
+        return continued;
+      }
 
       if (
         existing.status === ExecutionStatus.QUEUED ||
@@ -763,8 +818,204 @@ export class Phase1Service {
     await this.requireProject(userId, orgId, projectId);
     return prisma.testCase.findMany({
       where: { projectId },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: 'asc' },
     });
+  }
+
+  private async syncDesignDocFromCases(projectId: string) {
+    const [project, cases] = await Promise.all([
+      prisma.project.findUnique({
+        where: { id: projectId },
+        select: { stlcPhaseDocs: true },
+      }),
+      prisma.testCase.findMany({
+        where: { projectId },
+        orderBy: { createdAt: 'asc' },
+      }),
+    ]);
+    if (!project) return;
+
+    const docs = (project.stlcPhaseDocs ?? {}) as StlcPhaseDocsMap;
+    const previous = docs.DESIGN ?? null;
+    const crudOps = ['CREATE', 'READ', 'UPDATE', 'DELETE'] as const;
+    const mapped = cases.map((tc) => {
+      const steps = Array.isArray(tc.steps)
+        ? (tc.steps as unknown[]).map(String)
+        : [];
+      const blob = `${tc.scenario} ${tc.type ?? ''}`.toLowerCase();
+      return {
+        id: tc.externalId,
+        module: tc.module ?? 'General',
+        scenario: tc.scenario,
+        preconditions: tc.preconditions ?? '',
+        steps,
+        expected: tc.expected,
+        priority: tc.priority ?? 'P1',
+        severity: tc.severity ?? 'medium',
+        type: tc.type ?? 'functional',
+        testData:
+          tc.testData && typeof tc.testData === 'object'
+            ? (tc.testData as Record<string, string>)
+            : {},
+        testingLevel:
+          /smoke/i.test(tc.type ?? '') || /smoke/i.test(tc.scenario)
+            ? 'SMOKE'
+            : /sanity/i.test(tc.type ?? '')
+              ? 'SANITY'
+              : 'FUNCTIONAL',
+        crudHints: crudOps.filter((op) => new RegExp(op, 'i').test(blob)),
+      };
+    });
+    const crudMatrix = Array.from(
+      new Set(mapped.map((c) => c.module || 'General')),
+    ).map((feature) => {
+      const featureCases = mapped.filter(
+        (c) => (c.module || 'General') === feature,
+      );
+      const blob = featureCases
+        .map((c) => `${c.scenario} ${c.type ?? ''}`.toLowerCase())
+        .join(' ');
+      return {
+        feature,
+        CREATE:
+          /create|add|new|register|post/.test(blob) || featureCases.length > 0,
+        READ: /read|view|list|get|display|open/.test(blob) || true,
+        UPDATE: /update|edit|modify|change|put|patch/.test(blob),
+        DELETE: /delete|remove|cancel/.test(blob),
+        caseCount: featureCases.length,
+      };
+    });
+
+    const status =
+      previous?.status === 'ACCEPTED'
+        ? 'ACCEPTED'
+        : previous?.status === 'READY_FOR_REVIEW'
+          ? 'READY_FOR_REVIEW'
+          : cases.length
+            ? 'READY_FOR_REVIEW'
+            : previous?.status ?? 'READY_FOR_REVIEW';
+
+    const state = buildPhaseDocState({
+      phaseId: 'DESIGN',
+      status,
+      document: {
+        kind: 'TEST_DESIGN',
+        testCases: mapped,
+        crudMatrix,
+        testingLevelsCovered: [
+          'SMOKE',
+          'SANITY',
+          'FUNCTIONAL',
+          'INTEGRATION',
+          'REGRESSION',
+          'UAT_READY',
+        ],
+      },
+      validation: previous?.validation ?? {
+        passed: cases.length > 0,
+        blockers: cases.length ? [] : ['No test cases'],
+        summary: `${cases.length} case(s) — human edited`,
+      },
+      previous,
+      editedByHuman: true,
+    });
+    const next = upsertPhaseDoc(docs, state);
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { stlcPhaseDocs: next as never },
+    });
+  }
+
+  async createTestCase(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(testCaseWriteSchema, body);
+    if (!input.scenario?.trim() || !input.expected?.trim()) {
+      throw new BadRequestException('scenario and expected are required');
+    }
+    const count = await prisma.testCase.count({ where: { projectId } });
+    const externalId =
+      input.externalId?.trim() ||
+      `TC-${String(count + 1).padStart(3, '0')}`;
+    const created = await prisma.testCase.create({
+      data: {
+        projectId,
+        externalId,
+        module: input.module ?? 'General',
+        scenario: input.scenario.trim(),
+        preconditions: input.preconditions ?? '',
+        steps: (input.steps ?? ['Perform the scenario steps']) as never,
+        expected: input.expected.trim(),
+        priority: input.priority ?? 'P1',
+        severity: input.severity ?? 'medium',
+        type: input.type ?? 'functional',
+        testData: (input.testData ?? null) as never,
+      },
+    });
+    await this.syncDesignDocFromCases(projectId);
+    return created;
+  }
+
+  async updateTestCase(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    testCaseId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const existing = await prisma.testCase.findFirst({
+      where: { id: testCaseId, projectId },
+    });
+    if (!existing) throw new NotFoundException('Test case not found');
+    const input = parseBody(testCaseWriteSchema, body);
+    const updated = await prisma.testCase.update({
+      where: { id: testCaseId },
+      data: {
+        ...(input.externalId !== undefined
+          ? { externalId: input.externalId }
+          : {}),
+        ...(input.module !== undefined ? { module: input.module } : {}),
+        ...(input.scenario !== undefined
+          ? { scenario: input.scenario.trim() }
+          : {}),
+        ...(input.preconditions !== undefined
+          ? { preconditions: input.preconditions }
+          : {}),
+        ...(input.steps !== undefined ? { steps: input.steps as never } : {}),
+        ...(input.expected !== undefined
+          ? { expected: input.expected.trim() }
+          : {}),
+        ...(input.priority !== undefined ? { priority: input.priority } : {}),
+        ...(input.severity !== undefined ? { severity: input.severity } : {}),
+        ...(input.type !== undefined ? { type: input.type } : {}),
+        ...(input.testData !== undefined
+          ? { testData: input.testData as never }
+          : {}),
+      },
+    });
+    await this.syncDesignDocFromCases(projectId);
+    return updated;
+  }
+
+  async deleteTestCase(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    testCaseId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const existing = await prisma.testCase.findFirst({
+      where: { id: testCaseId, projectId },
+    });
+    if (!existing) throw new NotFoundException('Test case not found');
+    await prisma.testCase.delete({ where: { id: testCaseId } });
+    await this.syncDesignDocFromCases(projectId);
+    return { ok: true, id: testCaseId };
   }
 
   async listBugsCompat(userId: string, projectId: string) {

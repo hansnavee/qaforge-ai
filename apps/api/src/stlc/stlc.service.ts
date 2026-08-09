@@ -38,6 +38,25 @@ const AWAIT_TO_PHASE: Record<string, PhaseId> = {
   AWAITING_QA_SIGNOFF: 'SIGNOFF',
 };
 
+const EXEC_PHASE_TO_STLC: Record<string, PhaseId> = {
+  INIT: 'PLANNING',
+  REQUIREMENTS: 'REQUIREMENTS',
+  CLARIFICATION: 'REQUIREMENTS',
+  TEST_STRATEGY: 'PLANNING',
+  TEST_DESIGN: 'DESIGN',
+  ENVIRONMENT: 'ENVIRONMENT',
+  TEST_DATA: 'DATA',
+  AUTHENTICATION: 'EXECUTION',
+  DISCOVERY: 'EXECUTION',
+  FUNCTIONAL: 'EXECUTION',
+  EXECUTION: 'EXECUTION',
+  BUGS: 'DEFECTS',
+  AUTOMATION: 'AUTOMATION',
+  REPORTING: 'REPORTING',
+  QA_SIGNOFF: 'SIGNOFF',
+  SIGNOFF: 'SIGNOFF',
+};
+
 @Injectable()
 export class StlcService {
   constructor(
@@ -84,19 +103,42 @@ export class StlcService {
     );
   }
 
+  private resolveActivePhaseId(latest: {
+    status: string;
+    phase: string;
+  } | null): PhaseId | null {
+    if (!latest) return null;
+    const fromAwait = AWAIT_TO_PHASE[latest.status];
+    if (fromAwait) return fromAwait;
+    if (
+      latest.status === 'RUNNING' ||
+      latest.status === 'QUEUED' ||
+      latest.status === 'PENDING'
+    ) {
+      return EXEC_PHASE_TO_STLC[latest.phase] ?? 'PLANNING';
+    }
+    return null;
+  }
+
   private reconcilePhaseStatus(opts: {
     phaseId: string;
     phaseIndex: number;
     baseStatus: string;
     latestStatus?: string | null;
+    latestPhase?: string | null;
     requirementsApproved: boolean;
   }): string {
-    const activeId = opts.latestStatus
-      ? AWAIT_TO_PHASE[opts.latestStatus]
-      : undefined;
+    const activeId = this.resolveActivePhaseId(
+      opts.latestStatus
+        ? { status: opts.latestStatus, phase: opts.latestPhase ?? 'INIT' }
+        : null,
+    );
     const activeIdx = activeId
       ? (getStlcPhase(activeId)?.index ?? 0)
       : 0;
+    const awaiting = Boolean(
+      opts.latestStatus && AWAIT_TO_PHASE[opts.latestStatus],
+    );
 
     if (opts.phaseId === 'REQUIREMENTS') {
       return opts.requirementsApproved || opts.baseStatus === 'ACCEPTED'
@@ -104,9 +146,11 @@ export class StlcService {
         : opts.baseStatus;
     }
 
-    // Execution gate is the source of truth for the current open step.
+    // Execution gate / running phase is the source of truth for the open step.
     if (activeId) {
-      if (opts.phaseId === activeId) return 'READY_FOR_REVIEW';
+      if (opts.phaseId === activeId) {
+        return awaiting ? 'READY_FOR_REVIEW' : 'RUNNING';
+      }
       if (opts.phaseIndex < activeIdx) return 'ACCEPTED';
       if (opts.phaseIndex > activeIdx) return 'LOCKED';
     }
@@ -119,9 +163,7 @@ export class StlcService {
     const docs = (project.stlcPhaseDocs ?? {}) as StlcPhaseDocsMap;
     const latest = await this.latestExecution(projectId);
     const requirementsApproved = Boolean(project.requirementsApprovedAt);
-    const activePhaseId = latest
-      ? AWAIT_TO_PHASE[latest.status] ?? null
-      : null;
+    const activePhaseId = this.resolveActivePhaseId(latest);
 
     const phases = listPhaseSummaries(
       project.stlcStage,
@@ -134,6 +176,7 @@ export class StlcService {
         phaseIndex: p.index,
         baseStatus: p.status,
         latestStatus: latest?.status,
+        latestPhase: latest?.phase,
         requirementsApproved,
       });
       return {
@@ -179,6 +222,7 @@ export class StlcService {
       phaseIndex: def.index,
       baseStatus: summary.status,
       latestStatus: latest?.status,
+      latestPhase: latest?.phase,
       requirementsApproved: Boolean(project.requirementsApprovedAt),
     });
 
@@ -186,6 +230,12 @@ export class StlcService {
       latest && AWAIT_TO_PHASE[latest.status] === def.id,
     );
     const canEdit = status === 'READY_FOR_REVIEW' && isActiveGate;
+    // Designed cases stay editable after Accept (Test Board CRUD).
+    const canManageCases =
+      def.id === 'DESIGN' &&
+      (status === 'READY_FOR_REVIEW' ||
+        status === 'ACCEPTED' ||
+        Boolean(stored?.document && Array.isArray((stored.document as { testCases?: unknown }).testCases)));
     const canAccept =
       def.id === 'REQUIREMENTS'
         ? !project.requirementsApprovedAt && status === 'READY_FOR_REVIEW'
@@ -206,6 +256,7 @@ export class StlcService {
         canEdit,
         canSave: canEdit,
         canAccept,
+        canManageCases,
         canReopen: status === 'ACCEPTED' && project.stlcStage === def.nextStage,
       },
       downloads: def.downloads.map((format) => ({

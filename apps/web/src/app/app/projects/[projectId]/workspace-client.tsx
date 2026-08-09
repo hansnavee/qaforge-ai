@@ -1070,13 +1070,16 @@ export default function ProjectWorkspacePage() {
     onSuccess: async (execution) => {
       await invalidateReviewQueries();
       void queryClient.invalidateQueries({ queryKey: ['stlc-phases', projectId] });
-      if (!execution?.id) return;
-      // If a run is already waiting for Approve, open that execution — not a stuck INIT job.
-      if (execution.status?.startsWith('AWAITING_')) {
-        router.push(`/app/executions/${execution.id}`);
-        return;
-      }
-      router.replace('?tab=stlc&phase=PLANNING', { scroll: false });
+      void queryClient.invalidateQueries({ queryKey: ['test-cases', projectId] });
+      // Stay in the workspace wizard — AI strategy + design unlock Design here.
+      const phase =
+        execution?.status === 'AWAITING_DESIGN_APPROVAL' ||
+        execution?.phase === 'TEST_DESIGN'
+          ? 'DESIGN'
+          : execution?.status === 'AWAITING_PLAN_APPROVAL'
+            ? 'PLANNING'
+            : 'PLANNING';
+      router.replace(`?tab=stlc&phase=${phase}`, { scroll: false });
     },
   });
 
@@ -1385,7 +1388,7 @@ export default function ProjectWorkspacePage() {
                     >
                       {startPlanningMutation.isPending
                         ? 'Starting…'
-                        : 'Start this phase'}
+                        : 'Generate strategy & test cases'}
                     </Button>
                     <Button
                       size="sm"

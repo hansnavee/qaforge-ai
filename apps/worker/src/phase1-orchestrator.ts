@@ -573,7 +573,26 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
     });
 
-    // 3. Test Strategy
+    // 3. Test Strategy (+ design continues without a separate plan gate)
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.TEST_STRATEGY,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'PLANNING' },
+    });
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'PLANNING',
+      status: 'RUNNING',
+      document: { kind: 'TEST_STRATEGY', status: 'generating' },
+      validation: {
+        passed: false,
+        blockers: [],
+        summary: 'Generating test strategy…',
+      },
+    });
     const strategyOut = await runAgent(
       ctx,
       {
@@ -604,10 +623,12 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         ? 'Test strategy package ready for Senior QA human review'
         : 'Strategy generation failed',
     };
+    // Strategy is documented and auto-accepted; human review happens on Design
+    // (Start Planning generates strategy + cases in one AI pass).
     await persistPhaseDocument({
       projectId: project.id,
       phaseId: 'PLANNING',
-      status: 'READY_FOR_REVIEW',
+      status: 'ACCEPTED',
       document: {
         kind: 'TEST_STRATEGY',
         strategy: strategyOut,
@@ -622,37 +643,36 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
       validation: planningValidation,
     });
-
-    // Stage 2 human gate — pause for test plan / strategy approval
-    await setExecution(executionId, {
-      status: ExecutionStatus.AWAITING_PLAN_APPROVAL,
-      phase: ExecutionPhase.TEST_STRATEGY,
-    });
     await prisma.project.update({
       where: { id: project.id },
-      data: { stlcStage: 'PLANNING' },
+      data: {
+        stlcStage: 'DESIGN',
+        testPlanApprovedAt: new Date(),
+      },
     });
-    await ctx.emit({
-      type: 'stlc.awaiting_plan_approval',
-      phase: ExecutionPhase.TEST_STRATEGY,
-      message: 'Test strategy ready — awaiting human approval before Test Design',
-    });
-    await waitForContinueSignal(executionId);
     await setExecution(executionId, {
       status: ExecutionStatus.RUNNING,
       phase: ExecutionPhase.TEST_DESIGN,
     });
-    await prisma.project.update({
-      where: { id: project.id },
-      data: { stlcStage: 'DESIGN' },
-    });
     await ctx.emit({
-      type: 'stlc.plan_approved',
+      type: 'stlc.plan_ready',
       phase: ExecutionPhase.TEST_DESIGN,
-      message: 'Test plan approved — continuing to Test Design',
+      message:
+        'Test strategy documented — designing test cases next (review on Design)',
     });
 
     // 4. Test Design (cases + data) — before browser login
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'DESIGN',
+      status: 'RUNNING',
+      document: { kind: 'TEST_DESIGN', status: 'generating', testCases: [] },
+      validation: {
+        passed: false,
+        blockers: [],
+        summary: 'Designing documented test cases…',
+      },
+    });
     const designOut = (await runAgent(
       ctx,
       {

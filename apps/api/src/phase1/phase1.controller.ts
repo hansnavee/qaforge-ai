@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -195,6 +196,43 @@ export class Phase1Controller {
     @Param('projectId') projectId: string,
   ) {
     return this.phase1.listTestCasesCompat(user.id, projectId);
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/test-cases')
+  createTestCase(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    return this.phase1.createTestCase(user.id, orgId, projectId, body);
+  }
+
+  @Patch('orgs/:orgId/projects/:projectId/test-cases/:testCaseId')
+  updateTestCase(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('testCaseId') testCaseId: string,
+    @Body() body: unknown,
+  ) {
+    return this.phase1.updateTestCase(
+      user.id,
+      orgId,
+      projectId,
+      testCaseId,
+      body,
+    );
+  }
+
+  @Delete('orgs/:orgId/projects/:projectId/test-cases/:testCaseId')
+  deleteTestCase(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('testCaseId') testCaseId: string,
+  ) {
+    return this.phase1.deleteTestCase(user.id, orgId, projectId, testCaseId);
   }
 
   @Get('orgs/:orgId/projects/:projectId/test-cases/download')

@@ -7,6 +7,7 @@ import { api } from '@/lib/api';
 import { getDefaultOrgId } from '@/lib/org';
 import { Button } from '@/components/Button';
 import { cn } from '@/lib/cn';
+import { DesignCasesPanel } from './design-cases-panel';
 
 type PhaseSummary = {
   id: string;
@@ -32,6 +33,7 @@ type PhaseDetail = {
     canEdit: boolean;
     canSave: boolean;
     canAccept: boolean;
+    canManageCases?: boolean;
     canReopen: boolean;
   };
   downloads: Array<{ format: string; url: string }>;
@@ -134,8 +136,11 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
         `/api/v1/orgs/${orgId}/projects/${projectId}/stlc/phases/${selected}`,
       );
     },
-    refetchInterval: (q) =>
-      q.state.data?.status === 'RUNNING' ? 3000 : false,
+    refetchInterval: (q) => {
+      const s = q.state.data?.status;
+      if (s === 'RUNNING' || s === 'READY_FOR_REVIEW') return 3000;
+      return false;
+    },
   });
 
   useEffect(() => {
@@ -259,9 +264,28 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
         {!detail ? (
           <p className="mt-6 text-sm text-muted">Loading this step…</p>
         ) : detail.status === 'RUNNING' ? (
-          <div className="mt-6 rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm">
-            AI is preparing this step. Wait here — the page updates
-            automatically. Then review and Accept.
+          <div className="mt-6 space-y-3">
+            <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm">
+              {selected === 'PLANNING' || selected === 'DESIGN' ? (
+                <>
+                  <p className="font-medium text-fg">
+                    AI is generating the test strategy and designing test cases
+                  </p>
+                  <p className="mt-1 text-muted">
+                    Stay on this page — Design unlocks automatically when cases
+                    are ready for your review.
+                  </p>
+                </>
+              ) : (
+                <p>
+                  AI is preparing this step. Wait here — the page updates
+                  automatically. Then review and Accept.
+                </p>
+              )}
+            </div>
+            {selected === 'DESIGN' ? (
+              <DesignCasesPanel projectId={projectId} canEdit={false} />
+            ) : null}
           </div>
         ) : (
           <>
@@ -283,14 +307,25 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
               </div>
             ) : null}
 
-            <div className="mt-5 rounded-lg border border-border bg-panel/40 p-4">
-              <p className="text-sm font-medium text-fg">What to review</p>
-              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted">
-                {friendlyDocPreview(detail.document).map((line) => (
-                  <li key={line}>{line}</li>
-                ))}
-              </ul>
-            </div>
+            {selected === 'DESIGN' ? (
+              <DesignCasesPanel
+                projectId={projectId}
+                canEdit={Boolean(
+                  detail.permissions.canManageCases ||
+                    detail.permissions.canEdit ||
+                    detail.status === 'ACCEPTED',
+                )}
+              />
+            ) : (
+              <div className="mt-5 rounded-lg border border-border bg-panel/40 p-4">
+                <p className="text-sm font-medium text-fg">What to review</p>
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted">
+                  {friendlyDocPreview(detail.document).map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <span className="text-xs text-muted">Download</span>
@@ -307,17 +342,19 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
                     {d.format.toUpperCase()}
                   </Button>
                 ))}
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => setShowRaw((v) => !v)}
-              >
-                {showRaw ? 'Hide edit' : 'Edit'}
-              </Button>
+              {selected !== 'DESIGN' ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setShowRaw((v) => !v)}
+                >
+                  {showRaw ? 'Hide edit' : 'Edit'}
+                </Button>
+              ) : null}
             </div>
 
-            {showRaw ? (
+            {showRaw && selected !== 'DESIGN' ? (
               <div className="mt-3 space-y-2">
                 <textarea
                   className="min-h-[200px] w-full rounded-lg border border-border bg-bg-elevated p-3 font-mono text-xs"
@@ -401,15 +438,18 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
                 ? 'Saving…'
                 : detail?.status === 'ACCEPTED'
                   ? 'Accepted'
-                  : 'Accept & next →'}
+                  : selected === 'DESIGN'
+                    ? 'Accept design & continue →'
+                    : 'Accept & next →'}
             </Button>
           )}
         </div>
       </div>
 
       <p className="text-center text-xs text-muted">
-        You only work on this one phase. After Accept, we take you to the next
-        phase automatically.
+        {selected === 'DESIGN'
+          ? 'Review, edit, or delete cases, then Accept. You can still edit cases later.'
+          : 'You only work on this one phase. After Accept, we take you to the next phase automatically.'}
       </p>
     </div>
   );

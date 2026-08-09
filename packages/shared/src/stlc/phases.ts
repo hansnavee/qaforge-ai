@@ -88,7 +88,7 @@ export const STLC_PHASES: StlcPhaseDefinition[] = [
     approveAction: 'approve-test-plan',
     downloads: ['json', 'md', 'html'],
     description:
-      'Senior QA prepares strategy, scope, risks, entry/exit, testing levels',
+      'Senior QA prepares strategy, then continues into case design in one pass',
   },
   {
     index: 3,
@@ -101,7 +101,7 @@ export const STLC_PHASES: StlcPhaseDefinition[] = [
     approveAction: 'approve-test-design',
     downloads: ['json', 'csv', 'md', 'html'],
     description:
-      'Senior QA designs scenarios, CRUD cases, and testing-level tags',
+      'Documented cases for human review — edit/delete anytime, including after Accept',
   },
   {
     index: 4,

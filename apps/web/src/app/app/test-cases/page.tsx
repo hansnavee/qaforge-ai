@@ -34,7 +34,7 @@ export default function TestCasesRedirectPage() {
         {projects.map((p) => (
           <Link
             key={p.id}
-            href={`/app/projects/${p.id}?tab=test-board`}
+            href={`/app/projects/${p.id}?tab=stlc&phase=DESIGN`}
             className="block rounded-lg border border-border px-3 py-2 text-sm hover:border-accent/40"
           >
             {p.name}
