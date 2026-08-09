@@ -307,7 +307,7 @@ export function structuredSemanticsCompatibleWithText(
     login: /\b(login|sign[\s-]?in)\b/,
     reset: /\breset\b/,
     store: /\b(store|stored|hash|encrypt|secur)/,
-    support: /\b(support|compatible|friendly|responsive|usab)/,
+    support: /\b(support|compatible|friendly|responsive|usab|easy|device|mobile|browser)/,
     navigate: /\b(redirect|navigate)/,
     notify: /\b(send|sent|deliver|notify|email)\b/,
     expire: /\b(expire|expiry|expires)\b/,
@@ -318,7 +318,25 @@ export function structuredSemanticsCompatibleWithText(
 
   if (action !== 'unspecified') {
     const re = actionEvidence[action];
-    if (re && !re.test(evidence)) return false;
+    if (re && !re.test(evidence)) {
+      // Implicit constraint verbs: uniqueness / NFR support often omit the verb
+      const implicitOk =
+        (capability === 'email_uniqueness' &&
+          action === 'create' &&
+          /\bemail\b/.test(evidence) &&
+          /\b(unique|only|associated|one account|single account)\b/.test(
+            evidence,
+          )) ||
+        ((capability === 'mobile_usability' ||
+          capability === 'browser_compatibility' ||
+          capability === 'application_performance' ||
+          capability === 'error_messaging') &&
+          action === 'support' &&
+          /\b(mobile|browser|usab|friendly|compatible|device|responsive|easy|error|performance|second)\b/.test(
+            evidence,
+          ));
+      if (!implicitOk) return false;
+    }
   }
 
   if (capability === 'email_uniqueness') {
@@ -328,7 +346,7 @@ export function structuredSemanticsCompatibleWithText(
   }
   if (capability === 'mobile_usability' || capability === 'browser_compatibility') {
     if (
-      !/\b(mobile|browser|usab|friendly|compatible|device|responsive)\b/.test(
+      !/\b(mobile|browser|usab|friendly|compatible|device|responsive|easy)\b/.test(
         evidence,
       )
     ) {
