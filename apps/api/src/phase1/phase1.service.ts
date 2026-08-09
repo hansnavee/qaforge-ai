@@ -166,31 +166,19 @@ export class Phase1Service {
     });
     await store.put(storageKey, file.buffer, file.mimetype);
 
+    const original = parsedText.trim() || null;
     const doc = await prisma.requirementDocument.create({
       data: {
         projectId,
         storageKey,
         mime: file.mimetype || 'application/octet-stream',
         filename: file.originalname,
-        parsedText: parsedText.trim() || null,
+        fileSize: file.size || file.buffer.length,
+        sourceType: 'UPLOAD',
+        originalContent: original,
+        parsedText: original,
       },
     });
-
-    // Append parsed text into project requirements so STLC always has inline text
-    if (parsedText.trim()) {
-      const project = await prisma.project.findUnique({
-        where: { id: projectId },
-        select: { requirementText: true },
-      });
-      const existing = project?.requirementText?.trim() ?? '';
-      const block = `# ${file.originalname}\n${parsedText.trim()}`;
-      await prisma.project.update({
-        where: { id: projectId },
-        data: {
-          requirementText: existing ? `${existing}\n\n${block}` : block,
-        },
-      });
-    }
 
     await this.audit.log({
       organizationId: orgId,
@@ -416,7 +404,11 @@ export class Phase1Service {
         filename: d.filename,
         mime: d.mime,
         createdAt: d.createdAt,
-        hasParsedText: Boolean(d.parsedText?.trim()),
+        sourceType: d.sourceType,
+        fileSize: d.fileSize,
+        hasParsedText: Boolean(
+          (d.originalContent ?? d.parsedText)?.trim(),
+        ),
       })),
       clarificationRounds: rounds,
       openClarification: openRound

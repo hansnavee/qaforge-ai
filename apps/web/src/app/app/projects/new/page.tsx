@@ -5,47 +5,93 @@ import { useState } from 'react';
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
 import { Input } from '@/components/Input';
-import { Progress } from '@/components/Progress';
-import { api, ApiError } from '@/lib/api';
+import { API_URL, ApiError, api } from '@/lib/api';
 import { clearOrgCache } from '@/lib/org';
-
-const STEPS = ['Details', 'Requirements', 'Framework', 'Review'] as const;
 
 export default function NewProjectPage() {
   const router = useRouter();
-  const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState({
-    name: '',
-    appUrl: '',
-    loginUrl: '',
-    requirementText: '',
-    framework: 'PLAYWRIGHT',
-    language: 'TYPESCRIPT',
-    environment: 'QA',
-  });
+  const [name, setName] = useState('');
+  const [appUrl, setAppUrl] = useState('');
+  const [requirementText, setRequirementText] = useState('');
+  const [file, setFile] = useState<File | null>(null);
 
-  function update<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
-    setForm((f) => ({ ...f, [key]: value }));
-  }
+  const hasPaste = requirementText.trim().length > 0;
+  const hasFile = Boolean(file);
+  const canSubmit =
+    name.trim().length >= 2 && (hasPaste || hasFile) && !saving;
 
   async function create() {
     setSaving(true);
     setError(null);
+
     try {
-      const payload = {
-        ...form,
-        loginUrl: form.loginUrl.trim() || undefined,
-        requirementText: form.requirementText.trim() || undefined,
-      };
-      // Flat /projects uses the signed-in user's default org on the API.
-      const project = await api<{ id: string }>('/api/v1/projects', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
+      if (name.trim().length < 2) {
+        throw new Error('Project name must be at least 2 characters');
+      }
+      if (!hasPaste && !hasFile) {
+        throw new Error('Upload a requirement file or paste requirements');
+      }
+      if (appUrl.trim()) {
+        try {
+          void new URL(appUrl.trim());
+        } catch {
+          throw new Error('Application URL must be a valid URL');
+        }
+      }
+
+      let projectId: string;
+
+      if (file) {
+        const form = new FormData();
+        form.append('name', name.trim());
+        if (appUrl.trim()) form.append('appUrl', appUrl.trim());
+        form.append('file', file);
+        const res = await fetch(
+          `${API_URL.replace(/\/$/, '')}/api/v1/projects`,
+          {
+            method: 'POST',
+            credentials: 'include',
+            body: form,
+          },
+        );
+        const text = await res.text();
+        let data: unknown = null;
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch {
+            data = text;
+          }
+        }
+        if (!res.ok) {
+          throw new ApiError(
+            typeof data === 'object' &&
+              data &&
+              'message' in data &&
+              typeof (data as { message: unknown }).message === 'string'
+              ? (data as { message: string }).message
+              : 'Could not create project',
+            res.status,
+            data,
+          );
+        }
+        projectId = (data as { id: string }).id;
+      } else {
+        const project = await api<{ id: string }>('/api/v1/projects', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: name.trim(),
+            appUrl: appUrl.trim() || undefined,
+            requirementText: requirementText.trim(),
+          }),
+        });
+        projectId = project.id;
+      }
+
       clearOrgCache();
-      router.push(`/app/projects/${project.id}`);
+      router.push(`/app/projects/${projectId}?tab=requirements`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         clearOrgCache();
@@ -53,159 +99,106 @@ export default function NewProjectPage() {
         router.push('/login');
         return;
       }
-      const detail =
+      setError(
         e instanceof ApiError
           ? e.message
           : e instanceof Error
             ? e.message
-            : null;
-      setError(
-        detail
-          ? `Could not create project: ${detail}`
-          : 'Could not create project. The API may be offline — your draft is kept locally.',
+            : 'Could not create project',
       );
     } finally {
       setSaving(false);
     }
   }
 
-  const canContinueDetails = Boolean(form.name.trim() && form.appUrl.trim());
-
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">New project</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Create QA Project
+        </h1>
         <p className="mt-1 text-sm text-muted">
-          Step {step + 1} of {STEPS.length}: {STEPS[step]}
+          Set up a project and capture the original requirements. Analysis comes
+          next.
         </p>
-        <Progress className="mt-3" value={((step + 1) / STEPS.length) * 100} />
       </div>
 
-      <Card className="space-y-4">
-        {step === 0 ? (
-          <>
-            <Input
-              label="Project name"
-              value={form.name}
-              onChange={(e) => update('name', e.target.value)}
-              required
-            />
-            <Input
-              label="Application URL"
-              type="url"
-              value={form.appUrl}
-              onChange={(e) => update('appUrl', e.target.value)}
-              placeholder="https://app.example.com"
-              required
-            />
-            <Input
-              label="Login URL (optional)"
-              type="url"
-              value={form.loginUrl}
-              onChange={(e) => update('loginUrl', e.target.value)}
-              hint="Credentials are never collected by QAForge. Use a full URL including https://."
-            />
-            {!canContinueDetails ? (
-              <p className="text-sm text-muted">
-                Enter a project name and full app URL (including https://) to
-                continue.
-              </p>
-            ) : null}
-          </>
-        ) : null}
+      <Card className="space-y-5">
+        <Input
+          label="Project Name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="E-Commerce Application"
+          hint="Required · at least 2 characters"
+        />
 
-        {step === 1 ? (
-          <label className="flex flex-col gap-1.5 text-sm">
-            <span className="text-muted">Requirements</span>
-            <textarea
-              className="min-h-40 rounded-lg border border-border bg-bg-elevated px-3 py-2 text-fg outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
-              value={form.requirementText}
-              onChange={(e) => update('requirementText', e.target.value)}
-              placeholder="Paste PRD / acceptance criteria…"
-            />
-          </label>
-        ) : null}
+        <Input
+          label="Application URL (Optional)"
+          type="url"
+          value={appUrl}
+          onChange={(e) => setAppUrl(e.target.value)}
+          placeholder="https://example.com"
+        />
 
-        {step === 2 ? (
-          <div className="grid gap-4 sm:grid-cols-3">
-            {(
-              [
-                ['framework', ['PLAYWRIGHT', 'CYPRESS', 'SELENIUM_JAVA']],
-                ['language', ['TYPESCRIPT', 'JAVA', 'CSHARP']],
-                ['environment', ['DEV', 'QA', 'UAT', 'PRODUCTION']],
-              ] as const
-            ).map(([key, options]) => (
-              <label key={key} className="flex flex-col gap-1.5 text-sm">
-                <span className="capitalize text-muted">{key}</span>
-                <select
-                  className="h-10 rounded-lg border border-border bg-bg-elevated px-3 text-fg"
-                  value={form[key]}
-                  onChange={(e) => update(key, e.target.value)}
-                >
-                  {options.map((o) => (
-                    <option key={o} value={o}>
-                      {o}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ))}
-          </div>
-        ) : null}
+        <div className="space-y-3">
+          <div className="text-sm font-medium text-fg">Requirements</div>
+          <div className="rounded-xl border border-dashed border-border bg-bg-elevated/40 px-4 py-5">
+            <label className="flex cursor-pointer flex-col items-center gap-2 text-center">
+              <span className="text-sm font-medium">Upload Requirement File</span>
+              <span className="text-xs text-muted">PDF · DOCX · TXT</span>
+              <input
+                type="file"
+                accept=".pdf,.docx,.txt,.md,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                className="mt-2 text-sm"
+                onChange={(e) => {
+                  const next = e.target.files?.[0] ?? null;
+                  setFile(next);
+                  if (next) setRequirementText('');
+                }}
+              />
+              {file ? (
+                <span className="text-xs text-accent">
+                  Selected: {file.name} ({Math.round(file.size / 1024)} KB)
+                </span>
+              ) : null}
+            </label>
 
-        {step === 3 ? (
-          <dl className="space-y-3 text-sm">
-            {(
-              [
-                ['Name', form.name],
-                ['App URL', form.appUrl],
-                ['Login URL', form.loginUrl || '—'],
-                ['Framework', form.framework],
-                ['Language', form.language],
-                ['Environment', form.environment],
-              ] as const
-            ).map(([k, v]) => (
-              <div key={k} className="flex justify-between gap-4 border-b border-border/60 pb-2">
-                <dt className="text-muted">{k}</dt>
-                <dd className="text-right font-medium">{v || '—'}</dd>
-              </div>
-            ))}
-            <div>
-              <dt className="text-muted">Requirements preview</dt>
-              <dd className="mt-1 whitespace-pre-wrap text-muted">
-                {form.requirementText.slice(0, 280) || 'None provided'}
-                {form.requirementText.length > 280 ? '…' : ''}
-              </dd>
+            <div className="my-4 flex items-center gap-3 text-xs text-muted">
+              <div className="h-px flex-1 bg-border" />
+              OR
+              <div className="h-px flex-1 bg-border" />
             </div>
-          </dl>
-        ) : null}
 
-        {error ? (
-          <p className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
-            {error}
-          </p>
-        ) : null}
+            <textarea
+              className="min-h-36 w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-fg outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+              value={requirementText}
+              onChange={(e) => {
+                setRequirementText(e.target.value);
+                if (e.target.value.trim()) setFile(null);
+              }}
+              placeholder="Paste requirements…"
+              disabled={Boolean(file)}
+            />
+            <p className="mt-2 text-xs text-muted">
+              Provide either a file upload or pasted text. The original content
+              is preserved and not modified.
+            </p>
+          </div>
+        </div>
 
-        <div className="flex justify-between pt-2">
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
+
+        <div className="flex justify-end gap-2">
           <Button
-            variant="ghost"
-            disabled={step === 0}
-            onClick={() => setStep((s) => Math.max(0, s - 1))}
+            variant="secondary"
+            onClick={() => router.push('/app/projects')}
+            disabled={saving}
           >
-            Back
+            Cancel
           </Button>
-          {step < STEPS.length - 1 ? (
-            <Button
-              onClick={() => setStep((s) => Math.min(STEPS.length - 1, s + 1))}
-              disabled={step === 0 && !canContinueDetails}
-            >
-              Continue
-            </Button>
-          ) : (
-            <Button onClick={() => void create()} disabled={saving}>
-              {saving ? 'Creating…' : 'Create project'}
-            </Button>
-          )}
+          <Button onClick={() => void create()} disabled={!canSubmit}>
+            {saving ? 'Creating…' : 'Create Project'}
+          </Button>
         </div>
       </Card>
     </div>

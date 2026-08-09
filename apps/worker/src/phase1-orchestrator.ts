@@ -389,14 +389,20 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         agentId: AgentId.REQUIREMENT_ANALYSIS,
       },
       {
-        requirementText: project.requirementText,
+        requirementText:
+          project.requirementText ||
+          project.requirements
+            .map((d) => d.originalContent || d.parsedText)
+            .filter(Boolean)
+            .join('\n\n') ||
+          null,
         documents: project.requirements.map((d) => ({
           storageKey: d.storageKey,
           mime: d.mime,
           filename: d.filename,
-          parsedText: d.parsedText,
+          parsedText: d.originalContent || d.parsedText,
         })),
-        appUrl: project.appUrl,
+        appUrl: project.appUrl ?? 'https://example.com',
       },
     );
 

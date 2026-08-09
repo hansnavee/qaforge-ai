@@ -28,6 +28,17 @@ describe('@qaforge/shared schemas', () => {
     expect(parsed.appUrl).toContain('https://');
   });
 
+  it('allows project create without appUrl', () => {
+    const parsed = createProjectSchema.parse({ name: 'Demo App' });
+    expect(parsed.name).toBe('Demo App');
+    expect(parsed.appUrl).toBeUndefined();
+    expect(parsed.framework).toBe('PLAYWRIGHT');
+  });
+
+  it('rejects short project names', () => {
+    expect(() => createProjectSchema.parse({ name: 'A' })).toThrow();
+  });
+
   it('exposes plan limits', () => {
     expect(PLAN_LIMITS.FREE.runsPerMonth).toBeGreaterThan(0);
     expect(PLAN_LIMITS.PRO.runsPerMonth).toBeGreaterThan(PLAN_LIMITS.FREE.runsPerMonth);

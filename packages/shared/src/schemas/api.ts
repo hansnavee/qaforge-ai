@@ -9,17 +9,33 @@ export const createOrganizationSchema = z.object({
 
 export type CreateOrganizationInput = z.infer<typeof createOrganizationSchema>;
 
+const optionalUrl = z
+  .union([z.string().url(), z.literal('')])
+  .optional()
+  .transform((value): string | undefined =>
+    !value || value === '' ? undefined : value,
+  );
+
 export const createProjectSchema = z.object({
-  name: z.string().min(1),
-  appUrl: z.string().url(),
+  name: z.string().trim().min(2),
+  appUrl: optionalUrl,
   requirementText: z.string().optional(),
-  framework: frameworkSchema,
-  language: languageSchema,
-  environment: environmentSchema,
-  loginUrl: z.string().url().optional(),
+  framework: frameworkSchema.default('PLAYWRIGHT'),
+  language: languageSchema.default('TYPESCRIPT'),
+  environment: environmentSchema.default('QA'),
+  loginUrl: optionalUrl,
 });
 
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
+
+export const createRequirementPasteSchema = z.object({
+  sourceType: z.literal('PASTE').optional().default('PASTE'),
+  originalContent: z.string().trim().min(1),
+});
+
+export type CreateRequirementPasteInput = z.infer<
+  typeof createRequirementPasteSchema
+>;
 
 export const startExecutionSchema = z.object({
   projectId: z.string().min(1),
