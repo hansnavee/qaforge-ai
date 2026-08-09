@@ -17,16 +17,6 @@ import { AuditService } from '../common/audit.service';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
 
-function normalizeText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/\b(the|a|an)\b/g, ' ')
-    .replace(/\busers\b/g, 'user')
-    .replace(/\s+/g, ' ')
-    .replace(/[^\w\s]/g, '')
-    .trim();
-}
-
 @Injectable()
 export class RequirementExtractionService {
   private readonly llm = new OpenRouterLlmClient();
@@ -211,26 +201,8 @@ export class RequirementExtractionService {
       );
     }
 
-    // Preserve stable keys by source text when possible, then replace DB set
-    const assigned = this.assignStableKeys(
-      finalized.requirements.map((r) => ({
-        requirementKey: r.requirementKey,
-        title: r.title,
-        description: r.description,
-        type: r.type,
-        priority: r.priority,
-        acceptanceCriteria: r.acceptanceCriteria,
-        businessRules: r.businessRules,
-        dependencies: r.dependencies,
-        supportingInformation: r.supportingInformation,
-        source: r.source,
-        sourceText: r.source.text,
-        section: r.source.section,
-      })),
-      existing,
-    );
-
-    const finalKeys = assigned.map((a) => a.requirementKey);
+    // IDs are assigned only after normalization (REQ-001…). Replace prior set entirely.
+    const finals = finalized.requirements;
 
     await prisma.$transaction(async (tx) => {
       await tx.requirementDocument.update({
@@ -248,49 +220,28 @@ export class RequirementExtractionService {
         },
       });
 
-      // Remove invalid/orphan rows from prior extractions (headings, tables, etc.)
-      if (finalKeys.length) {
-        await tx.requirement.deleteMany({
-          where: {
-            projectId,
-            requirementKey: { notIn: finalKeys },
-          },
-        });
-      } else {
-        await tx.requirement.deleteMany({ where: { projectId } });
-      }
+      await tx.requirement.deleteMany({ where: { projectId } });
 
-      for (const item of assigned) {
-        const data = {
-          title: item.title,
-          description: item.description,
-          type: item.type,
-          priority: item.priority ?? null,
-          status: 'EXTRACTED',
-          sourceDocumentId: doc.id,
-          sourcePage: item.source?.page ?? null,
-          sourceSection: item.section ?? item.source?.section ?? null,
-          sourceText: item.sourceText ?? item.source?.text ?? item.description,
-          acceptanceCriteria: item.acceptanceCriteria,
-          businessRules: item.businessRules,
-          dependencies: item.dependencies,
-          supportingInformation: item.supportingInformation ?? [],
-          possibleDuplicateOf: null as string | null,
-        };
-
-        await tx.requirement.upsert({
-          where: {
-            projectId_requirementKey: {
-              projectId,
-              requirementKey: item.requirementKey,
-            },
-          },
-          create: {
+      for (const item of finals) {
+        await tx.requirement.create({
+          data: {
             projectId,
             requirementKey: item.requirementKey,
-            ...data,
+            title: item.title,
+            description: item.description,
+            type: item.type,
+            priority: item.priority ?? null,
+            status: 'EXTRACTED',
+            sourceDocumentId: doc.id,
+            sourcePage: item.source?.page ?? null,
+            sourceSection: item.source?.section ?? null,
+            sourceText: item.source?.text ?? item.description,
+            acceptanceCriteria: item.acceptanceCriteria,
+            businessRules: item.businessRules,
+            dependencies: item.dependencies,
+            supportingInformation: item.supportingInformation ?? [],
+            possibleDuplicateOf: null,
           },
-          update: data,
         });
       }
     });
@@ -312,6 +263,8 @@ export class RequirementExtractionService {
       sections: finalized.documentElements.sections.length,
       rejected: finalized.stats.rejected,
       merged: finalized.stats.merged,
+      retitled: finalized.stats.retitled,
+      reclassified: finalized.stats.reclassified,
       previousCount: existing.length,
       sourceDocument: doc.filename,
     };
@@ -350,43 +303,6 @@ export class RequirementExtractionService {
     } catch {
       return [];
     }
-  }
-
-  private assignStableKeys(
-    incoming: ExtractedRequirementInput[],
-    existing: Array<{
-      requirementKey: string;
-      sourceText: string | null;
-      description: string;
-    }>,
-  ): ExtractedRequirementInput[] {
-    const used = new Set<string>();
-    const bySource = new Map<string, string>();
-    for (const e of existing) {
-      const key = normalizeText(e.sourceText || e.description);
-      // Only reuse keys for content that would still be valid finals
-      if (key) bySource.set(key, e.requirementKey);
-    }
-
-    let nextNum = 1;
-
-    return incoming.map((item) => {
-      const sourceKey = normalizeText(
-        item.sourceText || item.source?.text || item.description,
-      );
-      let key = bySource.get(sourceKey);
-
-      if (key && used.has(key)) key = undefined;
-
-      if (!key) {
-        while (used.has(`REQ-${String(nextNum).padStart(3, '0')}`)) nextNum += 1;
-        key = `REQ-${String(nextNum).padStart(3, '0')}`;
-        nextNum += 1;
-      }
-
-      used.add(key);
-      return { ...item, requirementKey: key };
-    });
   }
 
   private async callLlm(

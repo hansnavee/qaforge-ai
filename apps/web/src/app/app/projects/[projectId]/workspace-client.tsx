@@ -49,6 +49,8 @@ type ExtractionSummary = {
   sourceDocument: string;
   rejected?: number;
   merged?: number;
+  retitled?: number;
+  reclassified?: number;
   previousCount?: number;
   tables?: number;
 };
@@ -469,6 +471,18 @@ export default function ProjectWorkspacePage() {
               <>
                 <div>Merged Duplicates</div>
                 <div className="font-medium">{summary.merged}</div>
+              </>
+            ) : null}
+            {summary.retitled != null ? (
+              <>
+                <div>Titles Regenerated</div>
+                <div className="font-medium">{summary.retitled}</div>
+              </>
+            ) : null}
+            {summary.reclassified != null ? (
+              <>
+                <div>Types Reclassified</div>
+                <div className="font-medium">{summary.reclassified}</div>
               </>
             ) : null}
             <div>Source Document</div>

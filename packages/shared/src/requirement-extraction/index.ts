@@ -29,3 +29,12 @@ export {
   type ExtractionDecision,
   type FinalizeResult,
 } from './finalize-extraction.js';
+
+export {
+  normalizeRequirements,
+  generateSemanticTitle,
+  classifyRequirementType,
+  capabilityFingerprint,
+  type TempCandidate,
+  type NormalizationStats,
+} from './normalize-requirements.js';

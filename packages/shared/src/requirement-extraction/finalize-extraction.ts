@@ -1,6 +1,6 @@
 /**
  * Post-extraction pipeline:
- * Candidate → Normalize → Validate → Deduplicate/Merge → Final Requirements
+ * Candidates (temp IDs) → Quality gate → Normalization/Merge → Sequential REQ IDs
  */
 
 import { extractRequirementsFromSource } from './semantic-extract.js';
@@ -10,6 +10,10 @@ import {
   type RejectReason,
   type RequirementCandidate,
 } from './quality-gate.js';
+import {
+  normalizeRequirements,
+  type TempCandidate,
+} from './normalize-requirements.js';
 
 export type ExtractionDecision =
   | {
@@ -45,6 +49,11 @@ export type ExtractionDecision =
       decision: 'TABLE_DATA' | 'SECTION_CONTEXT';
       source: string;
       detail?: string;
+    }
+  | {
+      decision: 'NORMALIZE';
+      source: string;
+      detail?: string;
     };
 
 export type FinalizeResult = {
@@ -55,20 +64,11 @@ export type FinalizeResult = {
     candidatesIn: number;
     rejected: number;
     merged: number;
+    retitled: number;
+    reclassified: number;
     saved: number;
   };
 };
-
-function normalizeKey(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/\b(the|a|an)\b/g, ' ')
-    .replace(/\busers\b/g, 'user')
-    .replace(/\blog\s*in\b/g, 'login')
-    .replace(/\s+/g, ' ')
-    .replace(/[^\w\s]/g, '')
-    .trim();
-}
 
 function stripMarkdown(value: string): string {
   return value
@@ -81,51 +81,37 @@ function stripMarkdown(value: string): string {
     .trim();
 }
 
-function capabilityKey(title: string, description: string, _section: string | null): string {
-  const t = normalizeKey(title);
-  const d = normalizeKey(description);
-  // Do NOT include section name — it falsely merges distinct reqs in the same section
-  const blob = `${t} ${d}`;
-
-  if (/unique email|email .*unique|must be unique/.test(blob) && /email/.test(blob)) {
-    return 'cap:unique-email';
-  }
-  // Collapse obvious same-capability duplicates (ignore section drift from AI)
-  if (/user login|^login$|login using|\blog in\b/.test(blob)) return 'cap:login';
-  if (/user registration|create an account|register using/.test(blob)) {
-    return 'cap:registration';
-  }
-  if (/product search results/.test(blob)) return 'cap:search-results';
-  if (/product search|search for products/.test(blob) && !/result|filter/.test(blob)) {
-    return 'cap:search';
-  }
-  if (/product details|details page should display/.test(blob)) {
-    return 'cap:product-details';
-  }
-  if (/password reset|reset .*password/.test(blob)) return 'cap:password-reset';
-
-  return `src:${normalizeKey(description)}`;
-}
-
-function normalizeCandidate(
-  raw: RequirementCandidate & {
-    requirementKey?: string;
+function toTempCandidate(
+  raw: {
+    title: string;
+    description: string;
+    type?: string;
     priority?: string | null;
+    acceptanceCriteria?: string[];
+    businessRules?: string[];
     dependencies?: string[];
-    source?: { document?: string | null; page?: number | null; section?: string | null; text?: string | null };
+    supportingInformation?: string[];
+    sourceText?: string | null;
+    section?: string | null;
+    source?: {
+      document?: string | null;
+      page?: number | null;
+      section?: string | null;
+      text?: string | null;
+    };
   },
   documentName: string,
-): SemanticExtractedRequirement {
+  index: number,
+): TempCandidate {
   const description = stripMarkdown(raw.description || raw.sourceText || '');
-  const sourceText = stripMarkdown(raw.sourceText || raw.source?.text || description);
-  const title = stripMarkdown(raw.title || 'Requirement');
-  const section = raw.section ?? raw.source?.section ?? null;
-
+  const sourceText = stripMarkdown(
+    raw.sourceText || raw.source?.text || description,
+  );
   return {
-    requirementKey: (raw.requirementKey || 'REQ-001').toUpperCase(),
-    title,
+    tempId: `candidate-${String(index + 1).padStart(3, '0')}`,
+    title: stripMarkdown(raw.title || 'Requirement'),
     description: /[.!?]$/.test(description) ? description : `${description}.`,
-    type: (raw.type as SemanticExtractedRequirement['type']) || 'FUNCTIONAL',
+    type: (raw.type as TempCandidate['type']) || 'FUNCTIONAL',
     priority: raw.priority ?? null,
     acceptanceCriteria: [...(raw.acceptanceCriteria ?? [])],
     businessRules: [...(raw.businessRules ?? [])],
@@ -134,40 +120,14 @@ function normalizeCandidate(
     source: {
       document: raw.source?.document || documentName,
       page: raw.source?.page ?? null,
-      section,
+      section: raw.section ?? raw.source?.section ?? null,
       text: sourceText,
     },
   };
 }
 
-function titlesSimilar(a: string, b: string): boolean {
-  const na = normalizeKey(a);
-  const nb = normalizeKey(b);
-  if (!na || !nb) return false;
-  return na === nb || na.includes(nb) || nb.includes(na);
-}
-
-function descriptionsOverlap(a: string, b: string): boolean {
-  const na = normalizeKey(a);
-  const nb = normalizeKey(b);
-  if (!na || !nb) return false;
-  if (na === nb) return true;
-  if (na.length > 24 && nb.length > 24 && (na.includes(nb) || nb.includes(na))) {
-    return true;
-  }
-  // token overlap
-  const ta = new Set(na.split(' ').filter((w) => w.length > 3));
-  const tb = new Set(nb.split(' ').filter((w) => w.length > 3));
-  if (!ta.size || !tb.size) return false;
-  let inter = 0;
-  for (const t of ta) if (tb.has(t)) inter += 1;
-  const ratio = inter / Math.min(ta.size, tb.size);
-  return ratio >= 0.85;
-}
-
 /**
- * Finalize candidates into validated, deduplicated requirements.
- * Deterministic baseline is always included as the trusted seed.
+ * Collect candidates with temporary IDs, validate, normalize/merge, then assign REQ IDs.
  */
 export function finalizeExtraction(opts: {
   sourceText: string;
@@ -192,191 +152,144 @@ export function finalizeExtraction(opts: {
     });
   }
 
-  type Working = SemanticExtractedRequirement & { _cap: string };
-  const working: Working[] = [];
+  const accepted: TempCandidate[] = [];
+  let rejected = 0;
+  let seq = 0;
 
-  const admit = (candidate: SemanticExtractedRequirement, from: 'BASELINE' | 'AI') => {
+  const admitRaw = (
+    raw: {
+      title: string;
+      description: string;
+      type?: string;
+      priority?: string | null;
+      acceptanceCriteria?: string[];
+      businessRules?: string[];
+      dependencies?: string[];
+      supportingInformation?: string[];
+      sourceText?: string | null;
+      section?: string | null;
+      source?: TempCandidate['source'];
+    },
+    from: string,
+  ) => {
     const gate = isRequirementCandidate({
-      title: candidate.title,
-      description: candidate.description,
-      sourceText: candidate.source.text,
-      section: candidate.source.section,
-      type: candidate.type,
-      acceptanceCriteria: candidate.acceptanceCriteria,
-      supportingInformation: candidate.supportingInformation,
+      title: raw.title,
+      description: raw.description,
+      sourceText: raw.sourceText || raw.source?.text || raw.description,
+      section: raw.section ?? raw.source?.section ?? null,
+      type: raw.type,
+      acceptanceCriteria: raw.acceptanceCriteria,
+      supportingInformation: raw.supportingInformation,
     });
 
     if (!gate.ok) {
+      rejected += 1;
       decisions.push({
         decision: 'REJECT',
         reason: gate.reason ?? 'NO_SEMANTIC_CONTENT',
-        source: candidate.source.text || candidate.description,
-        aiCandidate: `${candidate.title}: ${candidate.description}`,
+        source: raw.sourceText || raw.description || raw.title,
+        aiCandidate: `${raw.title}: ${raw.description}`,
         sourceElementType: from,
       });
       return;
     }
 
-    const cap = capabilityKey(
-      candidate.title,
-      candidate.description,
-      candidate.source.section,
-    );
-
-    const existing = working.find(
-      (w) =>
-        w._cap === cap ||
-        (titlesSimilar(w.title, candidate.title) &&
-          descriptionsOverlap(w.description, candidate.description)) ||
-        (normalizeKey(w.title) === normalizeKey(candidate.title) &&
-          (descriptionsOverlap(w.description, candidate.description) ||
-            w._cap === cap)) ||
-        descriptionsOverlap(w.description, candidate.description),
-    );
-
-    if (existing) {
-      // Merge AC / supporting info; keep richer description
-      const extraStatements: string[] = [];
-      if (
-        normalizeKey(candidate.description) !== normalizeKey(existing.description)
-      ) {
-        extraStatements.push(candidate.description);
-      }
-      for (const ac of candidate.acceptanceCriteria) {
-        if (
-          !existing.acceptanceCriteria.some(
-            (x) => normalizeKey(x) === normalizeKey(ac),
-          )
-        ) {
-          existing.acceptanceCriteria.push(ac);
-        }
-      }
-      for (const si of candidate.supportingInformation) {
-        if (
-          !existing.supportingInformation.some(
-            (x) => normalizeKey(x) === normalizeKey(si),
-          )
-        ) {
-          existing.supportingInformation.push(si);
-        }
-      }
-      for (const stmt of extraStatements) {
-        if (
-          !existing.supportingInformation.some(
-            (x) => normalizeKey(x) === normalizeKey(stmt),
-          ) &&
-          normalizeKey(stmt) !== normalizeKey(existing.description)
-        ) {
-          existing.supportingInformation.push(stmt.replace(/[.]+$/, ''));
-        }
-      }
-      if (candidate.description.length > existing.description.length) {
-        // Prefer longer faithful description when same capability
-        if (descriptionsOverlap(existing.description, candidate.description)) {
-          existing.description = candidate.description;
-          existing.source.text = candidate.source.text;
-        }
-      }
-      decisions.push({
-        decision: 'MERGE',
-        source: candidate.source.text || candidate.description,
-        intoKey: existing.requirementKey,
-        intoTitle: existing.title,
-        aiCandidate: candidate.title,
-      });
-      return;
-    }
-
-    working.push({ ...candidate, _cap: cap });
+    const temp = toTempCandidate(raw, opts.documentName, seq);
+    seq += 1;
+    accepted.push(temp);
     decisions.push({
-      decision: 'SAVE',
-      requirementKey: candidate.requirementKey,
-      title: candidate.title,
-      source: candidate.source.text || candidate.description,
-      type: candidate.type,
+      decision: 'NORMALIZE',
+      source: temp.source.text,
+      detail: `${temp.tempId} accepted for normalization`,
     });
   };
 
-  // 1) Seed with deterministic baseline (already semantic)
+  // 1) Deterministic baseline candidates (still temp IDs — no REQ yet)
   for (const req of baseline.requirements) {
-    admit(req, 'BASELINE');
+    admitRaw(
+      {
+        title: req.title,
+        description: req.description,
+        type: req.type,
+        priority: req.priority,
+        acceptanceCriteria: req.acceptanceCriteria,
+        businessRules: req.businessRules,
+        dependencies: req.dependencies,
+        supportingInformation: req.supportingInformation,
+        sourceText: req.source.text,
+        section: req.source.section,
+        source: req.source,
+      },
+      'BASELINE',
+    );
   }
 
-  // 2) AI candidates — never saved directly; must pass gate + dedupe
+  // 2) AI candidates
   const aiCandidates = opts.aiCandidates ?? [];
-  let candidatesIn = baseline.requirements.length + aiCandidates.length;
-
   for (const raw of aiCandidates) {
     const title = String(raw.title ?? '');
     const description = String(raw.description ?? '');
-    const sourceText = String(raw.sourceText ?? (raw as { source?: { text?: string } }).source?.text ?? description);
-
-    // Pre-reject obvious artifacts before normalize
-    const pre = isRequirementCandidate({
-      title,
-      description,
-      sourceText,
-      section: (raw.section as string) ?? null,
-      sourceElementType: (raw.sourceElementType as string) ?? null,
-      acceptanceCriteria: raw.acceptanceCriteria as string[] | undefined,
-      supportingInformation: raw.supportingInformation as string[] | undefined,
-    });
-    if (!pre.ok) {
-      decisions.push({
-        decision: 'REJECT',
-        reason: pre.reason ?? 'NO_SEMANTIC_CONTENT',
-        source: sourceText || title,
-        aiCandidate: title,
-        sourceElementType: String(raw.sourceElementType ?? 'AI_CANDIDATE'),
-      });
-      continue;
-    }
-
-    const normalized = normalizeCandidate(
+    const sourceText = String(
+      raw.sourceText ??
+        (raw as { source?: { text?: string } }).source?.text ??
+        description,
+    );
+    admitRaw(
       {
-        ...raw,
         title,
         description,
+        type: raw.type as string | undefined,
+        priority: (raw.priority as string | null | undefined) ?? null,
+        acceptanceCriteria: raw.acceptanceCriteria as string[] | undefined,
+        businessRules: raw.businessRules as string[] | undefined,
+        dependencies: raw.dependencies as string[] | undefined,
+        supportingInformation: raw.supportingInformation as string[] | undefined,
         sourceText,
+        section: (raw.section as string) ?? null,
+        source: {
+          document: opts.documentName,
+          page: null,
+          section: (raw.section as string) ?? null,
+          text: sourceText,
+        },
       },
-      opts.documentName,
+      'AI_CANDIDATE',
     );
-    admit(normalized, 'AI');
   }
 
-  // Re-number finals stably as REQ-001...
-  const requirements = working.map((w, i) => {
-    const { _cap: _, ...rest } = w;
-    return {
-      ...rest,
-      requirementKey: `REQ-${String(i + 1).padStart(3, '0')}`,
-    };
-  });
+  // 3) Normalization / merge / titles / classification — THEN sequential REQ IDs
+  const { requirements, stats } = normalizeRequirements(accepted);
 
-  // Update SAVE decisions with final keys
-  const finalDecisions = decisions.map((d) => {
-    if (d.decision !== 'SAVE') return d;
-    const match = requirements.find(
-      (r) =>
-        normalizeKey(r.description) === normalizeKey(d.source) ||
-        normalizeKey(r.title) === normalizeKey(d.title),
-    );
-    if (!match) return d;
-    return { ...d, requirementKey: match.requirementKey };
-  });
+  for (const req of requirements) {
+    decisions.push({
+      decision: 'SAVE',
+      requirementKey: req.requirementKey,
+      title: req.title,
+      source: req.source.text || req.description,
+      type: req.type,
+    });
+  }
 
-  const rejected = finalDecisions.filter((d) => d.decision === 'REJECT').length;
-  const merged = finalDecisions.filter((d) => d.decision === 'MERGE').length;
+  // Record merge volume from normalizer
+  if (stats.merged > 0) {
+    decisions.push({
+      decision: 'MERGE',
+      source: `${stats.merged} candidate(s) merged during normalization`,
+      intoKey: 'FINAL',
+      intoTitle: 'Normalized requirement set',
+    });
+  }
 
-  void candidatesIn;
   return {
     requirements,
     documentElements: baseline.documentElements,
-    decisions: finalDecisions,
+    decisions,
     stats: {
       candidatesIn: baseline.requirements.length + aiCandidates.length,
       rejected,
-      merged,
+      merged: stats.merged,
+      retitled: stats.retitled,
+      reclassified: stats.reclassified,
       saved: requirements.length,
     },
   };
