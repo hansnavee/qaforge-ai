@@ -769,6 +769,14 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       phase: ExecutionPhase.AUTHENTICATION,
     });
 
+    const targetAppUrl =
+      (typeof project.appUrl === 'string' && project.appUrl.trim()) ||
+      (typeof project.loginUrl === 'string' && project.loginUrl.trim()) ||
+      'https://example.com';
+    const targetLoginUrl =
+      (typeof project.loginUrl === 'string' && project.loginUrl.trim()) ||
+      targetAppUrl;
+
     const authResult = (await runAgent(
       ctx,
       {
@@ -778,9 +786,9 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
       {
         browserManager,
-        startUrl: project.loginUrl || project.appUrl,
-        loginUrl: project.loginUrl ?? undefined,
-        appUrl: project.appUrl,
+        startUrl: targetLoginUrl,
+        loginUrl: targetLoginUrl,
+        appUrl: targetAppUrl,
         waitForContinueSignal: () => waitForContinueSignal(executionId),
         onSessionLaunched: (sessionId: string) => {
           sessionRef.id = sessionId;
@@ -815,7 +823,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         phase: ExecutionPhase.DISCOVERY,
         agentId: AgentId.APPLICATION_DISCOVERY,
       },
-      { browserManager, sessionId: browserSessionId, appUrl: project.appUrl },
+      { browserManager, sessionId: browserSessionId, appUrl: targetAppUrl },
     );
 
     // 7. UI Testing + API Testing
@@ -826,7 +834,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         phase: ExecutionPhase.FUNCTIONAL,
         agentId: AgentId.FUNCTIONAL_TESTING,
       },
-      { browserManager, sessionId: browserSessionId, appUrl: project.appUrl },
+      { browserManager, sessionId: browserSessionId, appUrl: targetAppUrl },
     );
 
     await runAgent(
@@ -852,7 +860,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
 
     const manual = await runManualSuite({
       ctx,
-      project,
+      project: { id: project.id, appUrl: targetAppUrl },
       executionId,
       browserSessionId,
       cases: dbCases,
@@ -1016,7 +1024,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       const retestCases = dbCases.filter((c) => failedIds.has(c.id));
       const retest = await runManualSuite({
         ctx,
-        project,
+        project: { id: project.id, appUrl: targetAppUrl },
         executionId,
         browserSessionId,
         cases: retestCases,
@@ -1103,7 +1111,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
       {
         projectName: project.name,
-        appUrl: project.appUrl,
+        appUrl: targetAppUrl,
         framework: project.framework ?? 'playwright',
         language: project.language ?? 'typescript',
       },
@@ -1120,7 +1128,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       {
         browserManager,
         sessionId: browserSessionId,
-        appUrl: project.appUrl,
+        appUrl: targetAppUrl,
       },
     );
 
