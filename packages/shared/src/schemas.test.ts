@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createProjectSchema,
   createOrganizationSchema,
+  extractionAiResponseSchema,
   PLAN_LIMITS,
   ArtifactType,
   AgentId,
@@ -37,6 +38,28 @@ describe('@qaforge/shared schemas', () => {
 
   it('rejects short project names', () => {
     expect(() => createProjectSchema.parse({ name: 'A' })).toThrow();
+  });
+
+  it('validates extraction AI response', () => {
+    const parsed = extractionAiResponseSchema.parse({
+      requirements: [
+        {
+          requirementKey: 'req-001',
+          title: 'User Login',
+          description: 'User should be able to login using valid credentials.',
+          type: 'FUNCTIONAL',
+          priority: null,
+          acceptanceCriteria: [],
+          businessRules: [],
+          dependencies: [],
+          source: {
+            document: 'pasted-requirements.txt',
+            text: 'User should be able to login using valid credentials.',
+          },
+        },
+      ],
+    });
+    expect(parsed.requirements[0].requirementKey).toBe('REQ-001');
   });
 
   it('exposes plan limits', () => {

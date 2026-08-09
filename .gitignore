@@ -20,3 +20,17 @@ apps/*/.env.local
 apps/web/.vercel
 hosting/vars-tmp.json
 
+# Local smoke / manual API artifacts (may contain session cookies)
+cookies.txt
+workspace-latest.json
+clarify.json
+continue.json
+create-project.json
+exec.json
+execs.json
+login.json
+ws.json
+req-smoke.txt
+smoke-pid.txt
+smoke-project-id.txt
+

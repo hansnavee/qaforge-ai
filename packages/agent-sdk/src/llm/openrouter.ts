@@ -15,7 +15,7 @@ function mockComplete(opts: {
   const haystack = `${opts.system ?? ''}\n${opts.prompt}`.toLowerCase();
 
   if (opts.json) {
-    const payload = mockJsonForPrompt(haystack);
+    const payload = mockJsonForPrompt(haystack, opts.prompt);
     const text = JSON.stringify(payload);
     return { text, tokensUsed: Math.max(32, Math.ceil(text.length / 4)) };
   }
@@ -33,7 +33,69 @@ function mockComplete(opts: {
   };
 }
 
-function mockJsonForPrompt(haystack: string): unknown {
+function mockExtractFromPrompt(prompt: string): unknown | null {
+  const block = prompt.match(/"""([\s\S]*?)"""/);
+  const source = (block?.[1] ?? '').trim();
+  if (!source) return null;
+
+  const chunks = source
+    .split(/\n\s*\n/)
+    .map((c) => c.replace(/\s+/g, ' ').trim())
+    .filter((c) => c.length >= 12);
+  const lines =
+    chunks.length > 0
+      ? chunks
+      : source
+          .split(/(?<=[.!?])\s+|\n+/)
+          .map((l) => l.trim())
+          .filter((l) => l.length >= 12);
+
+  if (!lines.length) return null;
+
+  const docMatch = prompt.match(/Source document name:\s*(.+)/i);
+  const document = docMatch?.[1]?.trim() || 'source';
+
+  return {
+    requirements: lines.slice(0, 40).map((text, i) => {
+      const short = text
+        .replace(/^(the\s+)?user\s+should\s+be\s+able\s+to\s+/i, '')
+        .split(/\s+/)
+        .slice(0, 6)
+        .join(' ')
+        .replace(/[.]+$/, '');
+      const title = short
+        ? short.replace(/\b\w/g, (c) => c.toUpperCase())
+        : `Requirement ${i + 1}`;
+      return {
+        requirementKey: `REQ-${String(i + 1).padStart(3, '0')}`,
+        title,
+        description: text,
+        type: 'FUNCTIONAL',
+        priority: null,
+        acceptanceCriteria: [],
+        businessRules: [],
+        dependencies: [],
+        source: {
+          document,
+          page: null,
+          section: null,
+          text,
+        },
+      };
+    }),
+  };
+}
+
+function mockJsonForPrompt(haystack: string, prompt = ''): unknown {
+  // Piece 2 extraction — do not invent AC / priority; derive from source text
+  if (
+    haystack.includes('requirementkey') ||
+    haystack.includes('do not invent') ||
+    haystack.includes('individual requirements')
+  ) {
+    return mockExtractFromPrompt(prompt) ?? { requirements: [] };
+  }
+
   if (
     haystack.includes('requirement') ||
     haystack.includes('requirements') ||

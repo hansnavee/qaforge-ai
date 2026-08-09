@@ -218,7 +218,9 @@ export class ProjectsService {
       where: { id: projectId, organizationId: orgId, deletedAt: null },
       include: {
         requirements: { orderBy: { createdAt: 'desc' } },
-        _count: { select: { requirements: true } },
+        _count: {
+          select: { requirements: true, extractedRequirements: true },
+        },
       },
     });
     if (!project) throw new NotFoundException('Project not found');
@@ -227,6 +229,7 @@ export class ProjectsService {
     return {
       ...rest,
       requirementCount: _count.requirements,
+      extractedRequirementCount: _count.extractedRequirements,
       requirements: requirements.map(mapRequirementDoc),
       primaryRequirement: requirements[0]
         ? mapRequirementDoc(requirements[0])

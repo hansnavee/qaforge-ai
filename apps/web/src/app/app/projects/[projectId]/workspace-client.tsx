@@ -2,11 +2,12 @@
 
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Badge } from '@/components/Badge';
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
+import { Input } from '@/components/Input';
 import { api, ApiError } from '@/lib/api';
 import { cn } from '@/lib/cn';
 
@@ -20,6 +21,33 @@ type RequirementDoc = {
   createdAt: string;
 };
 
+type ExtractedRequirement = {
+  id: string;
+  requirementKey: string;
+  title: string;
+  description: string;
+  type: string;
+  priority?: string | null;
+  status: string;
+  sourcePage?: number | null;
+  sourceSection?: string | null;
+  sourceText?: string | null;
+  sourceDocumentName?: string | null;
+  acceptanceCriteria: string[];
+  businessRules: string[];
+  dependencies: string[];
+  possibleDuplicateOf?: string | null;
+};
+
+type ExtractionSummary = {
+  total: number;
+  functional: number;
+  nonFunctional: number;
+  businessRules: number;
+  possibleDuplicates: number;
+  sourceDocument: string;
+};
+
 type ProjectDetail = {
   id: string;
   name: string;
@@ -27,6 +55,7 @@ type ProjectDetail = {
   status?: string | null;
   createdAt: string;
   requirementCount?: number;
+  extractedRequirementCount?: number;
   requirements?: RequirementDoc[];
   primaryRequirement?: RequirementDoc | null;
 };
@@ -42,6 +71,14 @@ const WORKFLOW = [
   { id: 'reports', label: 'Reports', state: 'locked' as const },
 ];
 
+const EXTRACT_STEPS = [
+  'Requirement document loaded',
+  'Requirement content read',
+  'Identifying individual requirements',
+  'Identifying acceptance criteria',
+  'Structuring requirements',
+];
+
 function formatDate(value: string) {
   try {
     return new Date(value).toLocaleDateString(undefined, {
@@ -54,14 +91,33 @@ function formatDate(value: string) {
   }
 }
 
+function typeLabel(type: string) {
+  if (type === 'NON_FUNCTIONAL') return 'Non-Functional';
+  if (type === 'BUSINESS_RULE') return 'Business Rule';
+  return 'Functional';
+}
+
+function emptyField(values: string[] | null | undefined) {
+  if (!values || values.length === 0) return 'Not provided in source';
+  return values.join('\n');
+}
+
 export default function ProjectWorkspacePage() {
   const params = useParams<{ projectId: string }>();
   const projectId = params.projectId;
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [analyzeMessage, setAnalyzeMessage] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
-  const showOverview = searchParams.get('tab') === 'overview';
+  const tab = searchParams.get('tab') ?? 'requirements';
+  const view = searchParams.get('view') ?? 'source';
+  const selectedKey = searchParams.get('req');
+
+  const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState('ALL');
+  const [progressStep, setProgressStep] = useState(0);
+  const [summary, setSummary] = useState<ExtractionSummary | null>(null);
+  const [extractError, setExtractError] = useState<string | null>(null);
 
   const projectQuery = useQuery({
     queryKey: ['project', projectId],
@@ -76,15 +132,98 @@ export default function ProjectWorkspacePage() {
     enabled: Boolean(projectId),
   });
 
+  const extractedQuery = useQuery({
+    queryKey: ['extracted-requirements', projectId],
+    queryFn: async () => {
+      try {
+        return await api<ExtractedRequirement[]>(
+          `/api/v1/projects/${projectId}/extracted-requirements`,
+        );
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 0) return [] as ExtractedRequirement[];
+        throw e;
+      }
+    },
+    enabled: Boolean(projectId),
+  });
+
   const project = projectQuery.data;
-  const requirement = useMemo(() => {
+  const sourceDoc = useMemo(() => {
     if (!project) return null;
-    return (
-      project.primaryRequirement ??
-      project.requirements?.[0] ??
-      null
-    );
+    return project.primaryRequirement ?? project.requirements?.[0] ?? null;
   }, [project]);
+
+  const extracted = extractedQuery.data ?? [];
+
+  const filtered = useMemo(() => {
+    return extracted.filter((r) => {
+      if (typeFilter !== 'ALL' && r.type !== typeFilter) return false;
+      if (!search.trim()) return true;
+      const q = search.toLowerCase();
+      return (
+        r.requirementKey.toLowerCase().includes(q) ||
+        r.title.toLowerCase().includes(q) ||
+        r.description.toLowerCase().includes(q)
+      );
+    });
+  }, [extracted, search, typeFilter]);
+
+  const selected = useMemo(
+    () => extracted.find((r) => r.requirementKey === selectedKey) ?? null,
+    [extracted, selectedKey],
+  );
+
+  const extractMutation = useMutation({
+    mutationFn: async () => {
+      setExtractError(null);
+      setSummary(null);
+      setProgressStep(0);
+      return api<{
+        ok: boolean;
+        summary: ExtractionSummary;
+        requirements: ExtractedRequirement[];
+      }>(`/api/v1/projects/${projectId}/extract-requirements`, {
+        method: 'POST',
+        body: '{}',
+      });
+    },
+    onSuccess: async (data) => {
+      setProgressStep(EXTRACT_STEPS.length);
+      setSummary(data.summary);
+      await queryClient.invalidateQueries({
+        queryKey: ['extracted-requirements', projectId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+      router.replace(`?tab=requirements&view=summary`, { scroll: false });
+    },
+    onError: (e) => {
+      setExtractError(
+        e instanceof ApiError
+          ? e.message
+          : 'We couldn\'t extract the requirements.',
+      );
+    },
+  });
+
+  useEffect(() => {
+    if (!extractMutation.isPending) return;
+    setProgressStep(0);
+    const timers = [
+      window.setTimeout(() => setProgressStep(1), 400),
+      window.setTimeout(() => setProgressStep(2), 900),
+      window.setTimeout(() => setProgressStep(3), 1500),
+      window.setTimeout(() => setProgressStep(4), 2200),
+    ];
+    return () => timers.forEach((t) => window.clearTimeout(t));
+  }, [extractMutation.isPending]);
+
+  const setView = (next: string, req?: string | null) => {
+    const params = new URLSearchParams();
+    params.set('tab', 'requirements');
+    params.set('view', next);
+    if (req) params.set('req', req);
+    router.replace(`?${params.toString()}`, { scroll: false });
+  };
 
   if (projectQuery.isLoading) {
     return <p className="text-sm text-muted">Loading project…</p>;
@@ -108,6 +247,16 @@ export default function ProjectWorkspacePage() {
   }
 
   const status = project.status ?? 'DRAFT';
+  const progressPct = Math.min(
+    100,
+    Math.round(
+      ((extractMutation.isPending
+        ? Math.max(progressStep, 1)
+        : EXTRACT_STEPS.length) /
+        EXTRACT_STEPS.length) *
+        100,
+    ),
+  );
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -123,39 +272,31 @@ export default function ProjectWorkspacePage() {
           <h1 className="mt-2 text-2xl font-semibold tracking-tight">
             {project.name}
           </h1>
-          {project.appUrl ? (
-            <p className="mt-1 font-mono text-xs text-muted">{project.appUrl}</p>
-          ) : (
-            <p className="mt-1 text-xs text-muted">No application URL set</p>
-          )}
           <div className="mt-3 flex flex-wrap gap-2">
             <Badge tone="warning">Status: {status}</Badge>
             <Badge>
-              {(project.requirementCount ??
-                project.requirements?.length ??
-                0) === 1
-                ? '1 Document'
-                : `${project.requirementCount ?? project.requirements?.length ?? 0} Documents`}
+              {project.requirementCount ?? 0} Source Document
+              {(project.requirementCount ?? 0) === 1 ? '' : 's'}
             </Badge>
-            <Badge>Created {formatDate(project.createdAt)}</Badge>
+            {(project.extractedRequirementCount ?? extracted.length) > 0 ? (
+              <Badge tone="success">
+                {project.extractedRequirementCount ?? extracted.length} Extracted
+              </Badge>
+            ) : null}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button
-            variant={showOverview ? 'primary' : 'secondary'}
+            variant={tab === 'overview' ? 'primary' : 'secondary'}
             size="sm"
-            onClick={() =>
-              router.replace(`?tab=overview`, { scroll: false })
-            }
+            onClick={() => router.replace('?tab=overview', { scroll: false })}
           >
             Overview
           </Button>
           <Button
-            variant={!showOverview ? 'primary' : 'secondary'}
+            variant={tab !== 'overview' ? 'primary' : 'secondary'}
             size="sm"
-            onClick={() =>
-              router.replace(`?tab=requirements`, { scroll: false })
-            }
+            onClick={() => setView(extracted.length ? 'list' : 'source')}
           >
             Requirements
           </Button>
@@ -188,7 +329,7 @@ export default function ProjectWorkspacePage() {
         </div>
       </Card>
 
-      {showOverview ? (
+      {tab === 'overview' ? (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Card>
             <div className="text-xs uppercase tracking-wide text-muted">
@@ -198,24 +339,19 @@ export default function ProjectWorkspacePage() {
           </Card>
           <Card>
             <div className="text-xs uppercase tracking-wide text-muted">
-              Requirements
+              Source
             </div>
             <div className="mt-2 font-medium">
-              {project.requirementCount ?? project.requirements?.length ?? 0}{' '}
-              Document
-              {(project.requirementCount ??
-                project.requirements?.length ??
-                0) === 1
-                ? ''
-                : 's'}
+              {project.requirementCount ?? 0} Document
+              {(project.requirementCount ?? 0) === 1 ? '' : 's'}
             </div>
           </Card>
           <Card>
             <div className="text-xs uppercase tracking-wide text-muted">
-              Status
+              Extracted
             </div>
-            <div className="mt-2">
-              <Badge tone="warning">{status}</Badge>
+            <div className="mt-2 font-medium">
+              {project.extractedRequirementCount ?? extracted.length}
             </div>
           </Card>
           <Card>
@@ -227,7 +363,252 @@ export default function ProjectWorkspacePage() {
             </div>
           </Card>
         </div>
-      ) : (
+      ) : null}
+
+      {tab !== 'overview' && extractMutation.isPending ? (
+        <Card className="space-y-4">
+          <div>
+            <h2 className="text-base font-medium">AI QA Engineer</h2>
+            <p className="mt-1 text-sm text-muted">Extracting requirements…</p>
+          </div>
+          <ul className="space-y-2 text-sm">
+            {EXTRACT_STEPS.map((label, idx) => {
+              const done = progressStep > idx;
+              const active = progressStep === idx;
+              return (
+                <li key={label} className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      done && 'text-success',
+                      active && 'text-accent',
+                      !done && !active && 'text-muted',
+                    )}
+                  >
+                    {done ? '✓' : active ? '●' : '○'}
+                  </span>
+                  <span className={cn(!done && !active && 'text-muted')}>
+                    {label}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="text-2xl font-semibold tabular-nums">{progressPct}%</div>
+        </Card>
+      ) : null}
+
+      {tab !== 'overview' && !extractMutation.isPending && view === 'summary' && summary ? (
+        <Card className="space-y-4">
+          <h2 className="text-base font-medium text-success">
+            ✓ Requirement Extraction Complete
+          </h2>
+          <div className="grid gap-2 text-sm sm:grid-cols-2">
+            <div>Requirements Extracted</div>
+            <div className="font-medium">{summary.total}</div>
+            <div>Functional</div>
+            <div className="font-medium">{summary.functional}</div>
+            <div>Non-Functional</div>
+            <div className="font-medium">{summary.nonFunctional}</div>
+            <div>Business Rules</div>
+            <div className="font-medium">{summary.businessRules}</div>
+            <div>Source Document</div>
+            <div className="font-medium">{summary.sourceDocument}</div>
+          </div>
+          <Button onClick={() => setView('list')}>View Requirements</Button>
+        </Card>
+      ) : null}
+
+      {tab !== 'overview' && !extractMutation.isPending && view === 'detail' && selected ? (
+        <Card className="space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="font-mono text-sm text-muted">
+                {selected.requirementKey}
+              </div>
+              <h2 className="mt-1 text-xl font-semibold">{selected.title}</h2>
+            </div>
+            <Button variant="secondary" size="sm" onClick={() => setView('list')}>
+              Back to list
+            </Button>
+          </div>
+
+          <div className="space-y-3 text-sm">
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted">
+                Status
+              </div>
+              <div className="mt-1">
+                <Badge tone="accent">Extracted</Badge>
+              </div>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted">
+                Type
+              </div>
+              <div className="mt-1">{typeLabel(selected.type)}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted">
+                Description
+              </div>
+              <p className="mt-1 leading-relaxed">{selected.description}</p>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted">
+                Acceptance Criteria
+              </div>
+              <p className="mt-1 whitespace-pre-wrap text-muted">
+                {emptyField(selected.acceptanceCriteria)}
+              </p>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted">
+                Business Rules
+              </div>
+              <p className="mt-1 whitespace-pre-wrap text-muted">
+                {emptyField(selected.businessRules)}
+              </p>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted">
+                Dependencies
+              </div>
+              <p className="mt-1 whitespace-pre-wrap text-muted">
+                {emptyField(selected.dependencies)}
+              </p>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted">
+                Source
+              </div>
+              <div className="mt-1 space-y-1 text-muted">
+                <div>{selected.sourceDocumentName ?? 'Source document'}</div>
+                {selected.sourcePage != null ? (
+                  <div>Page {selected.sourcePage}</div>
+                ) : null}
+                {selected.sourceSection ? (
+                  <div>Section: {selected.sourceSection}</div>
+                ) : null}
+                {selected.sourceText ? (
+                  <p className="mt-2 rounded-lg border border-border bg-bg-elevated/50 p-3 text-fg">
+                    “{selected.sourceText}”
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            {selected.possibleDuplicateOf ? (
+              <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                ⚠ Possible Duplicate of {selected.possibleDuplicateOf}
+              </div>
+            ) : null}
+          </div>
+        </Card>
+      ) : null}
+
+      {tab !== 'overview' &&
+      !extractMutation.isPending &&
+      (view === 'list' || (view === 'detail' && !selected)) ? (
+        <Card className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-medium">Requirements</h2>
+              <p className="mt-1 text-sm text-muted">
+                {extracted.length} Requirement
+                {extracted.length === 1 ? '' : 's'} Extracted
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setView('source')}
+              >
+                Source
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => extractMutation.mutate()}
+                disabled={!sourceDoc?.originalContent}
+              >
+                Re-run Extraction
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-3">
+            <div className="min-w-[200px] flex-1">
+              <Input
+                placeholder="Search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <select
+              className="h-10 rounded-lg border border-border bg-bg-elevated px-3 text-sm"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+            >
+              <option value="ALL">All</option>
+              <option value="FUNCTIONAL">Functional</option>
+              <option value="NON_FUNCTIONAL">Non-Functional</option>
+              <option value="BUSINESS_RULE">Business Rule</option>
+            </select>
+          </div>
+
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-bg-elevated text-xs uppercase tracking-wide text-muted">
+                <tr>
+                  <th className="px-3 py-2 font-medium">ID</th>
+                  <th className="px-3 py-2 font-medium">Requirement</th>
+                  <th className="px-3 py-2 font-medium">Type</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={4}
+                      className="px-3 py-6 text-center text-muted"
+                    >
+                      No extracted requirements yet.
+                    </td>
+                  </tr>
+                ) : (
+                  filtered.map((r) => (
+                    <tr
+                      key={r.id}
+                      className="cursor-pointer border-t border-border hover:bg-bg-elevated/60"
+                      onClick={() => setView('detail', r.requirementKey)}
+                    >
+                      <td className="px-3 py-2 font-mono text-xs">
+                        {r.requirementKey.replace('-', '')}
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="font-medium">{r.title}</div>
+                        {r.possibleDuplicateOf ? (
+                          <div className="text-xs text-warning">
+                            Possible duplicate of {r.possibleDuplicateOf}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2">{typeLabel(r.type)}</td>
+                      <td className="px-3 py-2">
+                        <Badge tone="accent">Extracted</Badge>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      ) : null}
+
+      {tab !== 'overview' &&
+      !extractMutation.isPending &&
+      view === 'source' ? (
         <Card className="space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -242,27 +623,21 @@ export default function ProjectWorkspacePage() {
           <div className="grid gap-4 md:grid-cols-[minmax(0,240px)_1fr]">
             <div className="rounded-lg border border-border bg-bg-elevated/50 p-4">
               <h3 className="text-sm font-medium">Requirement Source</h3>
-              {requirement ? (
+              {sourceDoc ? (
                 <div className="mt-3 space-y-2 text-sm">
                   <div className="font-medium text-fg">
-                    {requirement.sourceType === 'PASTE'
+                    {sourceDoc.sourceType === 'PASTE'
                       ? 'Pasted requirements'
-                      : requirement.fileName}
+                      : sourceDoc.fileName}
                   </div>
                   <div className="text-muted">
-                    {requirement.sourceType === 'UPLOAD'
+                    {sourceDoc.sourceType === 'UPLOAD'
                       ? 'Uploaded'
                       : 'Entered manually'}
                   </div>
                   <div className="text-xs text-muted">
-                    {formatDate(requirement.createdAt)}
+                    {formatDate(sourceDoc.createdAt)}
                   </div>
-                  {typeof requirement.fileSize === 'number' ? (
-                    <div className="text-xs text-muted">
-                      {Math.round(requirement.fileSize / 1024)} KB ·{' '}
-                      {requirement.fileType}
-                    </div>
-                  ) : null}
                 </div>
               ) : (
                 <p className="mt-3 text-sm text-muted">
@@ -276,9 +651,9 @@ export default function ProjectWorkspacePage() {
               <p className="mt-1 text-xs uppercase tracking-wide text-muted">
                 Original Requirement
               </p>
-              {requirement?.originalContent ? (
+              {sourceDoc?.originalContent ? (
                 <pre className="mt-3 whitespace-pre-wrap font-sans text-sm leading-relaxed text-fg">
-                  {requirement.originalContent}
+                  {sourceDoc.originalContent}
                 </pre>
               ) : (
                 <p className="mt-3 text-sm text-muted">
@@ -289,26 +664,41 @@ export default function ProjectWorkspacePage() {
           </div>
 
           <div className="flex flex-col items-start gap-2 border-t border-border pt-4">
-            <Button
-              onClick={() =>
-                setAnalyzeMessage(
-                  'Requirement Analysis will be implemented in Piece 2.',
-                )
-              }
-            >
-              Analyze Requirements
-            </Button>
-            {analyzeMessage ? (
-              <p className="text-sm text-muted">{analyzeMessage}</p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() => extractMutation.mutate()}
+                disabled={
+                  !sourceDoc?.originalContent || extractMutation.isPending
+                }
+              >
+                Analyze Requirements
+              </Button>
+              {extracted.length > 0 ? (
+                <Button variant="secondary" onClick={() => setView('list')}>
+                  View Extracted ({extracted.length})
+                </Button>
+              ) : null}
+            </div>
+            {extractError ? (
+              <div className="space-y-2">
+                <p className="text-sm text-danger">{extractError}</p>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => extractMutation.mutate()}
+                >
+                  Retry
+                </Button>
+              </div>
             ) : (
               <p className="text-xs text-muted">
-                AI analysis is not enabled yet. Your original requirements stay
-                unchanged.
+                Extracts individual requirements from the original source. Does
+                not invent acceptance criteria or assumptions.
               </p>
             )}
           </div>
         </Card>
-      )}
+      ) : null}
     </div>
   );
 }

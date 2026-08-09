@@ -16,6 +16,7 @@ import { CurrentUser } from '../auth/auth.decorator';
 import { SessionAuthGuard } from '../auth/auth.guard';
 import type { SessionUser } from '../auth/auth';
 import { ProjectsService } from './projects.service';
+import { RequirementExtractionService } from './requirement-extraction.service';
 
 const fileUpload = FileInterceptor('file', {
   storage: memoryStorage(),
@@ -25,7 +26,10 @@ const fileUpload = FileInterceptor('file', {
 @Controller('orgs/:orgId/projects')
 @UseGuards(SessionAuthGuard)
 export class ProjectsController {
-  constructor(private readonly projects: ProjectsService) {}
+  constructor(
+    private readonly projects: ProjectsService,
+    private readonly extraction: RequirementExtractionService,
+  ) {}
 
   @Post()
   @UseInterceptors(fileUpload)
@@ -76,6 +80,39 @@ export class ProjectsController {
       file,
       body,
     });
+  }
+
+  @Post(':projectId/extract-requirements')
+  extractRequirements(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.extraction.extract(user, orgId, projectId);
+  }
+
+  @Get(':projectId/extracted-requirements')
+  listExtracted(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.extraction.list(user.id, orgId, projectId);
+  }
+
+  @Get(':projectId/extracted-requirements/:requirementKey')
+  getExtracted(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('requirementKey') requirementKey: string,
+  ) {
+    return this.extraction.getByKey(
+      user.id,
+      orgId,
+      projectId,
+      requirementKey,
+    );
   }
 
   @Get(':projectId')

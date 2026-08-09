@@ -37,6 +37,43 @@ export type CreateRequirementPasteInput = z.infer<
   typeof createRequirementPasteSchema
 >;
 
+export const requirementTypeSchema = z.enum([
+  'FUNCTIONAL',
+  'NON_FUNCTIONAL',
+  'BUSINESS_RULE',
+]);
+
+export const extractedRequirementSourceSchema = z.object({
+  document: z.string().optional().nullable(),
+  page: z.number().int().positive().optional().nullable(),
+  section: z.string().optional().nullable(),
+  text: z.string().optional().nullable(),
+});
+
+export const extractedRequirementSchema = z.object({
+  requirementKey: z
+    .string()
+    .regex(/^REQ-\d{3,}$/i)
+    .transform((k) => k.toUpperCase()),
+  title: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  type: requirementTypeSchema,
+  priority: z.string().trim().min(1).nullable().optional(),
+  acceptanceCriteria: z.array(z.string()).default([]),
+  businessRules: z.array(z.string()).default([]),
+  dependencies: z.array(z.string()).default([]),
+  source: extractedRequirementSourceSchema.optional().nullable(),
+});
+
+export const extractionAiResponseSchema = z.object({
+  requirements: z.array(extractedRequirementSchema).min(1),
+});
+
+export type ExtractionAiResponse = z.infer<typeof extractionAiResponseSchema>;
+export type ExtractedRequirementInput = z.infer<
+  typeof extractedRequirementSchema
+>;
+
 export const startExecutionSchema = z.object({
   projectId: z.string().min(1),
 });
