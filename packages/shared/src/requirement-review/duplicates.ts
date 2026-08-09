@@ -131,6 +131,18 @@ function differentBusinessMeaning(
   return false;
 }
 
+function opposingPolarity(a: NormalizedRequirement, b: NormalizedRequirement): boolean {
+  const ta = `${a.title}\n${a.originalText}`.toLowerCase();
+  const tb = `${b.title}\n${b.originalText}`.toLowerCase();
+  const neg = (t: string) =>
+    /\b(should not|must not|cannot|not have|not be allowed|denied|forbidden)\b/.test(
+      t,
+    );
+  const pos = (t: string) =>
+    /\b(should|must|can|able to|have access|allowed)\b/.test(t) && !neg(t);
+  return (neg(ta) && pos(tb)) || (pos(ta) && neg(tb));
+}
+
 function substantiallySameBehavior(
   a: NormalizedRequirement,
   b: NormalizedRequirement,
@@ -140,10 +152,14 @@ function substantiallySameBehavior(
   if (a.action[0] !== b.action[0]) return false;
   if (!sameCapability(a, b)) return false;
   if (a.businessOutcome !== b.businessOutcome) return false;
-  // Channel/context must agree when present; if both missing for confirmation, not certain
-  const chA = a.channel ?? a.subFeature ?? null;
-  const chB = b.channel ?? b.subFeature ?? null;
-  if (chA && chB && chA !== chB) return false;
+  if (opposingPolarity(a, b)) return false;
+  // Channel/context must agree (including unspecified vs specified)
+  const chA = a.channel ?? null;
+  const chB = b.channel ?? null;
+  if (chA !== chB) return false;
+  const subA = a.subFeature ?? null;
+  const subB = b.subFeature ?? null;
+  if (subA && subB && subA !== subB) return false;
   if (
     a.capability === 'order_confirmation' &&
     (!chA || !chB) &&
@@ -168,6 +184,48 @@ function classifyNormalized(
   a: NormalizedRequirement,
   b: NormalizedRequirement,
 ): SemanticRelationDraft | null {
+  // 0) Opposing allow/deny rules are never duplicates
+  if (opposingPolarity(a, b)) {
+    return pairResult(a, b, {
+      kind: 'NOT_DUPLICATE',
+      relationType: 'RELATED_TO',
+      reason:
+        'Opposite business polarity (allow vs deny / should vs should not). Related access-control concerns, not the same requirement.',
+    });
+  }
+
+  // 0b) Password reset vs OTP delivery — related auth steps, not duplicates
+  if (
+    (a.capability === 'password_reset' && b.capability === 'otp_delivery') ||
+    (b.capability === 'password_reset' && a.capability === 'otp_delivery') ||
+    (a.capability === 'password_reset' &&
+      b.capability === 'password_reset' &&
+      a.action[0] !== b.action[0])
+  ) {
+    return pairResult(a, b, {
+      kind: 'RELATED',
+      relationType: 'RELATED_TO',
+      reason:
+        'Related authentication/password-recovery steps (for example reset vs OTP delivery), not the same business behavior.',
+    });
+  }
+
+  // 0c) Search vs filter — related discovery, not duplicates
+  if (
+    (a.capability === 'product_search' &&
+      b.capability === 'product_filtering') ||
+    (b.capability === 'product_search' && a.capability === 'product_filtering') ||
+    (a.action[0] === 'search' && b.action[0] === 'filter') ||
+    (a.action[0] === 'filter' && b.action[0] === 'search')
+  ) {
+    return pairResult(a, b, {
+      kind: 'RELATED',
+      relationType: 'RELATED_TO',
+      reason:
+        'Related product discovery capabilities (search vs filter). Different user operations, not duplicates.',
+    });
+  }
+
   // 1) Clear NOT_DUPLICATE — different business meaning (do not flag as possible dup)
   if (differentBusinessMeaning(a, b)) {
     // Still emit NOT_DUPLICATE when actors/capabilities clearly clash (for tests/API)

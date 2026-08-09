@@ -138,11 +138,36 @@ function refineCapability(
     return 'product_search_results';
   }
   if (
-    (/\bsearch\b/.test(t) || action === 'search') &&
+    (/\bfilter\b/.test(t) || action === 'filter') &&
     /product/.test(t) &&
     !/detail|cart|inventory/.test(t)
   ) {
+    return 'product_filtering';
+  }
+  if (
+    (/\bsearch\b/.test(t) || action === 'search') &&
+    /product/.test(t) &&
+    !/detail|cart|inventory|filter/.test(t)
+  ) {
     return 'product_search';
+  }
+  if (
+    /password reset|reset their password|forgot password/.test(t) ||
+    (action === 'reset' && /password/.test(t))
+  ) {
+    return 'password_reset';
+  }
+  // OTP delivery only — do not remap order-confirmation email notify actions
+  if (/\botp\b/.test(t) && /sent|send|email|deliver|notify/.test(t)) {
+    return 'otp_delivery';
+  }
+  if (
+    /\b(access_control|administrative functionality|administrator permissions)\b/.test(
+      t,
+    ) ||
+    profileCapability === 'access_control'
+  ) {
+    return 'access_control';
   }
   if (
     !isAdmin &&
@@ -250,10 +275,15 @@ export function capabilityFamily(
   const discovery = new Set([
     'product_search',
     'product_search_results',
+    'product_filtering',
     'product_details',
     'product_discovery',
   ]);
   if (discovery.has(a.capability) && discovery.has(b.capability)) return true;
+  const auth = new Set(['password_reset', 'otp_delivery', 'user_login']);
+  if (auth.has(a.capability) && auth.has(b.capability)) return true;
+  if (a.capability === 'access_control' && b.capability === 'access_control')
+    return true;
   const confirm = new Set(['order_confirmation']);
   if (confirm.has(a.capability) && confirm.has(b.capability)) return true;
   return false;

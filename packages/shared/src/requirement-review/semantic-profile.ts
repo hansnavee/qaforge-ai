@@ -33,6 +33,14 @@ function textOf(r: SemanticComparable): string {
 /** Normalize actor labels to stable keys. */
 export function extractActor(text: string): string {
   const t = text.toLowerCase();
+  // Denied/non-admin actors must win before the word "administrator" is matched.
+  if (
+    /\b(normal|regular|standard|non[- ]admin) users?\b/.test(t) ||
+    (/\b(should not|must not|cannot|not have|not be allowed)\b/.test(t) &&
+      /\b(administrator|admin) (permissions?|access|functionality)\b/.test(t))
+  ) {
+    return 'customer';
+  }
   if (/\b(administrators?|admins?|managers?)\b/.test(t)) return 'administrator';
   if (/\b(payment gateway|payment provider)\b/.test(t)) return 'payment_gateway';
   if (/\b(external service|third[- ]party)\b/.test(t)) return 'external_service';
@@ -146,8 +154,13 @@ const ACTION_ALIASES: Array<{ key: string; patterns: RegExp[]; crud?: CrudOp }> 
       crud: 'READ',
     },
     {
+      key: 'filter',
+      patterns: [/\bfilter\b/, /by category/, /by price/],
+      crud: 'READ',
+    },
+    {
       key: 'search',
-      patterns: [/\bsearch\b/, /\bfilter\b/, /\bfind\b/],
+      patterns: [/\bsearch\b/, /\bfind\b/],
       crud: 'READ',
     },
     {
@@ -155,20 +168,28 @@ const ACTION_ALIASES: Array<{ key: string; patterns: RegExp[]; crud?: CrudOp }> 
       patterns: [/\bpay\b/, /\bpayment\b/, /\bpurchase\b/, /\bcheckout\b/],
     },
     {
-      key: 'verify',
-      patterns: [/\bverify\b/, /\bvalidate\b/, /\botp\b/, /\bauthenticate\b/],
+      key: 'reset',
+      patterns: [/\breset\b/, /forgot password/, /password reset/],
     },
     {
-      key: 'reset',
-      patterns: [/\breset\b/, /forgot password/],
+      key: 'notify',
+      patterns: [
+        /otp will be sent/,
+        /otp .* sent/,
+        /send(s|ing)? (an? )?otp/,
+        /confirmation email/,
+        /send.*email/,
+        /notification/,
+        /\bsms\b/,
+      ],
+    },
+    {
+      key: 'verify',
+      patterns: [/\bverify\b/, /\bvalidate\b/, /\bauthenticate\b/],
     },
     {
       key: 'login',
       patterns: [/\blogin\b/, /\bsign in\b/],
-    },
-    {
-      key: 'notify',
-      patterns: [/confirmation email/, /send.*email/, /notification/, /\bsms\b/],
     },
     {
       key: 'approve',
@@ -235,9 +256,26 @@ export function extractCapability(
     return 'order_confirmation';
   if (entity === 'payment' || /\bpayment\b/.test(t)) return 'payment';
   if (entity === 'checkout' || /\bcheckout\b/.test(t)) return 'checkout';
-  if (/password reset|otp/.test(t)) return 'password_reset';
+  if (/password reset|forgot password|reset their password/.test(t))
+    return 'password_reset';
+  if (/\botp\b/.test(t) && /sent|send|email|sms|deliver/.test(t))
+    return 'otp_delivery';
+  if (/\botp\b/.test(t)) return 'password_reset';
   if (/register|registration|sign up/.test(t)) return 'user_registration';
   if (/login|sign in/.test(t)) return 'user_login';
+  if (
+    /\bfilter\b/.test(t) &&
+    /product/.test(t) &&
+    !/\bsearch\b/.test(t)
+  ) {
+    return 'product_filtering';
+  }
+  if (
+    /\b(admin|administrator).*(access|functionality|permissions?)\b/.test(t) ||
+    /\b(access|permissions?).*(admin|administrator)/.test(t)
+  ) {
+    return 'access_control';
+  }
   if (entity === 'product' || /product search|product detail/.test(t))
     return 'product_discovery';
   return entity !== 'general' ? entity : 'general';

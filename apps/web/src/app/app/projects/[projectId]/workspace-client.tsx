@@ -1723,7 +1723,7 @@ export default function ProjectWorkspacePage() {
               {reviewSummaryQuery.data.features != null ? (
                 <div className="text-sm text-muted">
                   {reviewSummaryQuery.data.features} feature groups ·{' '}
-                  {reviewSummaryQuery.data.duplicates ?? 0} possible duplicates
+                  {reviewSummaryQuery.data.duplicates ?? 0} confirmed duplicates
                 </div>
               ) : null}
               <Button size="sm" onClick={() => setView('features')}>

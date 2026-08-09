@@ -293,6 +293,65 @@ describe('Piece 2.2 semantic relations', () => {
   });
 });
 
+describe('false duplicate guards', () => {
+  it('password reset is related to OTP delivery, not duplicate', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-006',
+          title: 'Password Reset',
+          description:
+            'The user should be able to reset their password using OTP.',
+        },
+        {
+          requirementKey: 'REQ-007',
+          title: 'OTP Delivery',
+          description:
+            "The OTP will be sent to the user's registered email address.",
+        },
+      ),
+    ).toBe('RELATED');
+  });
+
+  it('product search is related to product filtering, not duplicate', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-010',
+          title: 'Product Search',
+          description:
+            'Users should be able to search for products using the search bar.',
+        },
+        {
+          requirementKey: 'REQ-012',
+          title: 'Product Filtering',
+          description:
+            'Users should also be able to filter products by category and price.',
+        },
+      ),
+    ).toBe('RELATED');
+  });
+
+  it('admin allow vs user deny are not duplicates', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-041',
+          title: 'Have Access To Administrative Functionality',
+          description:
+            'Administrators should have access to administrative functionality.',
+        },
+        {
+          requirementKey: 'REQ-042',
+          title: 'Normal Users Should Not Have Administrator',
+          description:
+            'Normal users should not have administrator permissions.',
+        },
+      ),
+    ).toBe('NOT_DUPLICATE');
+  });
+});
+
 describe('Requirement semantic relationships', () => {
   const adminAddProduct = {
     requirementKey: 'REQ-032',
