@@ -55,7 +55,9 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           if [ -z "$RAILWAY_TOKEN" ]; then
-            echo "::error::RAILWAY_TOKEN secret is missing. Create a token at https://railway.app/account/tokens and add it as a GitHub Actions secret."
+            echo "::error::RAILWAY_TOKEN secret is missing."
+            echo "Create an Account Token at https://railway.app/account/tokens (OAuth session tokens do not work)."
+            echo "Then: gh secret set RAILWAY_TOKEN"
             exit 1
           fi
           railway up \

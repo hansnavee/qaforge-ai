@@ -1,0 +1,21 @@
+query($projectId: String!, $environmentId: String!, $serviceId: String!) {
+  deploymentTriggers(
+    projectId: $projectId
+    environmentId: $environmentId
+    serviceId: $serviceId
+    first: 20
+  ) {
+    edges {
+      node {
+        id
+        branch
+        provider
+        repository
+        checkSuites
+        environmentId
+        projectId
+        serviceId
+      }
+    }
+  }
+}

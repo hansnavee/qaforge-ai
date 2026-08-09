@@ -1,0 +1,10 @@
+mutation($input: DeploymentTriggerCreateInput!) {
+  deploymentTriggerCreate(input: $input) {
+    id
+    branch
+    provider
+    repository
+    serviceId
+    environmentId
+  }
+}

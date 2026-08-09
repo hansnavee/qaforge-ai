@@ -114,7 +114,7 @@ API health: `https://YOUR-API.up.railway.app/api/v1/health` → `{"status":"ok",
 
 | Symptom | Fix |
 |---------|-----|
-| GitHub push does not update Railway API | Service was last deployed via CLI upload without GitHub branch. Reconnect: `railway service source connect --repo hansnavee/qaforge-ai --branch master --service api` (same for `worker`). Set config file to `hosting/railway.api.toml`. |
+| GitHub push does not update Railway API | **Root cause:** Railway account has no GitHub App access, so `deploymentTriggers` is empty and pushes never build. Fix: (1) Open https://railway.com/account/github and connect GitHub, (2) Install the Railway GitHub App on `hansnavee/qaforge-ai` (https://github.com/apps/railway-app/installations/new), (3) In each service → Settings → Source → branch `master` + config `hosting/railway.api.toml` / `hosting/railway.worker.toml`, (4) Confirm triggers exist (`deploymentTriggers` non-empty). Until then deploy with `railway up --service api`. |
 | CORS / auth cookie errors | `NEXT_PUBLIC_APP_URL` on API must match Vercel URL exactly (https, no trailing slash) |
 | Queue jobs never run | Worker not deployed or `REDIS_URL` mismatch |
 | Prisma SSL errors | Add `?sslmode=require` to Neon URL |
