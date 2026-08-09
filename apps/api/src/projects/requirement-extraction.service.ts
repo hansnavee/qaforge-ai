@@ -8,6 +8,8 @@ import { prisma } from '@qaforge/database';
 import {
   Role,
   extractionAiResponseSchema,
+  filterExtractedRequirements,
+  semanticExtractRequirements,
   type ExtractedRequirementInput,
 } from '@qaforge/shared';
 import { AuditService } from '../common/audit.service';
@@ -22,68 +24,39 @@ function normalizeText(value: string): string {
     .trim();
 }
 
-function titleFromDescription(description: string): string {
-  const cleaned = description.replace(/^(the\s+)?user\s+should\s+be\s+able\s+to\s+/i, '');
-  const words = cleaned.split(/\s+/).slice(0, 6);
-  const title = words.join(' ').replace(/[.]+$/, '').trim();
-  return title
-    ? title.replace(/\b\w/g, (c) => c.toUpperCase())
-    : 'Requirement';
-}
-
-function heuristicExtract(
-  sourceText: string,
-  documentName: string,
-): ExtractedRequirementInput[] {
-  const chunks = sourceText
-    .split(/\n\s*\n|\r\n\s*\r\n/)
-    .map((c) => c.replace(/\s+/g, ' ').trim())
-    .filter((c) => c.length >= 12);
-
-  const lines =
-    chunks.length > 0
-      ? chunks
-      : sourceText
-          .split(/(?<=[.!?])\s+|\n+/)
-          .map((l) => l.trim())
-          .filter((l) => l.length >= 12);
-
-  const items = lines.slice(0, 50);
-  return items.map((text, i) => ({
-    requirementKey: `REQ-${String(i + 1).padStart(3, '0')}`,
-    title: titleFromDescription(text),
-    description: text,
-    type: 'FUNCTIONAL' as const,
-    priority: null,
-    acceptanceCriteria: [],
-    businessRules: [],
-    dependencies: [],
-    source: {
-      document: documentName,
-      page: null,
-      section: null,
-      text,
-    },
-  }));
-}
-
 function flagDuplicates(
   items: ExtractedRequirementInput[],
 ): Map<string, string | null> {
   const flags = new Map<string, string | null>();
   for (let i = 0; i < items.length; i++) {
-    flags.set(items[i].requirementKey, null);
-    const a = normalizeText(items[i].description);
+    flags.set(items[i]!.requirementKey, null);
+    const a = normalizeText(items[i]!.description);
     for (let j = 0; j < i; j++) {
-      const b = normalizeText(items[j].description);
+      const b = normalizeText(items[j]!.description);
       if (!a || !b) continue;
       if (a === b || a.includes(b) || b.includes(a)) {
-        flags.set(items[i].requirementKey, items[j].requirementKey);
+        flags.set(items[i]!.requirementKey, items[j]!.requirementKey);
         break;
       }
     }
   }
   return flags;
+}
+
+function toExtractedInput(
+  items: ReturnType<typeof semanticExtractRequirements>,
+): ExtractedRequirementInput[] {
+  return items.map((r) => ({
+    requirementKey: r.requirementKey,
+    title: r.title,
+    description: r.description,
+    type: r.type,
+    priority: r.priority,
+    acceptanceCriteria: r.acceptanceCriteria,
+    businessRules: r.businessRules,
+    dependencies: r.dependencies,
+    source: r.source,
+  }));
 }
 
 @Injectable()
@@ -214,13 +187,7 @@ export class RequirementExtractionService {
       orderBy: { requirementKey: 'asc' },
     });
 
-    let parsed: ExtractedRequirementInput[];
-    try {
-      parsed = await this.callLlm(sourceText, doc.filename);
-    } catch {
-      // Deterministic fallback that does not invent AC/rules
-      parsed = heuristicExtract(sourceText, doc.filename);
-    }
+    let parsed = await this.extractSemantically(sourceText, doc.filename);
 
     if (!parsed.length) {
       throw new BadRequestException(
@@ -228,7 +195,6 @@ export class RequirementExtractionService {
       );
     }
 
-    // Stable keys: prefer match by source text, then keep AI key if free, else next free
     const assigned = this.assignStableKeys(parsed, existing);
     const duplicateFlags = flagDuplicates(assigned);
 
@@ -293,9 +259,49 @@ export class RequirementExtractionService {
     };
   }
 
+  /**
+   * Prefer live LLM semantic extraction when available; always validate/filter.
+   * Fall back to deterministic semantic extractor (never line-splitting).
+   */
+  private async extractSemantically(
+    sourceText: string,
+    documentName: string,
+  ): Promise<ExtractedRequirementInput[]> {
+    const fallback = () =>
+      toExtractedInput(semanticExtractRequirements(sourceText, documentName));
+
+    try {
+      const fromLlm = await this.callLlm(sourceText, documentName);
+      const filtered = filterExtractedRequirements(fromLlm).map((r) => ({
+        ...r,
+        source: {
+          document: r.source?.document || documentName,
+          page: r.source?.page ?? null,
+          section: r.source?.section ?? null,
+          text: r.source?.text || r.description,
+        },
+      }));
+
+      // If the model still produced mostly junk, use deterministic semantic extract
+      if (
+        filtered.length === 0 ||
+        filtered.length < Math.max(1, Math.floor(fromLlm.length * 0.4))
+      ) {
+        return fallback();
+      }
+      return filtered;
+    } catch {
+      return fallback();
+    }
+  }
+
   private assignStableKeys(
     incoming: ExtractedRequirementInput[],
-    existing: Array<{ requirementKey: string; sourceText: string | null; description: string }>,
+    existing: Array<{
+      requirementKey: string;
+      sourceText: string | null;
+      description: string;
+    }>,
   ): ExtractedRequirementInput[] {
     const used = new Set<string>();
     const bySource = new Map<string, string>();
@@ -316,12 +322,13 @@ export class RequirementExtractionService {
 
       if (!key) {
         const candidate = item.requirementKey.toUpperCase();
-        if (!used.has(candidate) && !existing.some((e) => e.requirementKey === candidate && normalizeText(e.sourceText || e.description) !== sourceKey)) {
-          // Reuse AI key if not already claimed by a different source
-          const clash = existing.find((e) => e.requirementKey === candidate);
-          if (!clash || normalizeText(clash.sourceText || clash.description) === sourceKey) {
-            key = candidate;
-          }
+        const clash = existing.find((e) => e.requirementKey === candidate);
+        if (
+          !used.has(candidate) &&
+          (!clash ||
+            normalizeText(clash.sourceText || clash.description) === sourceKey)
+        ) {
+          key = candidate;
         }
       }
 
@@ -341,15 +348,18 @@ export class RequirementExtractionService {
     documentName: string,
   ): Promise<ExtractedRequirementInput[]> {
     const llm = await this.llm.complete({
-      system: `You extract software requirements from source text into JSON.
-Rules:
-- Do not invent information.
-- If priority, acceptance criteria, business rules, or dependencies are not explicitly present, use null or empty arrays.
-- Do not invent OTP channels, password rules, expiry, or other assumptions.
-- Classify type as FUNCTIONAL, NON_FUNCTIONAL, or BUSINESS_RULE only when clear.
-- Prefer FUNCTIONAL when unclear.
+      system: `You perform SEMANTIC software requirement extraction into JSON.
+
+Core rules:
+- Extract requirements based on semantic meaning, NOT document formatting or line boundaries.
+- Document titles, markdown headings (# ## ###), numbered section titles, and "Acceptance Criteria" labels are NOT requirements. Use them only as source.section context.
+- Do NOT create a requirement for each bullet. Bullets under an explicit Acceptance Criteria heading belong in acceptanceCriteria of the parent requirement.
+- When a statement says a page should display/include items followed by a bullet list, create ONE requirement and fold the items into the description (do not invent extra fields).
+- Only populate acceptanceCriteria / businessRules / dependencies when explicitly present in the source. Never invent them.
+- Classify type as FUNCTIONAL, NON_FUNCTIONAL, or BUSINESS_RULE using meaning (unique/must/expire → BUSINESS_RULE; performance/security/browsers/usability → NON_FUNCTIONAL; user/system capabilities → FUNCTIONAL).
+- Every requirement must have a meaningful title and description describing behavior, a rule, or a constraint.
 - requirementKey format: REQ-001, REQ-002, ...
-- Keep descriptions faithful to the source wording.`,
+- Keep descriptions faithful to the source. Do not invent OTP channels, password rules, expiry, or other assumptions.`,
       prompt: `Source document name: ${documentName}
 
 Original requirement text:
@@ -363,7 +373,7 @@ Return JSON only:
     {
       "requirementKey": "REQ-001",
       "title": "short title",
-      "description": "faithful description from source",
+      "description": "faithful requirement statement",
       "type": "FUNCTIONAL",
       "priority": null,
       "acceptanceCriteria": [],
@@ -372,8 +382,8 @@ Return JSON only:
       "source": {
         "document": "${documentName}",
         "page": null,
-        "section": null,
-        "text": "exact source snippet"
+        "section": "section heading if any",
+        "text": "exact source snippet for this requirement"
       }
     }
   ]

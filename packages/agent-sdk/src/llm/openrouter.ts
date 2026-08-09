@@ -1,3 +1,4 @@
+import { semanticExtractRequirements } from '@qaforge/shared';
 import type { LlmClient } from '../types.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -38,59 +39,20 @@ function mockExtractFromPrompt(prompt: string): unknown | null {
   const source = (block?.[1] ?? '').trim();
   if (!source) return null;
 
-  const chunks = source
-    .split(/\n\s*\n/)
-    .map((c) => c.replace(/\s+/g, ' ').trim())
-    .filter((c) => c.length >= 12);
-  const lines =
-    chunks.length > 0
-      ? chunks
-      : source
-          .split(/(?<=[.!?])\s+|\n+/)
-          .map((l) => l.trim())
-          .filter((l) => l.length >= 12);
-
-  if (!lines.length) return null;
-
   const docMatch = prompt.match(/Source document name:\s*(.+)/i);
   const document = docMatch?.[1]?.trim() || 'source';
 
-  return {
-    requirements: lines.slice(0, 40).map((text, i) => {
-      const short = text
-        .replace(/^(the\s+)?user\s+should\s+be\s+able\s+to\s+/i, '')
-        .split(/\s+/)
-        .slice(0, 6)
-        .join(' ')
-        .replace(/[.]+$/, '');
-      const title = short
-        ? short.replace(/\b\w/g, (c) => c.toUpperCase())
-        : `Requirement ${i + 1}`;
-      return {
-        requirementKey: `REQ-${String(i + 1).padStart(3, '0')}`,
-        title,
-        description: text,
-        type: 'FUNCTIONAL',
-        priority: null,
-        acceptanceCriteria: [],
-        businessRules: [],
-        dependencies: [],
-        source: {
-          document,
-          page: null,
-          section: null,
-          text,
-        },
-      };
-    }),
-  };
+  const requirements = semanticExtractRequirements(source, document);
+  if (!requirements.length) return { requirements: [] };
+  return { requirements };
 }
 
 function mockJsonForPrompt(haystack: string, prompt = ''): unknown {
-  // Piece 2 extraction — do not invent AC / priority; derive from source text
+  // Piece 2 extraction — semantic extraction (not line-splitting)
   if (
     haystack.includes('requirementkey') ||
     haystack.includes('do not invent') ||
+    haystack.includes('semantic') ||
     haystack.includes('individual requirements')
   ) {
     return mockExtractFromPrompt(prompt) ?? { requirements: [] };
