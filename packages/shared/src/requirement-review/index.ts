@@ -4,6 +4,7 @@ export * from './analyzer.js';
 export * from './classify.js';
 export * from './feature-grouping.js';
 export * from './semantic-profile.js';
+export * from './normalized-requirement.js';
 export * from './duplicates.js';
 export * from './relationships.js';
 export * from './question-utils.js';

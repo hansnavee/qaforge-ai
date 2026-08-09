@@ -53,14 +53,29 @@ export function extractActor(text: string): string {
  */
 export function extractEntity(text: string): string {
   const t = text.toLowerCase();
-  if (/shopping cart|cart item|add .* to (the )?cart|to their cart|to the cart/.test(t))
+  if (
+    /shopping cart|cart item|add .* to (the )?cart|add product to cart|to their cart|to the cart|\bcart\b/.test(
+      t,
+    )
+  )
     return 'cart_item';
-  if (/product catalog|catalog product|new products?\b|manage products?/.test(t))
+  if (/search result/.test(t)) return 'search_result';
+  if (
+    /product catalog|catalog product|new products?\b|manage products?|add product(?! to cart)|remove product|delete product|update product(?! inventory)/.test(
+      t,
+    ) && /\b(administrators?|admins?|managers?)\b/.test(t)
+  )
     return 'product_catalog';
   if (/inventory|stock level|stock quantity|out of stock|out-of-stock/.test(t))
     return 'inventory';
-  if (/order confirmation|confirmation (page|screen|email)|purchased products?/.test(t))
+  if (
+    /order confirmation|confirmation (page|screen|email)|confirmation email|purchased products?/.test(
+      t,
+    )
+  )
     return 'order_confirmation';
+  if (/order (details|history)|each order should|order page/.test(t))
+    return 'order';
   if (/order item|line item/.test(t)) return 'order_item';
   if (/\borders?\b/.test(t) && !/product/.test(t)) return 'order';
   if (/\bpayment\b|pay for|checkout payment/.test(t)) return 'payment';
@@ -68,10 +83,8 @@ export function extractEntity(text: string): string {
     return 'user_account';
   if (/\breview\b|rating/.test(t)) return 'review';
   if (/\bcheckout\b/.test(t)) return 'checkout';
-  if (/\bcart\b/.test(t)) return 'cart_item';
   if (/\bproducts?\b/.test(t)) {
-    // Admin create/remove/update product → catalog; otherwise product
-    if (/\b(administrators?|admins?)\b/.test(t)) return 'product_catalog';
+    if (/\b(administrators?|admins?|managers?)\b/.test(t)) return 'product_catalog';
     return 'product';
   }
   if (/\b(account|profile)\b/.test(t)) return 'user_account';
@@ -82,7 +95,12 @@ const ACTION_ALIASES: Array<{ key: string; patterns: RegExp[]; crud?: CrudOp }> 
   [
     {
       key: 'add_to',
-      patterns: [/add .* to (the )?(cart|basket)/, /add to cart/, /to their cart/],
+      patterns: [
+        /add .* to (the )?(cart|basket)/,
+        /add product to cart/,
+        /add to cart/,
+        /to their cart/,
+      ],
       crud: 'CREATE',
     },
     {
@@ -92,10 +110,17 @@ const ACTION_ALIASES: Array<{ key: string; patterns: RegExp[]; crud?: CrudOp }> 
         /\badd new\b/,
         /add (a )?new product/,
         /administrators?.*\badd\b/,
+        /admins?.*\badd\b/,
+        /\badd product\b(?! to cart)/,
         /\bregister\b/,
         /\bsign up\b/,
       ],
       crud: 'CREATE',
+    },
+    {
+      key: 'select',
+      patterns: [/\bselect\b/, /choose (a )?product/, /from search results/],
+      crud: 'READ',
     },
     {
       key: 'delete',

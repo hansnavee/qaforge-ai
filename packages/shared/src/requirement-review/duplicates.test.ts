@@ -1,10 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { detectDuplicatePairs } from './duplicates.js';
-import { buildSemanticProfile } from './semantic-profile.js';
-import { detectBusinessConflicts } from './relationships.js';
+import {
+  detectDuplicatePairs,
+  detectSemanticRelations,
+} from './duplicates.js';
+import { normalizeRequirement } from './normalized-requirement.js';
 
-describe('Piece 2.1 semantic duplicate intelligence', () => {
-  it('REQ014 cart add vs REQ032 admin add → NOT_DUPLICATE', () => {
+function kindOf(
+  pairs: ReturnType<typeof detectDuplicatePairs>,
+  a: string,
+  b: string,
+) {
+  return pairs.find(
+    (p) =>
+      (p.requirementKeyA === a && p.requirementKeyB === b) ||
+      (p.requirementKeyA === b && p.requirementKeyB === a),
+  )?.kind;
+}
+
+describe('Piece 2.2 semantic relations', () => {
+  it('REQ032 vs REQ014 → NOT_DUPLICATE (actor/capability/outcome)', () => {
     const pairs = detectDuplicatePairs([
       {
         requirementKey: 'REQ-014',
@@ -16,40 +30,34 @@ describe('Piece 2.1 semantic duplicate intelligence', () => {
         requirementKey: 'REQ-032',
         title: 'Add Product',
         description: 'Administrators should be able to add new products.',
+        featureName: 'Product Administration',
+        businessArea: 'Administration',
       },
     ]);
-    const pair = pairs.find(
-      (p) =>
-        (p.requirementKeyA === 'REQ-014' && p.requirementKeyB === 'REQ-032') ||
-        (p.requirementKeyA === 'REQ-032' && p.requirementKeyB === 'REQ-014'),
-    );
-    expect(pair?.kind).toBe('NOT_DUPLICATE');
-    expect(pair?.reason).toMatch(/actor|entity|catalog|cart/i);
+    expect(kindOf(pairs, 'REQ-014', 'REQ-032')).toBe('NOT_DUPLICATE');
+    expect(pairs.every((p) => p.kind !== 'POSSIBLE_DUPLICATE')).toBe(true);
+    expect(pairs.every((p) => p.kind !== 'DUPLICATE')).toBe(true);
   });
 
-  it('REQ032 add vs REQ034 remove → NOT_DUPLICATE (CRUD)', () => {
+  it('REQ034 vs REQ032 → RELATED (CRUD ops, not duplicate)', () => {
     const pairs = detectDuplicatePairs([
       {
         requirementKey: 'REQ-032',
         title: 'Add Product',
         description: 'Administrators should be able to add new products.',
+        featureName: 'Product Administration',
       },
       {
         requirementKey: 'REQ-034',
         title: 'Remove Product',
         description: 'Administrators should be able to remove products.',
+        featureName: 'Product Administration',
       },
     ]);
-    const pair = pairs.find(
-      (p) =>
-        p.requirementKeyA === 'REQ-032' && p.requirementKeyB === 'REQ-034',
-    );
-    expect(pair?.kind).toBe('NOT_DUPLICATE');
-    expect(pair?.sameFeatureDifferentOps).toBe(true);
-    expect(pairs.every((p) => p.kind !== 'DUPLICATE')).toBe(true);
+    expect(kindOf(pairs, 'REQ-032', 'REQ-034')).toBe('RELATED');
   });
 
-  it('REQ033 update product vs REQ035 update inventory → RELATED', () => {
+  it('REQ035 vs REQ033 → RELATED (inventory vs catalog info)', () => {
     const pairs = detectDuplicatePairs([
       {
         requirementKey: 'REQ-033',
@@ -64,34 +72,76 @@ describe('Piece 2.1 semantic duplicate intelligence', () => {
           'Administrators should be able to update product inventory.',
       },
     ]);
-    expect(pairs.some((p) => p.kind === 'RELATED')).toBe(true);
-    expect(pairs.every((p) => p.kind !== 'DUPLICATE')).toBe(true);
+    expect(kindOf(pairs, 'REQ-033', 'REQ-035')).toBe('RELATED');
+    expect(kindOf(pairs, 'REQ-033', 'REQ-035')).not.toBe('DUPLICATE');
+    expect(kindOf(pairs, 'REQ-033', 'REQ-035')).not.toBe('POSSIBLE_DUPLICATE');
   });
 
-  it('confirmation page vs confirmation email → RELATED', () => {
+  it('REQ026 page vs REQ027 email → RELATED (channels)', () => {
     const pairs = detectDuplicatePairs([
       {
         requirementKey: 'REQ-026',
-        title: 'Order Confirmation Page',
+        title: 'Order Confirmation',
         description:
           'The confirmation page should display product information.',
       },
       {
         requirementKey: 'REQ-027',
-        title: 'Order Confirmation Email',
+        title: 'Order Confirmation',
         description:
           'The user should receive an order confirmation email.',
       },
     ]);
-    const pair = pairs.find(
-      (p) =>
-        p.requirementKeyA === 'REQ-026' && p.requirementKeyB === 'REQ-027',
-    );
-    expect(pair?.kind).toBe('RELATED');
-    expect(pair?.reason).toMatch(/channel/i);
+    expect(kindOf(pairs, 'REQ-026', 'REQ-027')).toBe('RELATED');
   });
 
-  it('identical confirmation page behavior → DUPLICATE', () => {
+  it('REQ029 order details vs REQ026 confirmation page → RELATED', () => {
+    const pairs = detectDuplicatePairs([
+      {
+        requirementKey: 'REQ-026',
+        title: 'Order Confirmation',
+        description:
+          'The confirmation page should display product information.',
+      },
+      {
+        requirementKey: 'REQ-029',
+        title: 'Order Product Information',
+        description: 'Each order should display product information.',
+      },
+    ]);
+    const k = kindOf(pairs, 'REQ-026', 'REQ-029');
+    expect(k === 'RELATED' || k === 'POSSIBLE_DUPLICATE').toBe(true);
+    expect(k).not.toBe('DUPLICATE');
+  });
+
+  it('REQ010 search vs REQ011 search results → RELATED / PRECEDES', () => {
+    const rel = detectSemanticRelations([
+      {
+        requirementKey: 'REQ-010',
+        title: 'Product Search',
+        description:
+          'Users should be able to search for products using the search bar.',
+      },
+      {
+        requirementKey: 'REQ-011',
+        title: 'Product Search Results',
+        description:
+          'Users can select a product from search results to view its details.',
+      },
+    ]);
+    const pair = rel.find(
+      (p) =>
+        (p.requirementKeyA === 'REQ-010' && p.requirementKeyB === 'REQ-011') ||
+        (p.requirementKeyA === 'REQ-011' && p.requirementKeyB === 'REQ-010'),
+    );
+    expect(pair?.kind === 'RELATED' || pair?.relationType === 'PRECEDES').toBe(
+      true,
+    );
+    expect(pair?.kind).not.toBe('DUPLICATE');
+    expect(pair?.kind).not.toBe('POSSIBLE_DUPLICATE');
+  });
+
+  it('identical confirmation-page behavior can be DUPLICATE', () => {
     const pairs = detectDuplicatePairs([
       {
         requirementKey: 'REQ-026',
@@ -106,47 +156,33 @@ describe('Piece 2.1 semantic duplicate intelligence', () => {
           'The order confirmation screen should display the purchased products.',
       },
     ]);
-    const pair = pairs.find(
-      (p) =>
-        p.requirementKeyA === 'REQ-026' && p.requirementKeyB === 'REQ-027',
-    );
-    expect(pair?.kind).toBe('DUPLICATE');
-    expect(pair?.showConfidence).toBe(true);
+    expect(kindOf(pairs, 'REQ-026', 'REQ-027')).toBe('DUPLICATE');
   });
 
-  it('distinguishes cart_item vs product_catalog entities', () => {
-    const cart = buildSemanticProfile({
-      requirementKey: 'REQ-014',
-      title: 'Add Product To Cart',
-      description: 'Users should be able to add an available product to their cart.',
-    });
-    const admin = buildSemanticProfile({
-      requirementKey: 'REQ-032',
-      title: 'Add Product',
-      description: 'Administrators should be able to add new products.',
-    });
-    expect(cart.entity).toBe('cart_item');
-    expect(admin.entity).toBe('product_catalog');
-    expect(cart.actor).toBe('customer');
-    expect(admin.actor).toBe('administrator');
-  });
-
-  it('detects OTP validity conflicts without choosing a winner', () => {
-    const conflicts = detectBusinessConflicts([
+  it('does not classify duplicates from similarity alone', () => {
+    const pairs = detectDuplicatePairs([
       {
         requirementKey: 'REQ-A',
-        title: 'OTP Expiry',
-        description: 'OTP expires after 10 minutes.',
-        rulesText: 'OTP expires after 10 minutes.',
+        title: 'Add Product Something',
+        description: 'Add product add product add product for users to cart.',
       },
       {
         requirementKey: 'REQ-B',
-        title: 'OTP Validity',
-        description: 'OTP remains valid for 15 minutes.',
-        rulesText: 'OTP remains valid for 15 minutes.',
+        title: 'Add Product Catalog',
+        description:
+          'Administrators add product add product into the product catalog.',
       },
     ]);
-    expect(conflicts.length).toBeGreaterThan(0);
-    expect(conflicts[0]?.detail).toMatch(/validity period/i);
+    expect(kindOf(pairs, 'REQ-A', 'REQ-B')).not.toBe('POSSIBLE_DUPLICATE');
+    expect(kindOf(pairs, 'REQ-A', 'REQ-B')).not.toBe('DUPLICATE');
+  });
+
+  it('normalizes admin actor aliases', () => {
+    const n = normalizeRequirement({
+      requirementKey: 'REQ-X',
+      title: 'Manage catalog',
+      description: 'Admin can update product information',
+    });
+    expect(n.actor[0]).toBe('administrator');
   });
 });

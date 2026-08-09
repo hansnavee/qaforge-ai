@@ -302,7 +302,7 @@ model RequirementRelation {
   projectId         String
   fromRequirementId String
   toRequirementId   String
-  /// DEPENDS_ON | AFFECTS | RELATED_TO | CONFLICTS_WITH | DUPLICATE_OF | OVERLAPS
+  /// DEPENDS_ON | AFFECTS | RELATED_TO | PRECEDES | CONFLICTS_WITH | DUPLICATE_OF | OVERLAPS
   relationType      String
   confidence        Float?
   source            String   @default("REVIEW") // EXTRACTION | REVIEW | USER

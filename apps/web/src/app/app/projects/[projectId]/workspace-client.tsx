@@ -1915,21 +1915,19 @@ export default function ProjectWorkspacePage() {
                                     {r.possibleDuplicateOf &&
                                     r.duplicateKind &&
                                     r.duplicateKind !== 'NOT_DUPLICATE' ? (
-                                      <div className="mt-2 space-y-2 rounded-md border border-warning/30 bg-warning/5 p-2 text-xs">
+                                      <div className="mt-2 space-y-2 rounded-md border border-border bg-bg/40 p-2 text-xs">
                                         <div className="font-medium text-fg">
-                                          {r.duplicateKind.replace(/_/g, ' ')}
+                                          {r.duplicateKind === 'RELATED'
+                                            ? 'RELATED TO'
+                                            : r.duplicateKind.replace(
+                                                /_/g,
+                                                ' ',
+                                              )}{' '}
+                                          {r.possibleDuplicateOf}
                                         </div>
-                                        <div>{r.possibleDuplicateOf}</div>
-                                        {r.duplicateKind === 'DUPLICATE' &&
-                                        r.duplicateSimilarity != null ? (
-                                          <div>
-                                            Confidence:{' '}
-                                            {Math.round(r.duplicateSimilarity)}%
-                                          </div>
-                                        ) : null}
                                         {r.duplicateReason ? (
-                                          <div className="text-muted whitespace-pre-wrap">
-                                            Reason: {r.duplicateReason}
+                                          <div className="whitespace-pre-wrap text-muted">
+                                            Why? {r.duplicateReason}
                                           </div>
                                         ) : null}
                                         {(r.duplicateKind === 'DUPLICATE' ||
@@ -2169,26 +2167,39 @@ export default function ProjectWorkspacePage() {
             {selected.possibleDuplicateOf &&
             selected.duplicateKind &&
             selected.duplicateKind !== 'NOT_DUPLICATE' ? (
-              <div className="space-y-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              <div
+                className={`space-y-2 rounded-lg border p-3 text-sm ${
+                  selected.duplicateKind === 'RELATED'
+                    ? 'border-border bg-bg-elevated/40'
+                    : 'border-warning/40 bg-warning/10'
+                }`}
+              >
                 <div className="font-medium">
-                  {selected.duplicateKind.replace(/_/g, ' ')}
+                  {selected.duplicateKind === 'RELATED'
+                    ? 'RELATED TO'
+                    : selected.duplicateKind.replace(/_/g, ' ')}{' '}
+                  {selected.possibleDuplicateOf}
                 </div>
-                <div>{selected.possibleDuplicateOf}</div>
-                {selected.duplicateKind === 'DUPLICATE' &&
-                selected.duplicateSimilarity != null ? (
-                  <div>
-                    Confidence: {Math.round(selected.duplicateSimilarity)}%
-                  </div>
-                ) : null}
                 {selected.duplicateReason ? (
                   <p className="whitespace-pre-wrap text-muted">
-                    Reason: {selected.duplicateReason}
+                    Why? {selected.duplicateReason}
                   </p>
                 ) : null}
                 <p className="text-xs text-muted">
                   Original requirement IDs are preserved — nothing is deleted
                   automatically.
                 </p>
+                <details className="text-xs text-muted">
+                  <summary className="cursor-pointer">AI Analysis Details</summary>
+                  <p className="mt-1">
+                    Decision is semantic (actor, entity, action, capability,
+                    outcome). Similarity percentage is not used as the primary
+                    signal.
+                    {selected.duplicateSimilarity != null
+                      ? ` Internal overlap: ${Math.round(selected.duplicateSimilarity)}%.`
+                      : ''}
+                  </p>
+                </details>
                 {(selected.duplicateKind === 'DUPLICATE' ||
                   selected.duplicateKind === 'POSSIBLE_DUPLICATE') && (
                   <div className="flex flex-wrap gap-2 pt-1">
@@ -2651,15 +2662,19 @@ export default function ProjectWorkspacePage() {
                               <div className="text-xs text-warning">Stale</div>
                             ) : null}
                             {r.possibleDuplicateOf &&
-                            (r.duplicateKind === 'DUPLICATE' ||
-                              r.duplicateKind === 'POSSIBLE_DUPLICATE') ? (
-                              <div className="text-xs text-warning">
-                                {r.duplicateKind === 'DUPLICATE'
-                                  ? 'DUPLICATE of '
-                                  : 'POSSIBLE DUPLICATE of '}
+                            r.duplicateKind &&
+                            r.duplicateKind !== 'NOT_DUPLICATE' ? (
+                              <div className="text-xs text-muted">
+                                {r.duplicateKind === 'RELATED'
+                                  ? 'RELATED to '
+                                  : r.duplicateKind === 'DUPLICATE'
+                                    ? 'DUPLICATE of '
+                                    : r.duplicateKind === 'POSSIBLE_DUPLICATE'
+                                      ? 'POSSIBLE DUPLICATE of '
+                                      : `${r.duplicateKind} · `}
                                 {r.possibleDuplicateOf}
-                                {r.duplicateSimilarity != null
-                                  ? ` · ${Math.round(r.duplicateSimilarity)}% confidence`
+                                {r.duplicateReason
+                                  ? ` — ${r.duplicateReason.split('\n')[0]}`
                                   : ''}
                               </div>
                             ) : null}

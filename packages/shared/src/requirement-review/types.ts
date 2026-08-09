@@ -102,6 +102,7 @@ export const RELATION_TYPES = [
   'DEPENDS_ON',
   'AFFECTS',
   'RELATED_TO',
+  'PRECEDES',
   'CONFLICTS_WITH',
   'DUPLICATE_OF',
   'OVERLAPS',
@@ -220,16 +221,18 @@ export type FeatureGroupDraft = {
 export type DuplicatePair = {
   requirementKeyA: string;
   requirementKeyB: string;
-  /** Internal signal only — not primary UI decision */
+  /** Internal signal only — never the primary UI decision */
   similarity: number;
   kind: DuplicateKind;
   recommendation: string;
   /** User-facing semantic reason */
   reason?: string;
-  /** Only show % for true/possible duplicates when useful */
+  /** Confidence UI only for true DUPLICATE */
   showConfidence?: boolean;
   sameFeatureDifferentOps?: boolean;
   suggestedFeatureSplit?: string[];
+  /** Graph edge type for persistence */
+  relationType?: RelationType | 'PRECEDES';
   semanticA?: {
     actor: string;
     entity: string;
