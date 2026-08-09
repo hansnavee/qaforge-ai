@@ -1244,42 +1244,54 @@ export default function ProjectWorkspacePage() {
           >
             Overview
           </Button>
-          <Button
-            variant={
-              tab !== 'overview' && tab !== 'stlc' ? 'primary' : 'secondary'
-            }
-            size="sm"
-            onClick={() =>
-              setView(
-                (reviewSummaryQuery.data?.features ?? 0) > 0
-                  ? 'features'
-                  : extracted.length
-                    ? 'list'
-                    : 'source',
-              )
-            }
-          >
-            1. Requirements
-          </Button>
-          <Button
-            variant={tab === 'stlc' ? 'primary' : 'secondary'}
-            size="sm"
-            onClick={() => router.replace('?tab=stlc', { scroll: false })}
-          >
-            2–10. QA Steps
-          </Button>
+          {(() => {
+            const activeStep =
+              workflowSteps.find((s) => s.state === 'active') ??
+              workflowSteps[0];
+            const onRequirements =
+              !requirementsApproved || activeStep?.id === 'requirements';
+            return (
+              <>
+                <Button
+                  variant={
+                    tab !== 'overview' && tab !== 'stlc' ? 'primary' : 'secondary'
+                  }
+                  size="sm"
+                  onClick={() =>
+                    setView(
+                      (reviewSummaryQuery.data?.features ?? 0) > 0
+                        ? 'features'
+                        : extracted.length
+                          ? 'list'
+                          : 'source',
+                    )
+                  }
+                >
+                  Requirements
+                </Button>
+                <Button
+                  variant={tab === 'stlc' ? 'primary' : 'secondary'}
+                  size="sm"
+                  disabled={onRequirements && !requirementsApproved}
+                  onClick={() =>
+                    router.replace(
+                      `?tab=stlc&phase=${(activeStep?.id === 'requirements' ? 'planning' : activeStep?.id ?? 'planning').toUpperCase()}`,
+                      { scroll: false },
+                    )
+                  }
+                >
+                  Current phase
+                  {activeStep && activeStep.id !== 'requirements'
+                    ? `: ${activeStep.label.replace(/^\d+\.\s*/, '')}`
+                    : ''}
+                </Button>
+              </>
+            );
+          })()}
         </div>
       </div>
 
-      <Card className="space-y-4">
-        <div>
-          <h2 className="text-base font-medium">How this works</h2>
-          <p className="mt-1 text-sm text-muted">
-            One step at a time. AI prepares the work → you review → you Accept →
-            the next step unlocks.
-          </p>
-        </div>
-
+      <Card className="space-y-3">
         {(() => {
           const activeStep =
             workflowSteps.find((s) => s.state === 'active') ??
@@ -1291,170 +1303,121 @@ export default function ProjectWorkspacePage() {
           const isComplete =
             (reviewSummaryQuery.data?.stlcStage ?? project.stlcStage) ===
               'DONE' || project.status === 'STLC_COMPLETE';
+          const stepNum = Math.min(10, doneCount + (isComplete ? 0 : 1));
 
           return (
-            <>
-              <div className="rounded-xl border border-accent/30 bg-accent/10 p-4">
-                <p className="text-xs font-medium uppercase tracking-wide text-accent">
-                  {isComplete ? 'Finished' : 'You are here'}
-                </p>
-                <p className="mt-1 text-lg font-semibold text-fg">
-                  {isComplete
-                    ? 'All 10 QA steps complete'
-                    : activeStep?.label ?? '1. Requirements'}
-                </p>
-                <p className="mt-1 text-sm text-muted">
-                  {isComplete
-                    ? 'Download reports from the execution page anytime.'
-                    : activeStep?.id === 'requirements' && !requirementsApproved
-                      ? 'Review extracted requirements, then approve to unlock Test Planning.'
-                      : activeStep?.id === 'requirements' && requirementsApproved
-                        ? 'Requirements are approved. Start Test Planning next.'
-                        : `${activeStep?.agent ?? 'AI agent'} prepares this step. Open QA Steps to review and Accept.`}
-                </p>
-                <p className="mt-2 text-xs text-muted">
-                  Progress: {doneCount}/10 steps done
-                </p>
+            <div className="rounded-xl border border-accent/30 bg-accent/10 p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-accent">
+                {isComplete ? 'Finished' : `Step ${stepNum} of 10`}
+              </p>
+              <p className="mt-1 text-xl font-semibold text-fg">
+                {isComplete
+                  ? 'All steps complete'
+                  : activeStep?.label ?? '1. Requirements'}
+              </p>
+              <p className="mt-1 text-sm text-muted">
+                {isComplete
+                  ? 'Open executions to download reports.'
+                  : !requirementsApproved
+                    ? 'Review requirements on this page, then Approve. Next phases open one by one.'
+                    : 'Open the current phase, wait for AI if needed, review, then Accept to move forward.'}
+              </p>
 
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {isComplete ? (
-                    <Link href="/app/executions">
-                      <Button size="sm">Open executions</Button>
-                    </Link>
-                  ) : !requirementsApproved ? (
-                    <>
-                      <Button
-                        size="sm"
-                        onClick={() =>
-                          setView(
-                            (reviewSummaryQuery.data?.features ?? 0) > 0
-                              ? 'features'
-                              : 'list',
-                          )
-                        }
-                      >
-                        Review requirements
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => approveRequirementsMutation.mutate()}
-                        disabled={
-                          !stlcHandoff?.canApprove ||
-                          approveRequirementsMutation.isPending
-                        }
-                      >
-                        {approveRequirementsMutation.isPending
-                          ? 'Approving…'
-                          : 'Approve requirements'}
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <Button
-                        size="sm"
-                        onClick={() => startPlanningMutation.mutate()}
-                        disabled={
-                          !stlcHandoff?.canStartPlanning ||
-                          startPlanningMutation.isPending
-                        }
-                      >
-                        {startPlanningMutation.isPending
-                          ? 'Starting…'
-                          : 'Start next step (Test Planning)'}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        onClick={() =>
-                          router.replace('?tab=stlc&phase=PLANNING', {
-                            scroll: false,
-                          })
-                        }
-                      >
-                        Open QA Steps
-                      </Button>
-                    </>
-                  )}
-                </div>
-
-                {!requirementsApproved &&
-                handoffBlockers.length > 0 &&
-                !stlcHandoff?.canApprove ? (
-                  <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-warning">
-                    {handoffBlockers.map((b) => (
-                      <li key={b}>{b}</li>
-                    ))}
-                  </ul>
-                ) : null}
-                {approveRequirementsMutation.isError ? (
-                  <p className="mt-2 text-sm text-danger">
-                    {approveRequirementsMutation.error instanceof ApiError
-                      ? approveRequirementsMutation.error.message
-                      : 'Could not approve requirements.'}
-                  </p>
-                ) : null}
-                {startPlanningMutation.isError ? (
-                  <p className="mt-2 text-sm text-danger">
-                    {startPlanningMutation.error instanceof ApiError
-                      ? startPlanningMutation.error.message
-                      : 'Could not start Test Planning.'}
-                  </p>
-                ) : null}
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-border">
+                <div
+                  className="h-full rounded-full bg-accent"
+                  style={{
+                    width: `${isComplete ? 100 : Math.max(8, (stepNum / 10) * 100)}%`,
+                  }}
+                />
               </div>
 
-              <ol className="grid gap-1 sm:grid-cols-2">
-                {workflowSteps.map((step) => (
-                  <li key={step.id}>
-                    <button
-                      type="button"
-                      disabled={step.state === 'locked'}
-                      onClick={() => {
-                        if (step.id === 'requirements') {
-                          setView(
-                            (reviewSummaryQuery.data?.features ?? 0) > 0
-                              ? 'features'
-                              : 'list',
-                          );
-                          return;
-                        }
-                        router.replace(
-                          `?tab=stlc&phase=${step.id.toUpperCase()}`,
-                          { scroll: false },
-                        );
-                      }}
-                      className={cn(
-                        'flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm',
-                        step.state === 'done' &&
-                          'border-success/30 bg-success/10 text-success',
-                        step.state === 'active' &&
-                          'border-accent/40 bg-accent/10 text-fg',
-                        step.state === 'locked' &&
-                          'cursor-not-allowed border-border text-muted opacity-60',
-                      )}
+              <div className="mt-4 flex flex-wrap gap-2">
+                {isComplete ? (
+                  <Link href="/app/executions">
+                    <Button size="sm">Open executions</Button>
+                  </Link>
+                ) : !requirementsApproved ? (
+                  <>
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        setView(
+                          (reviewSummaryQuery.data?.features ?? 0) > 0
+                            ? 'features'
+                            : 'list',
+                        )
+                      }
                     >
-                      <span className="w-4 shrink-0 text-center text-xs">
-                        {step.state === 'done'
-                          ? '✓'
-                          : step.state === 'active'
-                            ? '→'
-                            : '·'}
-                      </span>
-                      <span className="min-w-0">
-                        <span className="block font-medium">{step.label}</span>
-                        <span className="block text-[11px] opacity-80">
-                          {step.state === 'done'
-                            ? 'Done'
-                            : step.state === 'active'
-                              ? 'Current'
-                              : 'Locked'}
-                        </span>
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            </>
+                      Review requirements
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => approveRequirementsMutation.mutate()}
+                      disabled={
+                        !stlcHandoff?.canApprove ||
+                        approveRequirementsMutation.isPending
+                      }
+                    >
+                      {approveRequirementsMutation.isPending
+                        ? 'Approving…'
+                        : 'Approve →'}
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      size="sm"
+                      onClick={() => startPlanningMutation.mutate()}
+                      disabled={
+                        !stlcHandoff?.canStartPlanning ||
+                        startPlanningMutation.isPending
+                      }
+                    >
+                      {startPlanningMutation.isPending
+                        ? 'Starting…'
+                        : 'Start this phase'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() =>
+                        router.replace('?tab=stlc&phase=PLANNING', {
+                          scroll: false,
+                        })
+                      }
+                    >
+                      Open current phase
+                    </Button>
+                  </>
+                )}
+              </div>
+
+              {!requirementsApproved &&
+              handoffBlockers.length > 0 &&
+              !stlcHandoff?.canApprove ? (
+                <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-warning">
+                  {handoffBlockers.map((b) => (
+                    <li key={b}>{b}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {approveRequirementsMutation.isError ? (
+                <p className="mt-2 text-sm text-danger">
+                  {approveRequirementsMutation.error instanceof ApiError
+                    ? approveRequirementsMutation.error.message
+                    : 'Could not approve requirements.'}
+                </p>
+              ) : null}
+              {startPlanningMutation.isError ? (
+                <p className="mt-2 text-sm text-danger">
+                  {startPlanningMutation.error instanceof ApiError
+                    ? startPlanningMutation.error.message
+                    : 'Could not start phase.'}
+                </p>
+              ) : null}
+            </div>
           );
         })()}
       </Card>
@@ -1477,13 +1440,6 @@ export default function ProjectWorkspacePage() {
 
       {tab === 'stlc' ? (
         <Card className="space-y-3">
-          <div>
-            <h2 className="text-base font-medium">QA Steps</h2>
-            <p className="mt-1 text-sm text-muted">
-              Focus on the highlighted step. Review the summary, then Accept to
-              continue.
-            </p>
-          </div>
           <StlcDocsPanel projectId={projectId} />
         </Card>
       ) : null}

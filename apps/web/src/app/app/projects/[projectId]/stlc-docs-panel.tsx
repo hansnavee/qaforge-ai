@@ -38,31 +38,12 @@ type PhaseDetail = {
   latestExecutionId?: string | null;
 };
 
-function statusLabel(status: string) {
-  switch (status) {
-    case 'ACCEPTED':
-      return 'Done';
-    case 'READY_FOR_REVIEW':
-      return 'Your turn';
-    case 'RUNNING':
-      return 'AI working';
-    case 'FAILED':
-      return 'Needs attention';
-    case 'LOCKED':
-      return 'Locked';
-    default:
-      return status;
-  }
-}
-
 function friendlyDocPreview(doc: Record<string, unknown>): string[] {
   const lines: string[] = [];
   if (typeof doc.summary === 'string' && doc.summary.trim()) {
     lines.push(doc.summary);
   }
-  if (typeof doc.kind === 'string') {
-    lines.push(`Package: ${doc.kind}`);
-  }
+  if (typeof doc.kind === 'string') lines.push(`Package: ${doc.kind}`);
   const cases = Array.isArray(doc.testCases)
     ? doc.testCases
     : Array.isArray(doc.cases)
@@ -80,8 +61,11 @@ function friendlyDocPreview(doc: Record<string, unknown>): string[] {
   }
   if (!lines.length) {
     const keys = Object.keys(doc);
-    if (keys.length) lines.push(`Contains: ${keys.slice(0, 6).join(', ')}`);
-    else lines.push('No document content yet.');
+    lines.push(
+      keys.length
+        ? `Contains: ${keys.slice(0, 6).join(', ')}`
+        : 'No document content yet.',
+    );
   }
   return lines;
 }
@@ -91,7 +75,6 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const phaseParam = (searchParams.get('phase') ?? '').toUpperCase();
-  const [selected, setSelected] = useState(phaseParam || 'REQUIREMENTS');
   const [draft, setDraft] = useState('');
   const [dirty, setDirty] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
@@ -111,27 +94,34 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
 
   const phases = phasesQuery.data?.phases ?? [];
 
-  const autoPhase = useMemo(() => {
-    const yourTurn = phases.find((p) => p.status === 'READY_FOR_REVIEW');
-    if (yourTurn) return yourTurn.id;
-    const working = phases.find((p) => p.status === 'RUNNING');
-    if (working) return working.id;
-    const firstOpen = phases.find((p) => p.status !== 'LOCKED');
-    return firstOpen?.id ?? 'REQUIREMENTS';
-  }, [phases]);
+  /** Only the current phase — never mix locked/future steps into the view. */
+  const currentPhase = useMemo(() => {
+    if (phaseParam) {
+      const requested = phases.find((p) => p.id === phaseParam);
+      if (requested && requested.status !== 'LOCKED') return requested;
+    }
+    return (
+      phases.find((p) => p.status === 'READY_FOR_REVIEW') ??
+      phases.find((p) => p.status === 'RUNNING') ??
+      phases.find((p) => p.status === 'FAILED') ??
+      [...phases].reverse().find((p) => p.status === 'ACCEPTED') ??
+      phases[0] ??
+      null
+    );
+  }, [phases, phaseParam]);
+
+  const selected = currentPhase?.id ?? 'PLANNING';
 
   useEffect(() => {
-    if (phaseParam) {
-      setSelected(phaseParam);
-      setDirty(false);
-      setShowRaw(false);
-      return;
+    if (!currentPhase) return;
+    if (phaseParam !== currentPhase.id) {
+      router.replace(`?tab=stlc&phase=${currentPhase.id}`, { scroll: false });
     }
-    if (autoPhase) setSelected(autoPhase);
-  }, [phaseParam, autoPhase]);
+  }, [currentPhase, phaseParam, router]);
 
   const phaseQuery = useQuery({
     queryKey: ['stlc-phase', projectId, selected],
+    enabled: Boolean(currentPhase),
     queryFn: async () => {
       const orgId = await getDefaultOrgId();
       return api<PhaseDetail>(
@@ -145,6 +135,7 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
   useEffect(() => {
     if (!phaseQuery.data || dirty) return;
     setDraft(JSON.stringify(phaseQuery.data.document ?? {}, null, 2));
+    setShowRaw(false);
   }, [phaseQuery.data, dirty]);
 
   const saveMutation = useMutation({
@@ -177,25 +168,33 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
         { method: 'POST', body: '{}' },
       );
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       setDirty(false);
-      void qc.invalidateQueries({ queryKey: ['stlc-phases', projectId] });
-      void qc.invalidateQueries({ queryKey: ['stlc-phase', projectId] });
+      await qc.invalidateQueries({ queryKey: ['stlc-phases', projectId] });
+      await qc.invalidateQueries({ queryKey: ['stlc-phase', projectId] });
       void qc.invalidateQueries({ queryKey: ['project', projectId] });
       void qc.invalidateQueries({ queryKey: ['review-summary', projectId] });
+      // After accept, refetch phases and jump to next unlocked step
+      const orgId = await getDefaultOrgId();
+      const next = await api<{ phases: PhaseSummary[] }>(
+        `/api/v1/orgs/${orgId}/projects/${projectId}/stlc/phases`,
+      );
+      const following =
+        next.phases.find((p) => p.status === 'READY_FOR_REVIEW') ??
+        next.phases.find((p) => p.status === 'RUNNING') ??
+        next.phases.find((p) => p.status !== 'LOCKED' && p.status !== 'ACCEPTED');
+      if (following) {
+        router.replace(`?tab=stlc&phase=${following.id}`, { scroll: false });
+      }
     },
   });
 
   const detail = phaseQuery.data;
-  const currentIndex = phases.find((p) => p.id === selected)?.index ?? 1;
+  const stepNum = currentPhase?.index ?? 1;
+  const total = phases.length || 10;
   const doneCount = phases.filter((p) => p.status === 'ACCEPTED').length;
-
-  function selectPhase(id: string) {
-    setSelected(id);
-    setDirty(false);
-    setShowRaw(false);
-    router.replace(`?tab=stlc&phase=${id}`, { scroll: false });
-  }
+  const prevPhase = phases.find((p) => p.index === stepNum - 1);
+  const nextPhase = phases.find((p) => p.index === stepNum + 1);
 
   async function download(format: string) {
     const orgId = await getDefaultOrgId();
@@ -206,225 +205,206 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
     );
   }
 
+  function goPrev() {
+    if (!prevPhase || prevPhase.status === 'LOCKED') return;
+    setDirty(false);
+    router.replace(`?tab=stlc&phase=${prevPhase.id}`, { scroll: false });
+  }
+
+  if (!currentPhase) {
+    return (
+      <p className="text-sm text-muted">
+        No QA step available yet. Approve requirements first, then start Test
+        Planning.
+      </p>
+    );
+  }
+
   return (
-    <div className="space-y-4">
-      <div className="rounded-xl border border-border bg-panel/40 px-4 py-3">
-        <p className="text-sm text-fg">
-          Simple flow: <strong>AI prepares</strong> → <strong>you review</strong>{' '}
-          → <strong>Accept</strong> → next step unlocks.
-        </p>
-        <p className="mt-1 text-xs text-muted">
-          Progress: {doneCount} of {phases.length || 10} steps done
-          {detail ? ` · Viewing step ${currentIndex}` : ''}
-        </p>
+    <div className="mx-auto max-w-3xl space-y-5">
+      {/* Single progress strip — not a list of all tabs */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <span className="font-medium text-fg">
+            Step {stepNum} of {total}
+          </span>
+          <span className="text-muted">{doneCount} completed</span>
+        </div>
+        <div className="h-2 overflow-hidden rounded-full bg-border">
+          <div
+            className="h-full rounded-full bg-accent transition-all"
+            style={{ width: `${Math.max(8, (stepNum / total) * 100)}%` }}
+          />
+        </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[240px_1fr]">
-        <aside className="space-y-1 rounded-xl border border-border bg-surface p-2">
-          {phases.map((p) => {
-            const active = selected === p.id;
-            const done = p.status === 'ACCEPTED';
-            const yourTurn = p.status === 'READY_FOR_REVIEW';
-            const locked = p.status === 'LOCKED';
-            return (
-              <button
-                key={p.id}
-                type="button"
-                disabled={locked}
-                onClick={() => selectPhase(p.id)}
+      <section className="rounded-xl border border-border bg-surface p-5 sm:p-6">
+        <p className="text-xs font-medium uppercase tracking-wide text-muted">
+          Current phase only
+        </p>
+        <h3 className="mt-1 text-2xl font-semibold text-fg">
+          {currentPhase.label}
+        </h3>
+        <p className="mt-1 text-sm text-muted">
+          {currentPhase.agentName}
+          {detail?.description ? ` · ${detail.description}` : ''}
+        </p>
+
+        {!detail ? (
+          <p className="mt-6 text-sm text-muted">Loading this step…</p>
+        ) : detail.status === 'RUNNING' ? (
+          <div className="mt-6 rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm">
+            AI is preparing this step. Wait here — the page updates
+            automatically. Then review and Accept.
+          </div>
+        ) : (
+          <>
+            {detail.validation ? (
+              <div
                 className={cn(
-                  'flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition',
-                  active && 'bg-accent/15 ring-1 ring-accent/40',
-                  !active && !locked && 'hover:bg-bg-elevated',
-                  locked && 'cursor-not-allowed opacity-45',
+                  'mt-5 rounded-lg border px-3 py-3 text-sm',
+                  detail.validation.passed
+                    ? 'border-success/30 bg-success/10'
+                    : 'border-warning/30 bg-warning/10',
                 )}
               >
-                <span
-                  className={cn(
-                    'mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold',
-                    done && 'bg-success/20 text-success',
-                    yourTurn && 'bg-accent/25 text-accent',
-                    p.status === 'RUNNING' && 'bg-warning/20 text-warning',
-                    locked && 'bg-border text-muted',
-                  )}
-                >
-                  {done ? '✓' : p.index}
-                </span>
-                <span className="min-w-0">
-                  <span className="block font-medium text-fg">{p.label}</span>
-                  <span className="block text-[11px] text-muted">
-                    {statusLabel(p.status)}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
-        </aside>
-
-        <section className="rounded-xl border border-border bg-surface p-4 sm:p-5">
-          {!detail ? (
-            <p className="text-sm text-muted">Loading this step…</p>
-          ) : (
-            <>
-              <div className="space-y-1">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted">
-                  Step {currentIndex} · {statusLabel(detail.status)}
+                <p className="font-medium text-fg">
+                  {detail.validation.passed
+                    ? 'Ready for your review'
+                    : 'Review carefully'}
                 </p>
-                <h3 className="text-xl font-semibold text-fg">{detail.label}</h3>
-                <p className="text-sm text-muted">
-                  Prepared by {detail.agentName}
-                </p>
+                <p className="mt-1 text-muted">{detail.validation.summary}</p>
               </div>
+            ) : null}
 
-              {detail.status === 'LOCKED' ? (
-                <div className="mt-6 rounded-lg border border-border bg-panel/50 p-4 text-sm text-muted">
-                  This step is locked. Finish the previous step and click{' '}
-                  <strong className="text-fg">Accept</strong> to unlock it.
-                </div>
-              ) : null}
+            <div className="mt-5 rounded-lg border border-border bg-panel/40 p-4">
+              <p className="text-sm font-medium text-fg">What to review</p>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted">
+                {friendlyDocPreview(detail.document).map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </div>
 
-              {detail.status === 'RUNNING' ? (
-                <div className="mt-6 rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm">
-                  AI is working on this step in the background. This page
-                  refreshes automatically. You only need to wait, then review.
-                </div>
-              ) : null}
-
-              {detail.status !== 'LOCKED' && detail.status !== 'RUNNING' ? (
-                <>
-                  {detail.validation ? (
-                    <div
-                      className={cn(
-                        'mt-5 rounded-lg border px-3 py-3 text-sm',
-                        detail.validation.passed
-                          ? 'border-success/30 bg-success/10 text-fg'
-                          : 'border-warning/30 bg-warning/10 text-fg',
-                      )}
-                    >
-                      <p className="font-medium">
-                        {detail.validation.passed
-                          ? 'AI check passed'
-                          : 'AI found issues to review'}
-                      </p>
-                      <p className="mt-1 text-muted">
-                        {detail.validation.summary}
-                      </p>
-                    </div>
-                  ) : null}
-
-                  <div className="mt-5 rounded-lg border border-border bg-panel/40 p-4">
-                    <p className="text-sm font-medium text-fg">What to review</p>
-                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted">
-                      {friendlyDocPreview(detail.document).map((line) => (
-                        <li key={line}>{line}</li>
-                      ))}
-                    </ul>
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap items-center gap-2">
-                    <span className="text-xs text-muted">Download:</span>
-                    {(detail.downloads ?? [])
-                      .filter((d) =>
-                        ['json', 'md', 'html', 'csv'].includes(d.format),
-                      )
-                      .map((d) => (
-                        <Button
-                          key={d.format}
-                          type="button"
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => void download(d.format)}
-                        >
-                          {d.format.toUpperCase()}
-                        </Button>
-                      ))}
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setShowRaw((v) => !v)}
-                    >
-                      {showRaw ? 'Hide details' : 'Edit details'}
-                    </Button>
-                  </div>
-
-                  {showRaw ? (
-                    <div className="mt-3 space-y-2">
-                      <textarea
-                        className="min-h-[240px] w-full rounded-lg border border-border bg-bg-elevated p-3 font-mono text-xs text-fg"
-                        value={draft}
-                        readOnly={!detail.permissions.canEdit}
-                        onChange={(e) => {
-                          setDraft(e.target.value);
-                          setDirty(true);
-                        }}
-                      />
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="secondary"
-                        disabled={
-                          !detail.permissions.canSave ||
-                          !dirty ||
-                          saveMutation.isPending
-                        }
-                        onClick={() => saveMutation.mutate()}
-                      >
-                        {saveMutation.isPending ? 'Saving…' : 'Save edits'}
-                      </Button>
-                    </div>
-                  ) : null}
-
-                  <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-border pt-4">
-                    <Button
-                      type="button"
-                      size="lg"
-                      disabled={
-                        !detail.permissions.canAccept ||
-                        dirty ||
-                        acceptMutation.isPending
-                      }
-                      onClick={() => acceptMutation.mutate()}
-                    >
-                      {acceptMutation.isPending
-                        ? 'Accepting…'
-                        : detail.status === 'ACCEPTED'
-                          ? 'Already accepted'
-                          : 'Accept & go to next step'}
-                    </Button>
-                    <p className="text-xs text-muted">
-                      Accept means you reviewed this step and approve moving on.
-                    </p>
-                  </div>
-                  {dirty ? (
-                    <p className="mt-2 text-xs text-warning">
-                      Save your edits before Accept.
-                    </p>
-                  ) : null}
-                  {saveMutation.isError || acceptMutation.isError ? (
-                    <p className="mt-2 text-sm text-danger">
-                      {(saveMutation.error || acceptMutation.error)?.message ??
-                        'Action failed'}
-                    </p>
-                  ) : null}
-                </>
-              ) : null}
-
-              {detail.latestExecutionId ? (
-                <p className="mt-4 text-xs text-muted">
-                  Run details:{' '}
-                  <a
-                    className="underline"
-                    href={`/app/executions/${detail.latestExecutionId}`}
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted">Download</span>
+              {(detail.downloads ?? [])
+                .filter((d) => ['md', 'html', 'csv', 'json'].includes(d.format))
+                .map((d) => (
+                  <Button
+                    key={d.format}
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => void download(d.format)}
                   >
-                    open execution
-                  </a>
-                </p>
-              ) : null}
-            </>
+                    {d.format.toUpperCase()}
+                  </Button>
+                ))}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowRaw((v) => !v)}
+              >
+                {showRaw ? 'Hide edit' : 'Edit'}
+              </Button>
+            </div>
+
+            {showRaw ? (
+              <div className="mt-3 space-y-2">
+                <textarea
+                  className="min-h-[200px] w-full rounded-lg border border-border bg-bg-elevated p-3 font-mono text-xs"
+                  value={draft}
+                  readOnly={!detail.permissions.canEdit}
+                  onChange={(e) => {
+                    setDraft(e.target.value);
+                    setDirty(true);
+                  }}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={
+                    !detail.permissions.canSave ||
+                    !dirty ||
+                    saveMutation.isPending
+                  }
+                  onClick={() => saveMutation.mutate()}
+                >
+                  Save
+                </Button>
+              </div>
+            ) : null}
+
+            {dirty ? (
+              <p className="mt-2 text-xs text-warning">
+                Save edits before continuing.
+              </p>
+            ) : null}
+            {acceptMutation.isError || saveMutation.isError ? (
+              <p className="mt-2 text-sm text-danger">
+                {(acceptMutation.error || saveMutation.error)?.message ??
+                  'Action failed'}
+              </p>
+            ) : null}
+          </>
+        )}
+      </section>
+
+      {/* One-by-one navigation */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={!prevPhase || prevPhase.status === 'LOCKED'}
+          onClick={goPrev}
+        >
+          ← Previous
+        </Button>
+
+        <div className="flex flex-wrap gap-2">
+          {detail?.status === 'ACCEPTED' &&
+          nextPhase &&
+          nextPhase.status !== 'LOCKED' ? (
+            <Button
+              type="button"
+              onClick={() =>
+                router.replace(`?tab=stlc&phase=${nextPhase.id}`, {
+                  scroll: false,
+                })
+              }
+            >
+              Next step →
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="lg"
+              disabled={
+                !detail?.permissions.canAccept ||
+                dirty ||
+                acceptMutation.isPending ||
+                detail?.status === 'RUNNING' ||
+                detail?.status === 'ACCEPTED'
+              }
+              onClick={() => acceptMutation.mutate()}
+            >
+              {acceptMutation.isPending
+                ? 'Saving…'
+                : detail?.status === 'ACCEPTED'
+                  ? 'Accepted'
+                  : 'Accept & next →'}
+            </Button>
           )}
-        </section>
+        </div>
       </div>
+
+      <p className="text-center text-xs text-muted">
+        You only work on this one phase. After Accept, we take you to the next
+        phase automatically.
+      </p>
     </div>
   );
 }
