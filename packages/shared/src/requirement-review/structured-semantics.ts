@@ -81,10 +81,20 @@ const CAPABILITY_ALIASES: Record<string, string> = {
   otp_entry: 'otp_entry',
   email_uniqueness: 'email_uniqueness',
   unique_email: 'email_uniqueness',
+  profile_email_restriction: 'profile_email_restriction',
+  registration_redirect: 'registration_redirect',
   access_control: 'access_control',
   checkout: 'checkout',
   payment: 'payment',
+  payment_methods: 'payment_methods',
+  payment_processing: 'payment_processing',
+  payment_failure: 'payment_failure',
   product_discovery: 'product_discovery',
+  product_review: 'product_review',
+  browser_compatibility: 'browser_compatibility',
+  mobile_usability: 'mobile_usability',
+  application_performance: 'application_performance',
+  error_messaging: 'error_messaging',
 };
 
 const ACTOR_ALIASES: Record<string, string> = {
@@ -153,8 +163,8 @@ export function canonicalizeObject(raw: string): string {
 export function canonicalizeAction(raw: string): string {
   const key = toSnake(raw);
   const map: Record<string, string> = {
-    purchase: 'pay',
-    buy: 'pay',
+    purchase: 'purchase',
+    buy: 'purchase',
     view: 'read',
     open: 'read',
     display: 'read',
@@ -165,7 +175,9 @@ export function canonicalizeAction(raw: string): string {
     register: 'create',
     add: 'create',
     update: 'update',
+    change: 'update',
     edit: 'update',
+    modify: 'update',
     delete: 'delete',
     remove: 'delete',
     expire: 'expire',
@@ -176,6 +188,8 @@ export function canonicalizeAction(raw: string): string {
     reset: 'reset',
     verify: 'verify',
     select: 'select',
+    navigate: 'navigate',
+    redirect: 'navigate',
   };
   return map[key] ?? (key || 'unspecified');
 }
@@ -287,15 +301,29 @@ export function extractStructuredSemanticsHeuristic(
   let requirementType: StructuredRequirementType = 'FUNCTIONAL';
   let confidence = 0.72;
 
-  // --- High-confidence domain patterns ---
-  if (/out of stock|out-of-stock|cannot be purchased/.test(t)) {
+  // --- High-confidence domain patterns (most-specific first) ---
+  if (/out of stock|out-of-stock|cannot be purchased|cannot buy/.test(t)) {
     object = 'product';
-    action = 'pay';
+    action = 'purchase';
     capability = 'inventory';
     condition = 'OUT_OF_STOCK';
     polarity = 'NOT_ALLOWED';
     requirementType = 'BUSINESS_RULE';
     confidence = 0.96;
+  } else if (
+    /\bemail\b/.test(t) &&
+    /\b(change|update|edit|modify)\b/.test(t) &&
+    (polarity === 'NOT_ALLOWED' ||
+      /\b(cannot|must not|should not|not be allowed)\b/.test(t))
+  ) {
+    // Implicit object/action: registered email cannot be changed
+    object = 'user_account';
+    action = 'update';
+    capability = 'profile_email_restriction';
+    condition = 'REGISTERED_EMAIL_IMMUTABLE';
+    polarity = 'NOT_ALLOWED';
+    requirementType = 'BUSINESS_RULE';
+    confidence = 0.94;
   } else if (/unique/.test(t) && /email/.test(t)) {
     object = 'user_account';
     action = 'create';
@@ -337,12 +365,23 @@ export function extractStructuredSemanticsHeuristic(
     action = 'reset';
     capability = 'password_reset';
     confidence = 0.92;
+  } else if (
+    /\bredirect\b/.test(t) &&
+    /\b(registration|register|login|sign in)\b/.test(t)
+  ) {
+    object = 'user_account';
+    action = 'navigate';
+    capability = 'registration_redirect';
+    confidence = 0.93;
   } else if (/\b(register|registration|sign up|create an account)\b/.test(t)) {
     object = 'user_account';
     action = 'create';
     capability = 'user_registration';
     confidence = 0.93;
-  } else if (/\b(login|sign in)\b/.test(t) && !/\bregister/.test(t)) {
+  } else if (
+    /\b(login|sign in)\b/.test(t) &&
+    !/\b(register|registration|sign up|create an account)\b/.test(t)
+  ) {
     object = 'user_account';
     action = 'login';
     capability = 'user_login';
@@ -360,6 +399,16 @@ export function extractStructuredSemanticsHeuristic(
     action = 'read';
     capability = 'order_history';
     confidence = 0.93;
+  } else if (
+    /\beach order\b/.test(t) ||
+    (/\border\b/.test(t) &&
+      /\b(display|show|contain|include)\b/.test(t) &&
+      !/confirmation|checkout|payment/.test(t))
+  ) {
+    object = 'order';
+    action = 'read';
+    capability = 'order_details';
+    confidence = 0.91;
   } else if (
     /\b(administrators?|admins?)\b/.test(t) &&
     /product/.test(t) &&
@@ -414,20 +463,87 @@ export function extractStructuredSemanticsHeuristic(
   } else if (/\bpayment\b/.test(t)) {
     object = 'payment';
     action = 'pay';
-    capability = 'payment';
+    if (/fail|failure|failed/.test(t)) {
+      capability = 'payment_failure';
+      condition = 'PAYMENT_FAILED';
+      requirementType = /must not|cannot|should not|not create/.test(t)
+        ? 'BUSINESS_RULE'
+        : 'FUNCTIONAL';
+    } else if (/method|credit card|debit card/.test(t)) {
+      capability = 'payment_methods';
+    } else if (/process/.test(t)) {
+      capability = 'payment_processing';
+    } else {
+      capability = 'payment';
+    }
     confidence = 0.9;
   } else if (
-    /administrative functionality|administrator permissions|normal users? should not/.test(
+    /administrative functionality|administrator permissions|admin(istrator)? access|normal users? should not/.test(
       t,
     )
   ) {
     object = 'user_account';
-    action = 'read';
+    action = /not|cannot|denied/.test(t) ? 'deny' : 'read';
     capability = 'access_control';
+    confidence = 0.9;
+  } else if (/\breview\b|\brating\b/.test(t) && !/code review|review status/.test(t)) {
+    object = 'review';
+    action = 'create';
+    capability = 'product_review';
+    confidence = 0.9;
+  } else if (/modern browsers?|browser compat/.test(t)) {
+    object = 'application';
+    action = 'support';
+    capability = 'browser_compatibility';
+    requirementType = 'NON_FUNCTIONAL';
+    confidence = 0.92;
+  } else if (/\bmobile\b/.test(t) && /usab|friendly|responsive|easy/.test(t)) {
+    object = 'application';
+    action = 'support';
+    capability = 'mobile_usability';
+    requirementType = 'NON_FUNCTIONAL';
+    confidence = 0.92;
+  } else if (
+    /respond within|within\s+\d+\s+seconds?|performance|fast|quickly/.test(t) &&
+    /application|search|checkout|page|load/.test(t)
+  ) {
+    object = 'application';
+    action = 'support';
+    capability = 'application_performance';
+    requirementType = 'NON_FUNCTIONAL';
+    confidence = 0.9;
+  } else if (/error message|clear error|display.*error/.test(t)) {
+    object = 'application';
+    action = 'display';
+    capability = 'error_messaging';
+    requirementType = 'NON_FUNCTIONAL';
     confidence = 0.9;
   } else if (input.type?.toUpperCase().includes('BUSINESS')) {
     requirementType = 'BUSINESS_RULE';
     confidence = 0.7;
+  }
+
+  // Secondary pass: recover implicit object/action when still unspecified
+  if (object === 'general' || action === 'unspecified') {
+    const recovered = recoverImplicitObjectAction(t, polarity);
+    if (object === 'general' && recovered.object !== 'general') {
+      object = recovered.object;
+      confidence = Math.max(confidence, 0.86);
+    }
+    if (action === 'unspecified' && recovered.action !== 'unspecified') {
+      action = recovered.action;
+      confidence = Math.max(confidence, 0.86);
+    }
+    if (
+      capability === 'general' &&
+      recovered.capability !== 'general'
+    ) {
+      capability = recovered.capability;
+    }
+    if (recovered.requirementType) {
+      requirementType = recovered.requirementType;
+    }
+    if (recovered.condition) condition = recovered.condition;
   }
 
   if (polarity === 'NOT_ALLOWED' && requirementType === 'FUNCTIONAL') {
@@ -446,6 +562,56 @@ export function extractStructuredSemanticsHeuristic(
     uncertain: confidence < STRUCTURED_SEMANTIC_CONFIDENCE_ACCEPT,
     source: 'heuristic',
   };
+}
+
+/**
+ * Recover object/action from clear verbs + nouns when primary patterns miss.
+ * Hierarchy: noun object + verb action — not keyword-family guesswork.
+ */
+function recoverImplicitObjectAction(
+  t: string,
+  polarity: StructuredPolarity,
+): {
+  object: string;
+  action: string;
+  capability: string;
+  condition: string | null;
+  requirementType?: StructuredRequirementType;
+} {
+  let object = 'general';
+  let action = 'unspecified';
+  let capability = 'general';
+  let condition: string | null = null;
+  let requirementType: StructuredRequirementType | undefined;
+
+  if (/\bemail\b/.test(t)) object = 'user_account';
+  else if (/\bpassword\b/.test(t)) object = 'user_account';
+  else if (/\botp\b/.test(t)) object = 'otp';
+  else if (/\bcart\b/.test(t)) object = 'cart_item';
+  else if (/\border\b/.test(t)) object = 'order';
+  else if (/\bproduct\b/.test(t)) object = 'product';
+  else if (/\bpayment\b/.test(t)) object = 'payment';
+  else if (/\bprofile\b/.test(t)) object = 'user_account';
+
+  if (/\b(change|update|edit|modify)\b/.test(t)) action = 'update';
+  else if (/\b(create|add|register)\b/.test(t)) action = 'create';
+  else if (/\b(delete|remove)\b/.test(t)) action = 'delete';
+  else if (/\b(view|open|display|show)\b/.test(t)) action = 'read';
+  else if (/\b(buy|purchase|pay)\b/.test(t)) action = 'purchase';
+  else if (/\b(search|find)\b/.test(t)) action = 'search';
+
+  if (
+    object === 'user_account' &&
+    action === 'update' &&
+    /\bemail\b/.test(t) &&
+    polarity === 'NOT_ALLOWED'
+  ) {
+    capability = 'profile_email_restriction';
+    condition = 'REGISTERED_EMAIL_IMMUTABLE';
+    requirementType = 'BUSINESS_RULE';
+  }
+
+  return { object, action, capability, condition, requirementType };
 }
 
 export function parseStructuredSemanticsBatch(

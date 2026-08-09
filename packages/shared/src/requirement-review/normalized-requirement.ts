@@ -220,7 +220,10 @@ function refineCapability(
   if (/\b(register|registration|sign up|create an account)\b/.test(t)) {
     return 'user_registration';
   }
-  if (/\b(login|sign in)\b/.test(t) && !/\bregister/.test(t)) {
+  if (
+    /\b(login|sign in)\b/.test(t) &&
+    !/\b(register|registration|sign up|create an account)\b/.test(t)
+  ) {
     return 'user_login';
   }
   if (
@@ -389,12 +392,15 @@ export function capabilityFamily(
   b: NormalizedRequirement,
 ): boolean {
   if (a.capability === b.capability) return true;
-  const admin = new Set([
-    'product_administration',
-    'inventory',
-    'inventory_update',
-  ]);
+  const admin = new Set(['product_administration', 'inventory_update']);
   if (admin.has(a.capability) && admin.has(b.capability)) return true;
+  const payment = new Set([
+    'payment',
+    'payment_methods',
+    'payment_processing',
+    'payment_failure',
+  ]);
+  if (payment.has(a.capability) && payment.has(b.capability)) return true;
   const discovery = new Set([
     'product_search',
     'product_search_results',
@@ -403,7 +409,11 @@ export function capabilityFamily(
     'product_discovery',
   ]);
   if (discovery.has(a.capability) && discovery.has(b.capability)) return true;
-  const authLifecycle = new Set(['user_registration', 'user_login']);
+  const authLifecycle = new Set([
+    'user_registration',
+    'registration_redirect',
+    'user_login',
+  ]);
   if (authLifecycle.has(a.capability) && authLifecycle.has(b.capability))
     return true;
   const otpFamily = new Set([

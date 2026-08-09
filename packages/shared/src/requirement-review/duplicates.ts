@@ -181,11 +181,17 @@ function substantiallySameBehavior(
   return true;
 }
 
+/** Admin catalog/inventory CRUD peers only — not customer stock business rules. */
 function isAdminInventoryCap(c: string): boolean {
+  return c === 'product_administration' || c === 'inventory_update';
+}
+
+function isPaymentCap(c: string): boolean {
   return (
-    c === 'product_administration' ||
-    c === 'inventory' ||
-    c === 'inventory_update'
+    c === 'payment' ||
+    c === 'payment_methods' ||
+    c === 'payment_processing' ||
+    c === 'payment_failure'
   );
 }
 
@@ -193,9 +199,84 @@ function isPurchaseConstrainedCap(c: string): boolean {
   return (
     c === 'shopping_cart' ||
     c === 'checkout' ||
-    c === 'payment' ||
-    c === 'product_details'
+    isPaymentCap(c)
   );
+}
+
+/** Coarse business domain — cross-domain pairs default to INDEPENDENT. */
+function businessDomain(n: NormalizedRequirement): string {
+  const c = n.capability;
+  if (
+    c === 'browser_compatibility' ||
+    c === 'mobile_usability' ||
+    c === 'application_performance' ||
+    c === 'error_messaging' ||
+    n.type === 'Non-Functional'
+  ) {
+    return 'nfr';
+  }
+  if (c === 'access_control') return 'access';
+  if (c === 'product_review') return 'engagement';
+  if (
+    c === 'user_registration' ||
+    c === 'registration_redirect' ||
+    c === 'user_login' ||
+    c === 'email_uniqueness' ||
+    c === 'profile_email_restriction' ||
+    c === 'password_reset' ||
+    c === 'otp_delivery' ||
+    c === 'otp_entry' ||
+    c === 'otp_expiration'
+  ) {
+    return 'account';
+  }
+  if (isAdminInventoryCap(c)) return 'admin';
+  if (c === 'inventory' && (n.isBusinessRule || n.polarity === 'NOT_ALLOWED')) {
+    return 'purchase_constraint';
+  }
+  if (
+    c === 'shopping_cart' ||
+    c === 'checkout' ||
+    isPaymentCap(c)
+  ) {
+    return 'purchase';
+  }
+  if (
+    c === 'product_search' ||
+    c === 'product_search_results' ||
+    c === 'product_filtering' ||
+    c === 'product_details' ||
+    c === 'product_discovery'
+  ) {
+    return 'discovery';
+  }
+  if (
+    c === 'order_confirmation' ||
+    c === 'order_details' ||
+    c === 'order_history' ||
+    c === 'order_access' ||
+    c === 'order_management'
+  ) {
+    return 'order';
+  }
+  return `cap:${c}`;
+}
+
+function domainsCompatibleForRelation(
+  a: NormalizedRequirement,
+  b: NormalizedRequirement,
+): boolean {
+  const da = businessDomain(a);
+  const db = businessDomain(b);
+  if (da === db) return true;
+  // Purchase constraints intentionally bind to purchase behaviors
+  if (
+    (da === 'purchase_constraint' && db === 'purchase') ||
+    (db === 'purchase_constraint' && da === 'purchase')
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function isInventoryConstraint(n: NormalizedRequirement): boolean {
@@ -219,22 +300,20 @@ function isUniquenessRule(n: NormalizedRequirement): boolean {
   );
 }
 
+function isAccessControlRequirement(n: NormalizedRequirement): boolean {
+  if (n.capability === 'access_control') return true;
+  const t = n.originalText.toLowerCase();
+  return /administrative functionality|administrator permissions|admin(istrator)? access|normal users? should not|non[- ]admin/.test(
+    t,
+  );
+}
+
+/** BOTH sides must be access-control concerns — never one-sided. */
 function isAccessControlPair(
   a: NormalizedRequirement,
   b: NormalizedRequirement,
 ): boolean {
-  const caps = new Set([a.capability, b.capability]);
-  if (caps.has('access_control')) return true;
-  const ta = a.originalText.toLowerCase();
-  const tb = b.originalText.toLowerCase();
-  const adminAccess =
-    /administrative functionality|administrator permissions|admin(istrator)? access/.test(
-      ta,
-    ) ||
-    /administrative functionality|administrator permissions|admin(istrator)? access/.test(
-      tb,
-    );
-  return adminAccess && opposingPolarity(a, b);
+  return isAccessControlRequirement(a) && isAccessControlRequirement(b);
 }
 
 /**
@@ -315,20 +394,21 @@ function classifyNormalized(
     }
   }
 
-  // 3) CONFLICT — opposing polarity on same access-control / capability concern
-  if (
-    opposingPolarity(a, b) &&
-    (sameCapability(a, b) || isAccessControlPair(a, b))
-  ) {
-    if (isAccessControlPair(a, b)) {
-      // Complementary access rules — RELATED, not spam CONFLICT
-      return pairResult(a, b, {
-        kind: 'RELATED',
-        relationType: 'RELATED_TO',
-        reason:
-          'Complementary access-control rules (admin allow vs non-admin deny) for the same administrative boundary.',
-      });
-    }
+  // Cross-domain gate — same actor / polarity alone never bridges domains
+  if (!domainsCompatibleForRelation(a, b)) {
+    return null;
+  }
+
+  // 3) CONFLICT / complementary access — BOTH sides must share the concern
+  if (isAccessControlPair(a, b) && opposingPolarity(a, b)) {
+    return pairResult(a, b, {
+      kind: 'RELATED',
+      relationType: 'RELATED_TO',
+      reason:
+        'Complementary access-control rules (admin allow vs non-admin deny) for the same administrative boundary.',
+    });
+  }
+  if (opposingPolarity(a, b) && sameCapability(a, b)) {
     return pairResult(a, b, {
       kind: 'CONFLICT',
       relationType: 'CONFLICTS_WITH',
@@ -337,7 +417,7 @@ function classifyNormalized(
     });
   }
 
-  // 4) RELATED peers that must NOT be misclassified as SEQUENTIAL
+  // 4) RELATED peers that must NOT be misclassified as SEQUENTIAL / DUPLICATE
   // 4a) Search vs filter — parallel discovery tools
   if (
     (a.capability === 'product_search' &&
@@ -349,6 +429,35 @@ function classifyNormalized(
       relationType: 'RELATED_TO',
       reason:
         'Related product discovery capabilities (search vs filter). Different user operations, not duplicates.',
+    });
+  }
+
+  // 4a2) Payment methods / processing / failure — RELATED peers, never duplicates
+  if (
+    isPaymentCap(a.capability) &&
+    isPaymentCap(b.capability) &&
+    a.capability !== b.capability
+  ) {
+    return pairResult(a, b, {
+      kind: 'RELATED',
+      relationType: 'RELATED_TO',
+      reason:
+        'Related payment capabilities (methods vs processing vs failure handling). Different business behaviors, not duplicates.',
+    });
+  }
+
+  // 4a3) Registration vs post-registration redirect — RELATED, not duplicate
+  if (
+    (a.capability === 'user_registration' &&
+      b.capability === 'registration_redirect') ||
+    (b.capability === 'user_registration' &&
+      a.capability === 'registration_redirect')
+  ) {
+    return pairResult(a, b, {
+      kind: 'RELATED',
+      relationType: 'RELATED_TO',
+      reason:
+        'Registration and post-registration redirect are related account steps, not the same requirement.',
     });
   }
 
@@ -442,21 +551,25 @@ function classifyNormalized(
     }
   }
 
-  // Purchase chain: cart → checkout → payment → confirmation
-  const purchaseChain = [
-    'shopping_cart',
-    'checkout',
-    'payment',
-    'order_confirmation',
-  ] as const;
+  // Purchase chain: cart → checkout → payment* → confirmation
+  // Payment subtypes are RELATED (above), not SEQUENTIAL with each other.
+  const purchaseStep = (c: string): number | null => {
+    if (c === 'shopping_cart') return 0;
+    if (c === 'checkout') return 1;
+    if (isPaymentCap(c)) return 2;
+    if (c === 'order_confirmation') return 3;
+    return null;
+  };
   {
-    const ia = purchaseChain.indexOf(
-      a.capability as (typeof purchaseChain)[number],
-    );
-    const ib = purchaseChain.indexOf(
-      b.capability as (typeof purchaseChain)[number],
-    );
-    if (ia >= 0 && ib >= 0 && ia !== ib && Math.abs(ia - ib) <= 2) {
+    const ia = purchaseStep(a.capability);
+    const ib = purchaseStep(b.capability);
+    if (
+      ia != null &&
+      ib != null &&
+      ia !== ib &&
+      Math.abs(ia - ib) <= 2 &&
+      !(isPaymentCap(a.capability) && isPaymentCap(b.capability))
+    ) {
       const [from, to] = ia < ib ? [a, b] : [b, a];
       return pairResult(from, to, {
         kind: 'SEQUENTIAL',

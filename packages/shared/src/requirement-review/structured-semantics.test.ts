@@ -16,7 +16,7 @@ describe('structured semantic extraction', () => {
       description: 'Customers cannot buy an out-of-stock product.',
     });
     expect(s.actor).toBe('customer');
-    expect(s.action).toBe('pay');
+    expect(s.action).toBe('purchase');
     expect(s.object).toBe('product');
     expect(s.condition).toBe('OUT_OF_STOCK');
     expect(s.polarity).toBe('NOT_ALLOWED');
