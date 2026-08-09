@@ -226,6 +226,123 @@ describe('business-rule constraints', () => {
   });
 });
 
+describe('CONFLICT requires same capability/entity + opposite polarity', () => {
+  const orderAccess = {
+    requirementKey: 'REQ-040',
+    title: 'Order Access Control',
+    description:
+      "Users should not be able to access another user's order information.",
+    type: 'BUSINESS_RULE',
+  };
+
+  it('Profile Update ↔ Order Access Control → INDEPENDENT (false conflict)', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-037',
+          title: 'Profile Update',
+          description: 'Users should be able to update their profile information.',
+        },
+        orderAccess,
+      ),
+    ).toBe('NOT_RELATED');
+  });
+
+  it('Modify Product Quantity ↔ Order Access Control → INDEPENDENT', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-015',
+          title: 'Modify Product Quantity',
+          description:
+            'Users can increase or decrease the quantity of products.',
+        },
+        orderAccess,
+      ),
+    ).toBe('NOT_RELATED');
+  });
+
+  it('cart / checkout wording vs order access is not CONFLICT', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'REQ-016',
+          title: 'Remove Product From Cart',
+          description: 'Users should be able to remove products from the cart.',
+        },
+        orderAccess,
+      ),
+    ).toBe('NOT_RELATED');
+  });
+
+  it('genuine opposite polarity on same capability/entity → CONFLICT', () => {
+    expect(
+      analyzeRelationship(
+        {
+          requirementKey: 'ORDER-ACCESS-ALLOW',
+          title: 'Cross-User Order Access Allowed',
+          description:
+            "Users should be able to access another user's order information.",
+        },
+        {
+          requirementKey: 'ORDER-ACCESS-DENY',
+          title: 'Order Access Control',
+          description:
+            "Users should not be able to access another user's order information.",
+          type: 'BUSINESS_RULE',
+        },
+      ),
+    ).toBe('CONFLICT');
+  });
+});
+
+describe('structured extraction for weak/general requirements', () => {
+  it('password stored securely → actor/entity/action/capability', () => {
+    const s = extractStructuredSemanticsHeuristic({
+      requirementKey: 'REQ-039',
+      title: 'Passwords Should Be Stored Securely',
+      description: 'User passwords should be stored securely.',
+      type: 'NON_FUNCTIONAL',
+    });
+    expect(s.actor).toBe('system');
+    expect(s.object).toBe('password');
+    expect(s.action).toBe('store');
+    expect(s.capability).toBe('password_security');
+    expect(s.requirementType).toBe('NON_FUNCTIONAL');
+    expect(s.object).not.toBe('general');
+    expect(s.action).not.toBe('unspecified');
+  });
+
+  it('order access control is not capability=general', () => {
+    const n = normalizeRequirement({
+      requirementKey: 'REQ-040',
+      title: 'Order Access Control',
+      description:
+        "Users should not be able to access another user's order information.",
+      type: 'BUSINESS_RULE',
+    });
+    expect(n.entity[0]).toBe('order');
+    expect(n.capability).toBe('order_access');
+    expect(n.polarity).toBe('NOT_ALLOWED');
+  });
+});
+
+describe('truncated titles', () => {
+  it('open-order description titles as View Order Details', async () => {
+    const { generateSemanticTitle, isTruncatedTitle } = await import(
+      '../requirement-extraction/normalize-requirements.js'
+    );
+    expect(isTruncatedTitle('Open An Order To View Its')).toBe(true);
+    expect(
+      generateSemanticTitle(
+        'Users should be able to open an order to view its details.',
+        null,
+        'FUNCTIONAL',
+      ),
+    ).toBe('View Order Details');
+  });
+});
+
 describe('RELATED is not a catch-all', () => {
   it('canonical graph omits cross-domain NFR↔admin edges', () => {
     const rels = toCanonicalRelationships([

@@ -7,6 +7,7 @@ import {
   parseRequirementDocument,
   type ParsedDocument,
 } from './document-parser.js';
+import { generateSemanticTitle } from './normalize-requirements.js';
 
 export type RequirementType = 'FUNCTIONAL' | 'NON_FUNCTIONAL' | 'BUSINESS_RULE';
 
@@ -167,102 +168,9 @@ function refineTitle(
   section: string | null,
   type: RequirementType,
 ): string {
-  const d = description.toLowerCase();
-
-  if (/\bunique\b/.test(d) && /\bemail\b/.test(d)) return 'Unique Email Address';
-  if (/\bredirect/.test(d) && /\b(login|registration)\b/.test(d)) {
-    return 'Registration Redirect';
-  }
-  if (/\bexpire/.test(d) && /\botp\b/.test(d)) return 'OTP Expiration';
-  if (/\botp\b/.test(d) && /\b(sent|send|email|deliver)\b/.test(d)) {
-    return 'OTP Delivery';
-  }
-  if (/\botp\b/.test(d) && /\b(enter|create\s+a\s+new\s+password)\b/.test(d)) {
-    return 'OTP Entry';
-  }
-  if (/\binvalid\b/.test(d) && /\b(credential|login|error)\b/.test(d)) {
-    return 'Invalid Login Error';
-  }
-  if (/\breset\b/.test(d) && /\bpassword\b/.test(d) && type === 'FUNCTIONAL') {
-    return 'Password Reset';
-  }
-  if (/\b(create an account|register)\b/.test(d)) return 'User Registration';
-  if (/\blogin\b/.test(d) && type === 'FUNCTIONAL') return 'User Login';
-  if (/\bsearch\b/.test(d) && /\bresult/.test(d)) return 'Product Search Results';
-  if (/\bsearch\b/.test(d)) return 'Product Search';
-  if (/\bfilter/.test(d)) return 'Product Filtering';
-  if (/\bproduct details?\b/.test(d) || /\bdetails page should display\b/.test(d)) {
-    return 'Product Details';
-  }
-  if (/\badd\b/.test(d) && /\bcart\b/.test(d)) return 'Add Product To Cart';
-  if (/\b(increase|decrease)\b/.test(d) && /\bquantity\b/.test(d)) {
-    return 'Modify Product Quantity';
-  }
-  if (/\bremove\b/.test(d) && /\bcart\b/.test(d)) return 'Remove Product From Cart';
-  if (/\btotal\s+price\b/.test(d) || (/\bcart\b/.test(d) && /\btotal\b/.test(d))) {
-    return 'Display Cart Total';
-  }
-  if (/\bout of stock\b/.test(d)) return 'Out Of Stock Purchase Rule';
-  if (/\breview\b/.test(d) && /\bpurchased\b/.test(d)) return 'Review Eligibility';
-  if (/\badministrators?\b/.test(d) && /\bmanage\b/.test(d)) {
-    return 'Admin Product Management';
-  }
-  if (/\bown orders\b/.test(d)) return 'Own Orders Visibility';
-  if (/\brespond within\b/.test(d) || /\bwithin\s+\d+\s+seconds?\b/.test(d)) {
-    return 'Response Time';
-  }
-  if (/\bhighly secure\b/.test(d) || (/\bsecure\b/.test(d) && /\bapplication\b/.test(d))) {
-    return 'Application Security';
-  }
-  if (/\bmodern browsers?\b/.test(d)) return 'Browser Compatibility';
-  if (/\bmobile\b/.test(d)) return 'Mobile Usability';
-
-  if (
-    section &&
-    type === 'FUNCTIONAL' &&
-    (/\b(should be able to|can)\b/.test(d) ||
-      normalizeDuplicateKey(description).includes(
-        normalizeDuplicateKey(section).split(' ').slice(0, 2).join(' '),
-      ))
-  ) {
-    // Prefer section title for primary capability statements
-    if (
-      /registration|login|password reset|product details|product search|payment|shopping cart/i.test(
-        section,
-      )
-    ) {
-      const primaryVerbs =
-        /create an account|register|login|reset|search|display|checkout|pay/i;
-      if (primaryVerbs.test(description)) return section;
-    }
-  }
-
-  // Concise title — avoid mid-phrase truncation (e.g. "... Email And")
-  const cleaned = description
-    .replace(/^(the\s+)?(user|users|system|application|product)\s+/i, '')
-    .replace(/^(should|shall|must|can|will)\s+(be\s+able\s+to\s+)?/i, '')
-    .replace(/\s+/g, ' ')
-    .replace(/[.]+$/, '')
-    .trim();
-
-  const words = cleaned.split(/\s+/).filter(Boolean);
-  const titleWords = words.slice(0, Math.min(5, words.length));
-  while (
-    titleWords.length > 2 &&
-    /^(and|or|the|a|an|to|using|their|with|for)$/i.test(
-      titleWords[titleWords.length - 1] ?? '',
-    )
-  ) {
-    titleWords.pop();
-  }
-
-  if (titleWords.length >= 2) {
-    return titleWords
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-      .join(' ');
-  }
-
-  return section || 'Requirement';
+  // Shared semantic titleer — never ship mid-phrase truncations
+  // (e.g. "Open An Order To View Its").
+  return generateSemanticTitle(description, section, type);
 }
 
 type Draft = {

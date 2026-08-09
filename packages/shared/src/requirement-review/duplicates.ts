@@ -146,6 +146,33 @@ function opposingPolarity(a: NormalizedRequirement, b: NormalizedRequirement): b
   return (neg(ta) && pos(tb)) || (pos(ta) && neg(tb));
 }
 
+/** Structured polarity only — wording alone is not a conflict. */
+function opposingBusinessPolarity(
+  a: NormalizedRequirement,
+  b: NormalizedRequirement,
+): boolean {
+  const neg = (p: string | undefined) => p === 'NOT_ALLOWED';
+  const pos = (p: string | undefined) => p === 'ALLOWED' || p === 'REQUIRED';
+  return (
+    (neg(a.polarity) && pos(b.polarity)) || (pos(a.polarity) && neg(b.polarity))
+  );
+}
+
+/**
+ * CONFLICT requires a concrete shared capability + entity and opposite
+ * structured polarity. Never treat capability/entity "general" as a match.
+ */
+function isGenuineConflict(
+  a: NormalizedRequirement,
+  b: NormalizedRequirement,
+): boolean {
+  if (a.capability === 'general' || b.capability === 'general') return false;
+  if (a.entity[0] === 'general' || b.entity[0] === 'general') return false;
+  if (!sameCapability(a, b)) return false;
+  if (!sameEntity(a, b)) return false;
+  return opposingBusinessPolarity(a, b);
+}
+
 function substantiallySameBehavior(
   a: NormalizedRequirement,
   b: NormalizedRequirement,
@@ -223,7 +250,9 @@ function businessDomain(n: NormalizedRequirement): string {
     c === 'user_login' ||
     c === 'email_uniqueness' ||
     c === 'profile_email_restriction' ||
+    c === 'profile_update' ||
     c === 'password_reset' ||
+    c === 'password_security' ||
     c === 'otp_delivery' ||
     c === 'otp_entry' ||
     c === 'otp_expiration'
@@ -408,12 +437,12 @@ function classifyNormalized(
         'Complementary access-control rules (admin allow vs non-admin deny) for the same administrative boundary.',
     });
   }
-  if (opposingPolarity(a, b) && sameCapability(a, b)) {
+  if (isGenuineConflict(a, b)) {
     return pairResult(a, b, {
       kind: 'CONFLICT',
       relationType: 'CONFLICTS_WITH',
       reason:
-        'Opposite business polarity on the same capability — review for conflict.',
+        'Opposite business polarity on the same capability and entity — review for conflict.',
     });
   }
 

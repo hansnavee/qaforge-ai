@@ -313,11 +313,22 @@ export function normalizeRequirement(input: NormalizeInput): NormalizedRequireme
     profile.actor === 'registered_user' ? 'customer' : profile.actor;
 
   if (useStructured) {
-    capability = structured.capability || capability;
-    entity = structured.object || entity;
-    action = structured.action || action;
+    // Never let placeholder structured fields wipe a stronger refinement.
+    entity =
+      structured.object && structured.object !== 'general'
+        ? structured.object
+        : entity;
+    action =
+      structured.action && structured.action !== 'unspecified'
+        ? structured.action
+        : action;
     actor =
       structured.actor === 'user' ? 'customer' : structured.actor || actor;
+    if (structured.capability && structured.capability !== 'general') {
+      capability = structured.capability;
+    } else {
+      capability = refineCapability(text, profile.capability, entity, action);
+    }
   } else if (structured.capability && structured.capability !== 'general') {
     // Partial: still prefer high-signal heuristic capability from resolver
     capability = structured.capability;

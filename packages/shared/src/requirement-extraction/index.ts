@@ -33,6 +33,7 @@ export {
 export {
   normalizeRequirements,
   generateSemanticTitle,
+  isTruncatedTitle,
   classifyRequirementType,
   capabilityFingerprint,
   type TempCandidate,

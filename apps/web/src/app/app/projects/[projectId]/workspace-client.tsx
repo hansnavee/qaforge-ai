@@ -997,7 +997,7 @@ export default function ProjectWorkspacePage() {
   };
   const analysisIsStaleEngine =
     Boolean(reviewSummaryQuery.data?.reviewed) &&
-    (reviewSummaryQuery.data?.analysisVersion !== '2.5.1' ||
+    (reviewSummaryQuery.data?.analysisVersion !== '2.5.2' ||
       reviewSummaryQuery.data?.analysisEngine !==
         'semantic-requirement-review');
   const openEditProject = () => {
@@ -1136,7 +1136,7 @@ export default function ProjectWorkspacePage() {
 
       {analysisIsStaleEngine ? (
         <Card className="border-warning/40 bg-warning/10 p-3 text-sm">
-          Legacy analysis detected (missing engine v2.5.1). Stale “Possible
+          Legacy analysis detected (missing engine v2.5.2). Stale “Possible
           duplicate (N%)” data can still appear until you run a fresh semantic
           analysis.
           <Button
@@ -1391,7 +1391,7 @@ export default function ProjectWorkspacePage() {
           {analysisIsStaleEngine ? (
             <p className="text-sm text-warning">
               Analysis engine is outdated or missing. Run Fresh Analysis to
-              activate semantic relationship detection (v2.5.1).
+              activate semantic relationship detection (v2.5.2).
             </p>
           ) : null}
           {analysisStatus === 'STALE' ? (
@@ -2487,7 +2487,7 @@ export default function ProjectWorkspacePage() {
                       {reviewSummaryQuery.data?.analysisEngine ??
                         'semantic-requirement-review'}{' '}
                       v
-                      {reviewSummaryQuery.data?.analysisVersion ?? '2.5.1'}).
+                      {reviewSummaryQuery.data?.analysisVersion ?? '2.5.2'}).
                       Similarity percentage is not used as the primary signal.
                     </p>
                   </details>

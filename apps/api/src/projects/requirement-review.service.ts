@@ -16,8 +16,10 @@ import {
   dedupeQuestionsAgainstExisting,
   FEATURE_DEPENDENCY_EDGES,
   deriveStatuses,
+  generateSemanticTitle,
   groupRequirementsIntoFeatures,
   interpretAnswer,
+  isTruncatedTitle,
   questionBucket,
   summarizeFeature,
   SEMANTIC_ANALYSIS_ENGINE,
@@ -182,6 +184,28 @@ export class RequirementReviewService {
         },
       },
     });
+
+    // Repair truncated / mid-phrase titles before grouping + relationships
+    for (const r of requirements) {
+      const improved = generateSemanticTitle(
+        r.description,
+        r.sourceSection,
+        (r.type as 'FUNCTIONAL' | 'NON_FUNCTIONAL' | 'BUSINESS_RULE') ||
+          'FUNCTIONAL',
+      );
+      if (
+        improved &&
+        improved !== 'Requirement' &&
+        improved !== r.title &&
+        (isTruncatedTitle(r.title) || improved.length < r.title.length)
+      ) {
+        await prisma.requirement.update({
+          where: { id: r.id },
+          data: { title: improved },
+        });
+        r.title = improved;
+      }
+    }
 
     // Feature grouping by business capability (Area → Feature → Requirements)
     const featureDrafts = groupRequirementsIntoFeatures(

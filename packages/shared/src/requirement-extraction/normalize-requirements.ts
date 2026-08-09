@@ -56,16 +56,23 @@ function titleCase(words: string[]): string {
     .join(' ');
 }
 
-function isTruncatedTitle(title: string): boolean {
+export function isTruncatedTitle(title: string): boolean {
   const t = title.trim();
   if (!t) return true;
-  if (/\b(from|the|a|an|to|and|or|be|able|must|should|can|will|their|with|for|of)\s*$/i.test(t)) {
+  if (
+    /\b(from|the|a|an|to|and|or|be|able|must|should|can|will|their|with|for|of|its|his|her|this|that|these|those|my|your|only)\s*$/i.test(
+      t,
+    )
+  ) {
     return true;
   }
   if (/^(administrators?|users?|after|the|all|not)\b/i.test(t) && t.split(/\s+/).length <= 4) {
     return true;
   }
   if (/should be able$/i.test(t) || /should contain$/i.test(t)) return true;
+  // Possessive / incomplete clause endings ("… View Its", "… Can Only")
+  if (/\b(view|open|change|update|access)\s+its$/i.test(t)) return true;
+  if (/\bcan\s+only$/i.test(t)) return true;
   return false;
 }
 
@@ -99,7 +106,7 @@ export function generateSemanticTitle(
   if (/\breset\b/.test(d) && /\bpassword\b/.test(d) && !/\bstore|secure\b/.test(d)) {
     return 'Password Reset';
   }
-  if (/\bpassword\b/.test(d) && /\b(store|stored|secure|hash|encrypt)\b/.test(d)) {
+  if (/\bpasswords?\b/.test(d) && /\b(store|stored|secur|hash|encrypt)/.test(d)) {
     return 'Password Security';
   }
 

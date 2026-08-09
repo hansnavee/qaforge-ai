@@ -360,11 +360,52 @@ export function extractStructuredSemanticsHeuristic(
     action = 'verify';
     capability = 'otp_entry';
     confidence = 0.9;
+  } else if (
+    /\bpasswords?\b/.test(t) &&
+    /\b(store|stored|secur|hash|encrypt)/.test(t) &&
+    !/reset|forgot|otp/.test(t)
+  ) {
+    actor = 'system';
+    object = 'password';
+    action = 'store';
+    capability = 'password_security';
+    polarity = polarity === 'UNSPECIFIED' ? 'REQUIRED' : polarity;
+    requirementType = 'NON_FUNCTIONAL';
+    confidence = 0.94;
   } else if (/password reset|forgot password|reset their password/.test(t)) {
     object = 'user_account';
     action = 'reset';
     capability = 'password_reset';
     confidence = 0.92;
+  } else if (
+    /\border\b/.test(t) &&
+    /\b(another user|other users?|own orders?|access)\b/.test(t) &&
+    (polarity === 'NOT_ALLOWED' ||
+      /\b(should not|must not|cannot|not be able|not be allowed)\b/.test(t))
+  ) {
+    object = 'order';
+    action = 'read';
+    capability = 'order_access';
+    polarity = 'NOT_ALLOWED';
+    requirementType = 'BUSINESS_RULE';
+    confidence = 0.94;
+  } else if (
+    /\bprofile\b/.test(t) &&
+    /\b(update|edit|modify|change)\b/.test(t) &&
+    !/\bemail\b/.test(t)
+  ) {
+    object = 'user_account';
+    action = 'update';
+    capability = 'profile_update';
+    confidence = 0.9;
+  } else if (
+    /\bquantity\b/.test(t) &&
+    /\b(increase|decrease|modify|change|update)\b/.test(t)
+  ) {
+    object = 'cart_item';
+    action = 'update';
+    capability = 'shopping_cart';
+    confidence = 0.9;
   } else if (
     /\bredirect\b/.test(t) &&
     /\b(registration|register|login|sign in)\b/.test(t)
@@ -584,19 +625,24 @@ function recoverImplicitObjectAction(
   let condition: string | null = null;
   let requirementType: StructuredRequirementType | undefined;
 
-  if (/\bemail\b/.test(t)) object = 'user_account';
-  else if (/\bpassword\b/.test(t)) object = 'user_account';
+  if (/\bpasswords?\b/.test(t) && /\b(store|stored|secur|hash|encrypt)/.test(t)) {
+    object = 'password';
+  } else if (/\bemail\b/.test(t)) object = 'user_account';
+  else if (/\bpasswords?\b/.test(t)) object = 'user_account';
   else if (/\botp\b/.test(t)) object = 'otp';
-  else if (/\bcart\b/.test(t)) object = 'cart_item';
+  else if (/\bcart\b/.test(t) || /\bquantity\b/.test(t)) object = 'cart_item';
   else if (/\border\b/.test(t)) object = 'order';
   else if (/\bproduct\b/.test(t)) object = 'product';
   else if (/\bpayment\b/.test(t)) object = 'payment';
   else if (/\bprofile\b/.test(t)) object = 'user_account';
 
-  if (/\b(change|update|edit|modify)\b/.test(t)) action = 'update';
-  else if (/\b(create|add|register)\b/.test(t)) action = 'create';
+  if (/\b(store|stored|hash|encrypt|secur)/.test(t) && /\bpasswords?\b/.test(t)) {
+    action = 'store';
+  } else if (/\b(change|update|edit|modify|increase|decrease)\b/.test(t)) {
+    action = 'update';
+  } else if (/\b(create|add|register)\b/.test(t)) action = 'create';
   else if (/\b(delete|remove)\b/.test(t)) action = 'delete';
-  else if (/\b(view|open|display|show)\b/.test(t)) action = 'read';
+  else if (/\b(view|open|display|show|access)\b/.test(t)) action = 'read';
   else if (/\b(buy|purchase|pay)\b/.test(t)) action = 'purchase';
   else if (/\b(search|find)\b/.test(t)) action = 'search';
 
@@ -609,6 +655,21 @@ function recoverImplicitObjectAction(
     capability = 'profile_email_restriction';
     condition = 'REGISTERED_EMAIL_IMMUTABLE';
     requirementType = 'BUSINESS_RULE';
+  } else if (object === 'password' && action === 'store') {
+    capability = 'password_security';
+    requirementType = 'NON_FUNCTIONAL';
+  } else if (
+    object === 'order' &&
+    /\b(another user|other users?|own orders?)\b/.test(t) &&
+    polarity === 'NOT_ALLOWED'
+  ) {
+    action = action === 'unspecified' ? 'read' : action;
+    capability = 'order_access';
+    requirementType = 'BUSINESS_RULE';
+  } else if (object === 'cart_item' && action === 'update') {
+    capability = 'shopping_cart';
+  } else if (object === 'user_account' && action === 'update' && /\bprofile\b/.test(t)) {
+    capability = 'profile_update';
   }
 
   return { object, action, capability, condition, requirementType };

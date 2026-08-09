@@ -300,7 +300,7 @@ export type RequirementRelationship = {
 };
 
 export const SEMANTIC_ANALYSIS_ENGINE = 'semantic-requirement-review';
-export const SEMANTIC_ANALYSIS_VERSION = '2.5.1';
+export const SEMANTIC_ANALYSIS_VERSION = '2.5.2';
 
 /** Relationships worth persisting (missing edge = INDEPENDENT). */
 export const PERSISTABLE_RELATIONSHIPS = new Set<
