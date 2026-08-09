@@ -52,20 +52,53 @@ export async function waitForContinueSignal(
   executionId: string,
   timeoutMs = 30 * 60 * 1000,
 ): Promise<void> {
+  const redis = getRedis();
+  const flagKey = `execution:${executionId}:continue-flag`;
+
+  // Consume durable flag first (handles approve-before-subscribe races)
+  const preexisting = await redis.getdel(flagKey);
+  if (preexisting) return;
+
   const sub = getSubRedis().duplicate();
   const channel = continueChannel(executionId);
 
   await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      void redis.del(flagKey).catch(() => undefined);
+      void sub.unsubscribe(channel).finally(() => {
+        sub.disconnect();
+        resolve();
+      });
+    };
+
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
       void sub.unsubscribe(channel).finally(() => {
         sub.disconnect();
         reject(new Error(`Timed out waiting for continue on ${channel}`));
       });
     }, timeoutMs);
 
+    // Poll durable flag in case publish landed between getdel and subscribe
+    const poll = setInterval(() => {
+      void redis.getdel(flagKey).then((v) => {
+        if (v) finish();
+      });
+    }, 1000);
+
     void sub.subscribe(channel, (err: Error | null | undefined) => {
       if (err) {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
+        clearInterval(poll);
         sub.disconnect();
         reject(err);
       }
@@ -73,12 +106,13 @@ export async function waitForContinueSignal(
 
     sub.on('message', (ch: string, message: string) => {
       if (ch !== channel) return;
-      if (message === 'continue' || message.includes('continue')) {
-        clearTimeout(timer);
-        void sub.unsubscribe(channel).finally(() => {
-          sub.disconnect();
-          resolve();
-        });
+      // Accept plain "continue" or JSON payloads that include continue/executionId
+      if (
+        message === 'continue' ||
+        message.includes('continue') ||
+        message.includes(executionId)
+      ) {
+        finish();
       }
     });
   });

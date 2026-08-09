@@ -69,9 +69,20 @@ export class QueueService implements OnModuleInit {
 
   async publishContinue(executionId: string) {
     if (!this.pub) return;
+    // Durable flag so a fast human approve before the worker subscribes is not lost
+    await this.pub.set(
+      `execution:${executionId}:continue-flag`,
+      '1',
+      'EX',
+      60 * 60,
+    );
     await this.pub.publish(
       `execution:${executionId}:continue`,
-      JSON.stringify({ executionId, at: new Date().toISOString() }),
+      JSON.stringify({
+        executionId,
+        continue: true,
+        at: new Date().toISOString(),
+      }),
     );
   }
 
