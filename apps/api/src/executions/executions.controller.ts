@@ -72,6 +72,15 @@ export class ExecutionsController {
     return this.executions.approveTestDesign(user, orgId, executionId);
   }
 
+  @Post('orgs/:orgId/executions/:executionId/approve-environment')
+  approveEnvironment(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveEnvironment(user, orgId, executionId);
+  }
+
   @Post('orgs/:orgId/executions/:executionId/approve-test-data')
   approveTestData(
     @CurrentUser() user: SessionUser,
@@ -115,6 +124,15 @@ export class ExecutionsController {
     @Param('executionId') executionId: string,
   ) {
     return this.executions.approveAutomation(user, orgId, executionId);
+  }
+
+  @Post('orgs/:orgId/executions/:executionId/approve-report')
+  approveReport(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.executions.approveReport(user, orgId, executionId);
   }
 
   @Post('orgs/:orgId/executions/:executionId/approve-qa-signoff')

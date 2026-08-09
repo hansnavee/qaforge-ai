@@ -163,6 +163,22 @@ export default function ExecutionLivePage() {
     },
   });
 
+  const approveEnvironment = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-environment`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
   const approveData = useMutation({
     mutationFn: async () => {
       const orgId = await getDefaultOrgId();
@@ -243,6 +259,22 @@ export default function ExecutionLivePage() {
     },
   });
 
+  const approveReport = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      await api(
+        `/api/v1/orgs/${orgId}/executions/${executionId}/approve-report`,
+        {
+          method: 'POST',
+          body: '{}',
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
+    },
+  });
+
   const approveSignoff = useMutation({
     mutationFn: async () => {
       const orgId = await getDefaultOrgId();
@@ -287,6 +319,7 @@ export default function ExecutionLivePage() {
     liveStatus === 'AWAITING_CLARIFICATION' || livePhase === 'CLARIFICATION';
   const awaitingPlanApproval = liveStatus === 'AWAITING_PLAN_APPROVAL';
   const awaitingDesignApproval = liveStatus === 'AWAITING_DESIGN_APPROVAL';
+  const awaitingEnvApproval = liveStatus === 'AWAITING_ENV_APPROVAL';
   const awaitingDataApproval = liveStatus === 'AWAITING_DATA_APPROVAL';
   const awaitingExecutionApproval =
     liveStatus === 'AWAITING_EXECUTION_APPROVAL';
@@ -295,6 +328,7 @@ export default function ExecutionLivePage() {
     liveStatus === 'AWAITING_REGRESSION_APPROVAL';
   const awaitingAutomationApproval =
     liveStatus === 'AWAITING_AUTOMATION_APPROVAL';
+  const awaitingReportApproval = liveStatus === 'AWAITING_REPORT_APPROVAL';
   const awaitingQaSignoff = liveStatus === 'AWAITING_QA_SIGNOFF';
   const awaitingLogin =
     liveStatus === 'AWAITING_LOGIN' ||
@@ -302,21 +336,25 @@ export default function ExecutionLivePage() {
       !awaitingClarification &&
       !awaitingPlanApproval &&
       !awaitingDesignApproval &&
+      !awaitingEnvApproval &&
       !awaitingDataApproval &&
       !awaitingExecutionApproval &&
       !awaitingDefectApproval &&
       !awaitingRegressionApproval &&
       !awaitingAutomationApproval &&
+      !awaitingReportApproval &&
       !awaitingQaSignoff);
   const awaiting =
     awaitingClarification ||
     awaitingPlanApproval ||
     awaitingDesignApproval ||
+    awaitingEnvApproval ||
     awaitingDataApproval ||
     awaitingExecutionApproval ||
     awaitingDefectApproval ||
     awaitingRegressionApproval ||
     awaitingAutomationApproval ||
+    awaitingReportApproval ||
     awaitingQaSignoff ||
     awaitingLogin;
 
@@ -463,8 +501,8 @@ export default function ExecutionLivePage() {
               Approve test design
             </h2>
             <p className="mt-2 text-sm text-muted">
-              Stage 3 Test Design is ready on the Test Board. Approve to unlock
-              Stage 4 Test Data.
+              Stage 3 Test Design is ready. Approve to unlock Stage 4 Environment
+              Setup. Prefer the project STLC Docs tab to edit/download before Accept.
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <Button
@@ -494,14 +532,51 @@ export default function ExecutionLivePage() {
           </Card>
         ) : null}
 
+        {awaitingEnvApproval ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Approve environment
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 4 Environment checklist is ready (URL, browser mode,
+              credentials). Review in STLC Docs, then approve to unlock Test Data.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Button
+                size="lg"
+                onClick={() => approveEnvironment.mutate()}
+                disabled={approveEnvironment.isPending}
+              >
+                {approveEnvironment.isPending
+                  ? 'Approving…'
+                  : 'Approve environment & continue'}
+              </Button>
+              {execution?.projectId || execution?.project?.id ? (
+                <Link
+                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=stlc&phase=ENVIRONMENT`}
+                >
+                  <Button size="lg" variant="secondary">
+                    Open STLC Docs
+                  </Button>
+                </Link>
+              ) : null}
+            </div>
+            {approveEnvironment.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not approve the environment. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
         {awaitingDataApproval ? (
           <Card className="border-warning/40 bg-warning/5">
             <h2 className="text-lg font-semibold text-warning">
               Approve test data
             </h2>
             <p className="mt-2 text-sm text-muted">
-              Stage 4 Test Data is ready for the designed cases. Review data on
-              the Test Board, then approve to unlock Test Execution.
+              Stage 5 Test Data is ready for the designed cases. Review data on
+              the Test Board / STLC Docs, then approve to unlock Test Execution.
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <Button
@@ -637,8 +712,7 @@ export default function ExecutionLivePage() {
             </h2>
             <p className="mt-2 text-sm text-muted">
               Stage 8 Automation finished (framework generation + automated
-              run). Review artifacts in the event log, then approve to unlock
-              QA Sign-off.
+              run). Review in STLC Docs, then approve to unlock Test Reporting.
             </p>
             <Button
               className="mt-4"
@@ -658,14 +732,41 @@ export default function ExecutionLivePage() {
           </Card>
         ) : null}
 
+        {awaitingReportApproval ? (
+          <Card className="border-warning/40 bg-warning/5">
+            <h2 className="text-lg font-semibold text-warning">
+              Approve test report
+            </h2>
+            <p className="mt-2 text-sm text-muted">
+              Stage 9 Test Reporting is ready (HTML report + STLC pack). Review
+              in STLC Docs, then approve to unlock Sign-off.
+            </p>
+            <Button
+              className="mt-4"
+              size="lg"
+              onClick={() => approveReport.mutate()}
+              disabled={approveReport.isPending}
+            >
+              {approveReport.isPending
+                ? 'Approving…'
+                : 'Approve report & continue'}
+            </Button>
+            {approveReport.isError ? (
+              <p className="mt-3 text-sm text-danger">
+                Could not approve the report. Try again.
+              </p>
+            ) : null}
+          </Card>
+        ) : null}
+
         {awaitingQaSignoff ? (
           <Card className="border-warning/40 bg-warning/5">
             <h2 className="text-lg font-semibold text-warning">
               QA Sign-off
             </h2>
             <p className="mt-2 text-sm text-muted">
-              Stage 9 evidence pack is ready (report, quality analysis, final
-              ZIP). Sign off to close this STLC run as complete.
+              Stage 10 Sign-off scorecard is ready. AI recommends go/no-go;
+              human Accept closes the STLC run.
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <Button

@@ -219,6 +219,11 @@ async function main() {
       label: 'approve-test-design',
     },
     {
+      wait: ['AWAITING_ENV_APPROVAL'],
+      path: `/api/v1/orgs/${ORG_ID}/executions/${executionId}/approve-environment`,
+      label: 'approve-environment',
+    },
+    {
       wait: ['AWAITING_DATA_APPROVAL'],
       path: `/api/v1/orgs/${ORG_ID}/executions/${executionId}/approve-test-data`,
       label: 'approve-test-data',
@@ -239,14 +244,14 @@ async function main() {
       label: 'approve-defects',
     },
     {
-      wait: ['AWAITING_REGRESSION_APPROVAL'],
-      path: `/api/v1/orgs/${ORG_ID}/executions/${executionId}/approve-regression`,
-      label: 'approve-regression',
-    },
-    {
       wait: ['AWAITING_AUTOMATION_APPROVAL'],
       path: `/api/v1/orgs/${ORG_ID}/executions/${executionId}/approve-automation`,
       label: 'approve-automation',
+    },
+    {
+      wait: ['AWAITING_REPORT_APPROVAL'],
+      path: `/api/v1/orgs/${ORG_ID}/executions/${executionId}/approve-report`,
+      label: 'approve-report',
     },
     {
       wait: ['AWAITING_QA_SIGNOFF'],
@@ -270,6 +275,12 @@ async function main() {
   }
 
   const done = await waitForStatus(executionId, ['COMPLETED'], 'completed');
+  const phases = await api(
+    `/api/v1/orgs/${ORG_ID}/projects/${PROJECT_ID}/stlc/phases`,
+  );
+  const designDoc = await api(
+    `/api/v1/orgs/${ORG_ID}/projects/${PROJECT_ID}/stlc/phases/DESIGN`,
+  );
   const result = {
     executionId,
     status: done.status,
@@ -277,6 +288,9 @@ async function main() {
     scores: done.scores ?? null,
     stlcStage: (await getProject()).stlcStage,
     qaSignedOffAt: (await getProject()).qaSignedOffAt ?? null,
+    stlcPhasesOk: phases.ok,
+    designDocVersion: designDoc.body?.documentVersion ?? null,
+    designDocStatus: designDoc.body?.status ?? null,
   };
   writeFileSync('stlc-e2e-result.json', JSON.stringify(result, null, 2));
   log('STLC e2e PASS', result);

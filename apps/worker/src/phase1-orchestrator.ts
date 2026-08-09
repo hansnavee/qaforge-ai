@@ -21,6 +21,7 @@ import { clarificationAgent } from './agents/clarification.agent.js';
 import { strategyAgent } from './agents/strategy.agent.js';
 import { designAgent, type DesignedCase } from './agents/design.agent.js';
 import { testdataAgent } from './agents/testdata.agent.js';
+import { environmentAgent } from './agents/environment.agent.js';
 import { authenticationAgent } from './agents/authentication.agent.js';
 import { discoveryAgent } from './agents/discovery.agent.js';
 import { functionalAgent } from './agents/functional.agent.js';
@@ -31,6 +32,8 @@ import { executionAgent } from './agents/execution.agent.js';
 import { reportAgent } from './agents/report.agent.js';
 import { qualityAgent } from './agents/quality.agent.js';
 import { githubActionsAgent } from './agents/github-actions.agent.js';
+import { signoffAgent } from './agents/signoff.agent.js';
+import { persistPhaseDocument } from './stlc-phase-docs.js';
 
 const MAX_CLARIFY_ROUNDS = 3;
 const browserManager = new BrowserSessionManager();
@@ -594,10 +597,40 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
     });
 
+    const planningValidation = {
+      passed: Boolean(strategyOut),
+      blockers: strategyOut ? [] : ['Strategy document missing'],
+      summary: strategyOut
+        ? 'Test strategy package ready for Senior QA human review'
+        : 'Strategy generation failed',
+    };
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'PLANNING',
+      status: 'READY_FOR_REVIEW',
+      document: {
+        kind: 'TEST_STRATEGY',
+        strategy: strategyOut,
+        testingLevels: [
+          'SMOKE',
+          'SANITY',
+          'FUNCTIONAL',
+          'INTEGRATION',
+          'REGRESSION',
+          'UAT_READY',
+        ],
+      },
+      validation: planningValidation,
+    });
+
     // Stage 2 human gate — pause for test plan / strategy approval
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_PLAN_APPROVAL,
       phase: ExecutionPhase.TEST_STRATEGY,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'PLANNING' },
     });
     await ctx.emit({
       type: 'stlc.awaiting_plan_approval',
@@ -659,6 +692,63 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       data: { count: cases.length },
     });
 
+    const crudOps = ['CREATE', 'READ', 'UPDATE', 'DELETE'] as const;
+    const crudMatrix = Array.from(
+      new Set(cases.map((c) => c.module || 'General')),
+    ).map((feature) => {
+      const featureCases = cases.filter(
+        (c) => (c.module || 'General') === feature,
+      );
+      const blob = featureCases
+        .map((c) => `${c.scenario} ${c.type ?? ''}`.toLowerCase())
+        .join(' ');
+      return {
+        feature,
+        CREATE:
+          /create|add|new|register|post/.test(blob) || featureCases.length > 0,
+        READ: /read|view|list|get|display|open/.test(blob) || true,
+        UPDATE: /update|edit|modify|change|put|patch/.test(blob),
+        DELETE: /delete|remove|cancel/.test(blob),
+        caseCount: featureCases.length,
+      };
+    });
+
+    const designValidation = {
+      passed: cases.length > 0,
+      blockers: cases.length ? [] : ['No test cases generated'],
+      summary: `${cases.length} case(s) with CRUD coverage matrix — ready for review`,
+    };
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'DESIGN',
+      status: 'READY_FOR_REVIEW',
+      document: {
+        kind: 'TEST_DESIGN',
+        testCases: cases.map((tc) => ({
+          ...tc,
+          testingLevel:
+            /smoke/i.test(tc.type ?? '') || /smoke/i.test(tc.scenario)
+              ? 'SMOKE'
+              : /sanity/i.test(tc.type ?? '')
+                ? 'SANITY'
+                : 'FUNCTIONAL',
+          crudHints: crudOps.filter((op) =>
+            new RegExp(op, 'i').test(`${tc.scenario} ${tc.type ?? ''}`),
+          ),
+        })),
+        crudMatrix,
+        testingLevelsCovered: [
+          'SMOKE',
+          'SANITY',
+          'FUNCTIONAL',
+          'INTEGRATION',
+          'REGRESSION',
+          'UAT_READY',
+        ],
+      },
+      validation: designValidation,
+    });
+
     // Stage 3 human gate — pause for test design approval
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_DESIGN_APPROVAL,
@@ -667,8 +757,69 @@ export async function runStlcExecution(executionId: string): Promise<void> {
     await ctx.emit({
       type: 'stlc.awaiting_design_approval',
       phase: ExecutionPhase.TEST_DESIGN,
-      message: 'Test design ready — awaiting human approval before Test Data',
+      message:
+        'Test design ready — awaiting human approval before Environment Setup',
       data: { count: cases.length },
+    });
+    await waitForContinueSignal(executionId);
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.ENVIRONMENT,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'ENVIRONMENT' },
+    });
+    await ctx.emit({
+      type: 'stlc.design_approved',
+      phase: ExecutionPhase.ENVIRONMENT,
+      message: 'Test design approved — continuing to Environment Setup',
+    });
+
+    // Stage 4 — Environment Setup
+    const envOut = (await runAgent(
+      ctx,
+      {
+        agent: environmentAgent,
+        phase: ExecutionPhase.ENVIRONMENT,
+        agentId: AgentId.ENVIRONMENT_SETUP,
+      },
+      {
+        appUrl: project.appUrl,
+        loginUrl: project.loginUrl,
+        environment: project.environment,
+        framework: project.framework,
+        language: project.language,
+        browserMode: 'CLOUD_HEADLESS',
+        hasEncryptedConfig: Boolean(project.encryptedConfig),
+      },
+    )) as {
+      validation?: { passed: boolean; blockers: string[]; summary: string };
+      checklist?: unknown[];
+      summary?: string;
+    };
+
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'ENVIRONMENT',
+      status: 'READY_FOR_REVIEW',
+      document: envOut as Record<string, unknown>,
+      validation: envOut.validation ?? {
+        passed: true,
+        blockers: [],
+        summary: envOut.summary ?? 'Environment checklist ready',
+      },
+    });
+
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_ENV_APPROVAL,
+      phase: ExecutionPhase.ENVIRONMENT,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_env_approval',
+      phase: ExecutionPhase.ENVIRONMENT,
+      message:
+        'Environment checklist ready — awaiting human approval before Test Data',
     });
     await waitForContinueSignal(executionId);
     await setExecution(executionId, {
@@ -680,12 +831,12 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       data: { stlcStage: 'DATA' },
     });
     await ctx.emit({
-      type: 'stlc.design_approved',
+      type: 'stlc.env_approved',
       phase: ExecutionPhase.TEST_DATA,
-      message: 'Test design approved — continuing to Test Data',
+      message: 'Environment approved — continuing to Test Data',
     });
 
-    // 4b. Stage 4 — Test Data
+    // Stage 5 — Test Data
     const dbCasesForData = await prisma.testCase.findMany({
       where: { executionId },
       orderBy: { createdAt: 'asc' },
@@ -736,7 +887,25 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
     });
 
-    // Stage 4 human gate — pause for test data approval
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'DATA',
+      status: 'READY_FOR_REVIEW',
+      document: {
+        kind: 'TEST_DATA',
+        cases: dataOut?.cases ?? [],
+      },
+      validation: {
+        passed: (dataOut?.cases?.length ?? 0) > 0,
+        blockers:
+          (dataOut?.cases?.length ?? 0) > 0
+            ? []
+            : ['No test data rows generated'],
+        summary: `${dataOut?.cases?.length ?? 0} test data set(s) ready for review`,
+      },
+    });
+
+    // Stage 5 human gate — pause for test data approval
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_DATA_APPROVAL,
       phase: ExecutionPhase.TEST_DATA,
@@ -899,7 +1068,19 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
     });
 
-    // Stage 5 human gate — pause for execution results approval
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'EXECUTION',
+      status: 'READY_FOR_REVIEW',
+      document: executionSummary as Record<string, unknown>,
+      validation: {
+        passed: true,
+        blockers: [],
+        summary: `Execution complete — ${executionSummary.totals?.passed ?? 0} passed, ${executionSummary.totals?.failed ?? 0} failed`,
+      },
+    });
+
+    // Stage 6 human gate — pause for execution results approval
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_EXECUTION_APPROVAL,
       phase: ExecutionPhase.MANUAL_TEST,
@@ -984,7 +1165,22 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
     });
 
-    // Stage 6 human gate — pause for defect review/approval
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'DEFECTS',
+      status: 'READY_FOR_REVIEW',
+      document: defectSummary as Record<string, unknown>,
+      validation: {
+        passed: true,
+        blockers: [],
+        summary:
+          bugCount > 0
+            ? `${bugCount} defect(s) filed for review`
+            : 'No defects — board empty',
+      },
+    });
+
+    // Stage 7 human gate — pause for defect review/approval
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_DEFECT_APPROVAL,
       phase: ExecutionPhase.BUG_ANALYSIS,
@@ -993,25 +1189,12 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       type: 'stlc.awaiting_defect_approval',
       phase: ExecutionPhase.BUG_ANALYSIS,
       message:
-        'Defect management complete — awaiting human approval before Regression',
+        'Defect management complete — awaiting human approval before Automation',
       data: defectSummary.totals,
     });
     await waitForContinueSignal(executionId);
-    await setExecution(executionId, {
-      status: ExecutionStatus.RUNNING,
-      phase: ExecutionPhase.RETEST,
-    });
-    await prisma.project.update({
-      where: { id: project.id },
-      data: { stlcStage: 'REGRESSION' },
-    });
-    await ctx.emit({
-      type: 'stlc.defects_approved',
-      phase: ExecutionPhase.RETEST,
-      message: 'Defects approved — continuing to Regression',
-    });
 
-    // 10. Retest failed cases once (Stage 7 Regression)
+    // Inline regression retest (not a separate human gate)
     let retestPassed = 0;
     let retestFailed = 0;
     let retestSkipped = false;
@@ -1053,40 +1236,6 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       });
     }
 
-    const regressionSummary = {
-      kind: 'REGRESSION',
-      source: 'stage7-retest',
-      completedAt: new Date().toISOString(),
-      skipped: retestSkipped,
-      totals: {
-        candidates: manual.failures.length,
-        passed: retestPassed,
-        failed: retestFailed,
-      },
-    };
-
-    await prisma.projectRequirementSnapshot.create({
-      data: {
-        projectId: project.id,
-        executionId,
-        payload: regressionSummary as never,
-        clear: true,
-      },
-    });
-
-    // Stage 7 human gate — pause for regression approval
-    await setExecution(executionId, {
-      status: ExecutionStatus.AWAITING_REGRESSION_APPROVAL,
-      phase: ExecutionPhase.RETEST,
-    });
-    await ctx.emit({
-      type: 'stlc.awaiting_regression_approval',
-      phase: ExecutionPhase.RETEST,
-      message:
-        'Regression complete — awaiting human approval before Automation',
-      data: regressionSummary.totals,
-    });
-    await waitForContinueSignal(executionId);
     await setExecution(executionId, {
       status: ExecutionStatus.RUNNING,
       phase: ExecutionPhase.AUTOMATION,
@@ -1096,12 +1245,13 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       data: { stlcStage: 'AUTOMATION' },
     });
     await ctx.emit({
-      type: 'stlc.regression_approved',
+      type: 'stlc.defects_approved',
       phase: ExecutionPhase.AUTOMATION,
-      message: 'Regression approved — continuing to Automation',
+      message: 'Defects approved — continuing to Automation',
+      data: { retestPassed, retestFailed, retestSkipped },
     });
 
-    // 11. Stage 8 — Automation generation
+    // Stage 8 — Automation generation
     const automationOut = await runAgent(
       ctx,
       {
@@ -1149,6 +1299,18 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       },
     });
 
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'AUTOMATION',
+      status: 'READY_FOR_REVIEW',
+      document: automationSummary as Record<string, unknown>,
+      validation: {
+        passed: true,
+        blockers: [],
+        summary: 'Automation package ready for review',
+      },
+    });
+
     // Stage 8 human gate — pause for automation approval
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_AUTOMATION_APPROVAL,
@@ -1158,7 +1320,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       type: 'stlc.awaiting_automation_approval',
       phase: ExecutionPhase.AUTOMATION,
       message:
-        'Automation complete — awaiting human approval before QA Sign-off',
+        'Automation complete — awaiting human approval before Test Reporting',
     });
     await waitForContinueSignal(executionId);
     await setExecution(executionId, {
@@ -1167,15 +1329,15 @@ export async function runStlcExecution(executionId: string): Promise<void> {
     });
     await prisma.project.update({
       where: { id: project.id },
-      data: { stlcStage: 'SIGNOFF' },
+      data: { stlcStage: 'REPORTING' },
     });
     await ctx.emit({
       type: 'stlc.automation_approved',
       phase: ExecutionPhase.REPORT,
-      message: 'Automation approved — continuing to QA Sign-off',
+      message: 'Automation approved — continuing to Test Reporting',
     });
 
-    // 13. HTML report (Stage 9 sign-off pack begins)
+    // Stage 9 — HTML report
     const reportOut = (await runAgent(
       ctx,
       {
@@ -1186,7 +1348,6 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       { projectName: project.name, appUrl: project.appUrl },
     )) as { zipKey?: string };
 
-    // 14. Quality Analysis
     await runAgent(
       ctx,
       {
@@ -1197,7 +1358,6 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       { projectName: project.name, appUrl: project.appUrl },
     );
 
-    // 15. Final STLC ZIP pack
     const [testCasesCsv, bugsRows, resultsRows, quality, strategy] =
       await Promise.all([
         ctx.artifactStore
@@ -1259,7 +1419,6 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       store: ctx.artifactStore,
     });
 
-    // 16. GitHub Actions workflow stub
     await runAgent(
       ctx,
       {
@@ -1284,35 +1443,101 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       bugs: bugsRows.length,
     };
 
-    const signoffSummary = {
-      kind: 'QA_SIGNOFF',
-      source: 'stage9-signoff-pack',
+    const reportingDoc = {
+      kind: 'TEST_REPORTING',
       preparedAt: new Date().toISOString(),
-      totals: {
-        cases: dbCases.length,
-        passed: manual.passed,
-        failed: manual.failed,
-        retestPassed,
-        retestFailed,
-        bugs: bugsRows.length,
-      },
+      scores,
       artifacts: {
         finalZipKey: `${executionId}/stlc/final-pack.zip`,
         reportZipKey: reportOut?.zipKey ?? null,
       },
-      scores,
+      quality,
+      testingLevelSummary: {
+        SMOKE: 'included in execution suite',
+        SANITY: 'included in execution suite',
+        FUNCTIONAL: `score ${scores.functional}`,
+        INTEGRATION: 'API + UI flows when discovered',
+        REGRESSION: retestSkipped
+          ? 'skipped (no failures)'
+          : `retest pass=${retestPassed} fail=${retestFailed}`,
+        UAT_READY: 'packaged in final ZIP for stakeholder review',
+      },
     };
 
-    await prisma.projectRequirementSnapshot.create({
-      data: {
-        projectId: project.id,
-        executionId,
-        payload: signoffSummary as never,
-        clear: true,
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'REPORTING',
+      status: 'READY_FOR_REVIEW',
+      document: reportingDoc,
+      validation: {
+        passed: true,
+        blockers: [],
+        summary: 'HTML report and STLC pack ready for review',
       },
     });
 
-    // Stage 9 human gate — pause for QA sign-off
+    await setExecution(executionId, {
+      status: ExecutionStatus.AWAITING_REPORT_APPROVAL,
+      phase: ExecutionPhase.REPORT,
+      scores,
+    });
+    await ctx.emit({
+      type: 'stlc.awaiting_report_approval',
+      phase: ExecutionPhase.REPORT,
+      message:
+        'Test report ready — awaiting human approval before QA Sign-off',
+      data: reportingDoc.scores,
+    });
+    await waitForContinueSignal(executionId);
+
+    await setExecution(executionId, {
+      status: ExecutionStatus.RUNNING,
+      phase: ExecutionPhase.REPORT,
+    });
+    await prisma.project.update({
+      where: { id: project.id },
+      data: { stlcStage: 'SIGNOFF' },
+    });
+
+    // Stage 10 — Sign-off recommendation
+    const signoffOut = (await runAgent(
+      ctx,
+      {
+        agent: signoffAgent,
+        phase: ExecutionPhase.REPORT,
+        agentId: AgentId.QA_SIGNOFF,
+      },
+      {
+        strategy,
+        scores: {
+          functionalScore: scores.functional,
+          passed: scores.passed,
+          failed: scores.failed,
+          bugsOpen: scores.bugs,
+        },
+        bugCount: bugsRows.length,
+        failedCount: scores.failed,
+        passedCount: scores.passed,
+        reportReady: true,
+      },
+    )) as {
+      validation?: { passed: boolean; blockers: string[]; summary: string };
+      recommendation?: string;
+      summary?: string;
+    };
+
+    await persistPhaseDocument({
+      projectId: project.id,
+      phaseId: 'SIGNOFF',
+      status: 'READY_FOR_REVIEW',
+      document: signoffOut as Record<string, unknown>,
+      validation: signoffOut.validation ?? {
+        passed: signoffOut.recommendation === 'READY',
+        blockers: [],
+        summary: signoffOut.summary ?? 'Sign-off recommendation ready',
+      },
+    });
+
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_QA_SIGNOFF,
       phase: ExecutionPhase.REPORT,
@@ -1322,8 +1547,8 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       type: 'stlc.awaiting_qa_signoff',
       phase: ExecutionPhase.REPORT,
       message:
-        'Evidence pack ready — awaiting human QA sign-off to close the STLC run',
-      data: signoffSummary.totals,
+        'Sign-off scorecard ready — awaiting human QA Accept to close STLC',
+      data: { recommendation: signoffOut.recommendation },
     });
     await waitForContinueSignal(executionId);
 

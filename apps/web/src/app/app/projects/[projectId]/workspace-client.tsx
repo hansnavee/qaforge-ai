@@ -12,6 +12,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Input } from '@/components/Input';
 import { api, ApiError } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import { StlcDocsPanel } from './stlc-docs-panel';
 
 type RequirementDoc = {
   id: string;
@@ -405,90 +406,90 @@ type ProjectDetail = {
 
 type WorkflowState = 'done' | 'active' | 'locked';
 
+const STLC_WORKFLOW_ORDER = [
+  'REQUIREMENTS',
+  'PLANNING',
+  'DESIGN',
+  'ENVIRONMENT',
+  'DATA',
+  'EXECUTION',
+  'DEFECTS',
+  'AUTOMATION',
+  'REPORTING',
+  'SIGNOFF',
+] as const;
+
 function buildWorkflow(opts: {
   requirementsApproved: boolean;
   stlcStage?: string | null;
-}): Array<{ id: string; label: string; state: WorkflowState }> {
+}): Array<{ id: string; label: string; state: WorkflowState; agent?: string }> {
   const stage = (opts.stlcStage ?? 'REQUIREMENTS').toUpperCase();
-  const pastSignoff = stage === 'DONE';
-  const inSignoff = stage === 'SIGNOFF';
-  const inAutomation = stage === 'AUTOMATION';
-  const inRegression = stage === 'REGRESSION';
-  const inDefects = stage === 'DEFECTS';
-  const inExecution = stage === 'EXECUTION';
-  const inData = stage === 'DATA';
-  const inDesign = stage === 'DESIGN';
-  const inPlanning = stage === 'PLANNING';
-  const pastAutomation = inSignoff || pastSignoff;
-  const pastRegression = inAutomation || pastAutomation;
-  const pastDefects = inRegression || pastRegression;
-  const pastExecution = inDefects || pastDefects;
-  const pastData = inExecution || pastExecution;
-  const pastDesign = inData || pastData;
-  const pastPlanning = inDesign || pastDesign;
+  const stageIdx =
+    stage === 'DONE'
+      ? STLC_WORKFLOW_ORDER.length
+      : Math.max(
+          0,
+          STLC_WORKFLOW_ORDER.indexOf(
+            stage as (typeof STLC_WORKFLOW_ORDER)[number],
+          ),
+        );
 
-  return [
-    { id: 'project', label: 'Project', state: 'done' },
-    {
-      id: 'requirements',
-      label: 'Requirements',
-      state: opts.requirementsApproved ? 'done' : 'active',
+  const labels: Record<string, { label: string; agent: string }> = {
+    REQUIREMENTS: {
+      label: '1. Requirements',
+      agent: 'AI Analyzer Agent',
     },
-    {
-      id: 'test-planning',
-      label: 'Test Planning',
-      state: pastPlanning
+    PLANNING: {
+      label: '2. Test Planning',
+      agent: 'AI Test Strategy Agent',
+    },
+    DESIGN: {
+      label: '3. Test Design',
+      agent: 'AI Test Design Agent',
+    },
+    ENVIRONMENT: {
+      label: '4. Environment',
+      agent: 'AI Environment Agent',
+    },
+    DATA: { label: '5. Test Data', agent: 'AI Test Data Agent' },
+    EXECUTION: {
+      label: '6. Execution',
+      agent: 'AI Test Executor Agent',
+    },
+    DEFECTS: {
+      label: '7. Defects',
+      agent: 'AI Bug Reporting Agent',
+    },
+    AUTOMATION: {
+      label: '8. Automation',
+      agent: 'AI Test Automation Agent',
+    },
+    REPORTING: {
+      label: '9. Reporting',
+      agent: 'AI Test Report Agent',
+    },
+    SIGNOFF: {
+      label: '10. Sign-off',
+      agent: 'AI Sign-off Agent',
+    },
+  };
+
+  return STLC_WORKFLOW_ORDER.map((id, index) => {
+    const meta = labels[id] ?? { label: id, agent: 'AI Agent' };
+    let state: WorkflowState = 'locked';
+    if (id === 'REQUIREMENTS') {
+      state = opts.requirementsApproved
         ? 'done'
-        : inPlanning || opts.requirementsApproved
+        : index <= stageIdx
           ? 'active'
-          : 'locked',
-    },
-    {
-      id: 'test-design',
-      label: 'Test Design',
-      state: pastDesign ? 'done' : inDesign ? 'active' : 'locked',
-    },
-    {
-      id: 'test-data',
-      label: 'Test Data',
-      state: pastData ? 'done' : inData ? 'active' : 'locked',
-    },
-    {
-      id: 'execution',
-      label: 'Execution',
-      state: pastExecution ? 'done' : inExecution ? 'active' : 'locked',
-    },
-    {
-      id: 'manual',
-      label: 'Manual Testing',
-      state: pastExecution ? 'done' : inExecution ? 'active' : 'locked',
-    },
-    {
-      id: 'bugs',
-      label: 'Bug Management',
-      state: pastDefects ? 'done' : inDefects ? 'active' : 'locked',
-    },
-    {
-      id: 'regression',
-      label: 'Regression',
-      state: pastRegression ? 'done' : inRegression ? 'active' : 'locked',
-    },
-    {
-      id: 'automation',
-      label: 'Automation',
-      state: pastAutomation ? 'done' : inAutomation ? 'active' : 'locked',
-    },
-    {
-      id: 'signoff',
-      label: 'QA Sign-off',
-      state: pastSignoff ? 'done' : inSignoff ? 'active' : 'locked',
-    },
-    {
-      id: 'reports',
-      label: 'Reports',
-      state: pastAutomation ? (pastSignoff ? 'done' : 'active') : 'locked',
-    },
-  ];
+          : 'locked';
+    } else if (index < stageIdx || stage === 'DONE') {
+      state = 'done';
+    } else if (index === stageIdx) {
+      state = 'active';
+    }
+    return { id: id.toLowerCase(), label: meta.label, state, agent: meta.agent };
+  });
 }
 
 const EXTRACT_STEPS = [
@@ -1237,7 +1238,10 @@ export default function ProjectWorkspacePage() {
             Overview
           </Button>
           <Button
-            variant={tab !== 'overview' ? 'primary' : 'secondary'}
+            variant={
+              tab !== 'overview' &&
+      tab !== 'stlc' && tab !== 'stlc' ? 'primary' : 'secondary'
+            }
             size="sm"
             onClick={() =>
               setView(
@@ -1250,6 +1254,15 @@ export default function ProjectWorkspacePage() {
             }
           >
             Requirements
+          </Button>
+          <Button
+            variant={tab === 'stlc' ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={() =>
+              router.replace('?tab=stlc', { scroll: false })
+            }
+          >
+            STLC Docs
           </Button>
         </div>
       </div>
@@ -1268,8 +1281,16 @@ export default function ProjectWorkspacePage() {
         </div>
         <div className="flex flex-wrap gap-2">
           {workflowSteps.map((step) => (
-            <span
+            <button
               key={step.id}
+              type="button"
+              title={step.agent}
+              onClick={() =>
+                router.replace(
+                  `?tab=stlc&phase=${step.id.toUpperCase()}`,
+                  { scroll: false },
+                )
+              }
               className={cn(
                 'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs',
                 step.state === 'done' &&
@@ -1285,7 +1306,7 @@ export default function ProjectWorkspacePage() {
                   ? '●'
                   : '🔒'}{' '}
               {step.label}
-            </span>
+            </button>
           ))}
         </div>
 
@@ -1408,6 +1429,19 @@ export default function ProjectWorkspacePage() {
           >
             Run Fresh Analysis
           </Button>
+        </Card>
+      ) : null}
+
+      {tab === 'stlc' ? (
+        <Card className="space-y-3">
+          <div>
+            <h2 className="text-base font-medium">STLC documentation</h2>
+            <p className="mt-1 text-sm text-muted">
+              Senior QA AI prepares each phase. Review, edit, download, then
+              Accept to unlock the next phase.
+            </p>
+          </div>
+          <StlcDocsPanel projectId={projectId} />
         </Card>
       ) : null}
 
@@ -1622,6 +1656,7 @@ export default function ProjectWorkspacePage() {
       ) : null}
 
       {tab !== 'overview' &&
+      tab !== 'stlc' &&
       !extractMutation.isPending &&
       !reviewMutation.isPending ? (
         <Card className="sticky top-0 z-10 space-y-3 border-accent/30 bg-bg/95 backdrop-blur">
@@ -1680,7 +1715,8 @@ export default function ProjectWorkspacePage() {
         </Card>
       ) : null}
 
-      {tab !== 'overview' && extractMutation.isPending ? (
+      {tab !== 'overview' &&
+      tab !== 'stlc' && extractMutation.isPending ? (
         <Card className="space-y-4">
           <div>
             <h2 className="text-base font-medium">AI QA Engineer</h2>
@@ -1712,7 +1748,8 @@ export default function ProjectWorkspacePage() {
         </Card>
       ) : null}
 
-      {tab !== 'overview' && !extractMutation.isPending && view === 'summary' && summary ? (
+      {tab !== 'overview' &&
+      tab !== 'stlc' && !extractMutation.isPending && view === 'summary' && summary ? (
         <Card className="space-y-4">
           <h2 className="text-base font-medium text-success">
             ✓ Requirement Extraction Complete
@@ -1779,7 +1816,8 @@ export default function ProjectWorkspacePage() {
         </Card>
       ) : null}
 
-      {tab !== 'overview' && reviewMutation.isPending ? (
+      {tab !== 'overview' &&
+      tab !== 'stlc' && reviewMutation.isPending ? (
         <Card className="space-y-4">
           <div>
             <h2 className="text-base font-medium">Business + Functional Review</h2>
@@ -1813,6 +1851,7 @@ export default function ProjectWorkspacePage() {
       ) : null}
 
       {tab !== 'overview' &&
+      tab !== 'stlc' &&
       !extractMutation.isPending &&
       view === 'debug' &&
       SHOW_EXTRACTION_DEBUG ? (
@@ -1882,6 +1921,7 @@ export default function ProjectWorkspacePage() {
         </Card>
       ) : null}
       {tab !== 'overview' &&
+      tab !== 'stlc' &&
       !extractMutation.isPending &&
       !reviewMutation.isPending &&
       view === 'review-dashboard' ? (
@@ -2034,6 +2074,7 @@ export default function ProjectWorkspacePage() {
       ) : null}
 
       {tab !== 'overview' &&
+      tab !== 'stlc' &&
       !extractMutation.isPending &&
       !reviewMutation.isPending &&
       view === 'features' ? (
@@ -2429,6 +2470,7 @@ export default function ProjectWorkspacePage() {
       ) : null}
 
       {tab !== 'overview' &&
+      tab !== 'stlc' &&
       !extractMutation.isPending &&
       !reviewMutation.isPending &&
       view === 'detail' &&
@@ -3064,6 +3106,7 @@ export default function ProjectWorkspacePage() {
       ) : null}
 
       {tab !== 'overview' &&
+      tab !== 'stlc' &&
       !extractMutation.isPending &&
       !reviewMutation.isPending &&
       (view === 'list' || (view === 'detail' && !selected)) ? (
@@ -3307,6 +3350,7 @@ export default function ProjectWorkspacePage() {
       ) : null}
 
       {tab !== 'overview' &&
+      tab !== 'stlc' &&
       !extractMutation.isPending &&
       view === 'source' ? (
         <Card className="space-y-5">

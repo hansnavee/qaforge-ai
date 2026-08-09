@@ -262,6 +262,59 @@ export class ExecutionsService {
       data: {
         testDesignApprovedAt: approvedAt,
         testDesignApprovedBy: user.id,
+        stlcStage: 'ENVIRONMENT',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'ENVIRONMENT',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.design_approved',
+      phase: 'TEST_DESIGN',
+      message: 'Human approved test design; continuing to Environment Setup',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.design.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
+  async approveEnvironment(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_ENV_APPROVAL) {
+      throw new ForbiddenException(
+        `Cannot approve environment from status ${execution.status}`,
+      );
+    }
+
+    const approvedAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        environmentApprovedAt: approvedAt,
+        environmentApprovedBy: user.id,
         stlcStage: 'DATA',
       },
     });
@@ -277,16 +330,16 @@ export class ExecutionsService {
     await this.queue.publishContinue(executionId);
     await this.queue.publishExecutionEvent(executionId, {
       executionId,
-      type: 'stlc.design_approved',
-      phase: 'TEST_DESIGN',
-      message: 'Human approved test design; continuing to Test Data',
+      type: 'stlc.env_approved',
+      phase: 'ENVIRONMENT',
+      message: 'Human approved environment; continuing to Test Data',
       timestamp: new Date().toISOString(),
     });
 
     await this.audit.log({
       organizationId: orgId,
       userId: user.id,
-      action: 'stlc.design.approve',
+      action: 'stlc.environment.approve',
       resource: 'execution',
       resourceId: executionId,
       metadata: { projectId: execution.projectId },
@@ -422,7 +475,7 @@ export class ExecutionsService {
       data: {
         defectsApprovedAt: approvedAt,
         defectsApprovedBy: user.id,
-        stlcStage: 'REGRESSION',
+        stlcStage: 'AUTOMATION',
       },
     });
 
@@ -439,7 +492,8 @@ export class ExecutionsService {
       executionId,
       type: 'stlc.defects_approved',
       phase: 'BUG_ANALYSIS',
-      message: 'Human approved defect management; continuing to Regression',
+      message:
+        'Human approved defect management; continuing to Automation (inline retest)',
       timestamp: new Date().toISOString(),
     });
 
@@ -528,7 +582,7 @@ export class ExecutionsService {
       data: {
         automationApprovedAt: approvedAt,
         automationApprovedBy: user.id,
-        stlcStage: 'SIGNOFF',
+        stlcStage: 'REPORTING',
       },
     });
 
@@ -545,7 +599,7 @@ export class ExecutionsService {
       executionId,
       type: 'stlc.automation_approved',
       phase: 'AUTOMATION',
-      message: 'Human approved automation; continuing to QA Sign-off',
+      message: 'Human approved automation; continuing to Test Reporting',
       timestamp: new Date().toISOString(),
     });
 
@@ -553,6 +607,59 @@ export class ExecutionsService {
       organizationId: orgId,
       userId: user.id,
       action: 'stlc.automation.approve',
+      resource: 'execution',
+      resourceId: executionId,
+      metadata: { projectId: execution.projectId },
+    });
+
+    return updated;
+  }
+
+  async approveReport(
+    user: SessionUser,
+    orgId: string,
+    executionId: string,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    const execution = await this.get(user.id, orgId, executionId);
+
+    if (execution.status !== ExecutionStatus.AWAITING_REPORT_APPROVAL) {
+      throw new ForbiddenException(
+        `Cannot approve report from status ${execution.status}`,
+      );
+    }
+
+    const approvedAt = new Date();
+    await prisma.project.update({
+      where: { id: execution.projectId },
+      data: {
+        reportApprovedAt: approvedAt,
+        reportApprovedBy: user.id,
+        stlcStage: 'SIGNOFF',
+      },
+    });
+
+    const updated = await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.RUNNING,
+        phase: 'REPORT',
+      },
+    });
+
+    await this.queue.publishContinue(executionId);
+    await this.queue.publishExecutionEvent(executionId, {
+      executionId,
+      type: 'stlc.report_approved',
+      phase: 'REPORT',
+      message: 'Human approved test report; continuing to QA Sign-off',
+      timestamp: new Date().toISOString(),
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.report.approve',
       resource: 'execution',
       resourceId: executionId,
       metadata: { projectId: execution.projectId },
