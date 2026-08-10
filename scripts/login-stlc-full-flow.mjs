@@ -341,12 +341,17 @@ async function main() {
     ['AWAITING_QA_SIGNOFF', 'approve-qa-signoff'],
   ];
 
-  for (const [status, action] of laterGates) {
-    await waitForStatus(executionId, [status], action);
+  // If a continue-flag skipped ahead, land on the live gate instead of timing out.
+  for (let i = 0; i < laterGates.length; ) {
+    const remaining = laterGates.slice(i).map(([s]) => s);
+    const ex = await waitForStatus(executionId, remaining, laterGates[i][1]);
+    i += remaining.indexOf(ex.status);
+    const [, action] = laterGates[i];
     await postGate(
       `/api/v1/orgs/${ORG_ID}/executions/${executionId}/${action}`,
       action,
     );
+    i += 1;
   }
 
   const done = await waitForStatus(executionId, ['COMPLETED'], 'completed');

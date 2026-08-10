@@ -28,6 +28,7 @@ export class ExecutionsService {
   /**
    * Resume after a human gate.
    * - requeue=true (pre-browser): worker released the slot; enqueue a fresh job.
+   *   Do NOT publishContinue — a leftover continue-flag would auto-skip later waits.
    * - requeue=false (post-login): worker is still blocked on Redis continue.
    */
   private async resumeStlc(
@@ -35,8 +36,10 @@ export class ExecutionsService {
     runMode = 'STLC',
     opts?: { requeue?: boolean },
   ) {
-    await this.queue.publishContinue(executionId);
-    if (opts?.requeue === false) return;
+    if (opts?.requeue === false) {
+      await this.queue.publishContinue(executionId);
+      return;
+    }
     await this.queue.enqueueRunExecution(executionId, {
       jobId: `stlc-resume-${executionId}-${Date.now()}`,
       runMode,
