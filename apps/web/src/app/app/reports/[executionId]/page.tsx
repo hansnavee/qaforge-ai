@@ -5,7 +5,8 @@ import { useQuery } from '@tanstack/react-query';
 import { Card } from '@/components/Card';
 import { ScoreRing } from '@/components/ScoreRing';
 import { Button } from '@/components/Button';
-import { api, ApiError, API_URL } from '@/lib/api';
+import { api, ApiError, downloadAuthenticated } from '@/lib/api';
+import { getDefaultOrgId } from '@/lib/org';
 
 type ReportPayload = {
   html?: string;
@@ -13,6 +14,7 @@ type ReportPayload = {
   scores?: Record<string, number>;
   summary?: { passed?: number; failed?: number; total?: number };
   projectName?: string;
+  executionId?: string;
 };
 
 export default function ReportDetailPage() {
@@ -22,7 +24,10 @@ export default function ReportDetailPage() {
     queryKey: ['report', executionId],
     queryFn: async () => {
       try {
-        return await api<ReportPayload>(`/api/v1/reports/${executionId}`);
+        const orgId = await getDefaultOrgId();
+        return await api<ReportPayload>(
+          `/api/v1/orgs/${orgId}/reports/${executionId}`,
+        );
       } catch (e) {
         if (e instanceof ApiError) return null;
         throw e;
@@ -30,11 +35,9 @@ export default function ReportDetailPage() {
     },
   });
 
-  const htmlSrc =
-    data?.htmlUrl ??
-    (data?.html
-      ? `data:text/html;charset=utf-8,${encodeURIComponent(data.html)}`
-      : `${API_URL}/api/v1/executions/${executionId}/report.html`);
+  const htmlSrc = data?.html
+    ? `data:text/html;charset=utf-8,${encodeURIComponent(data.html)}`
+    : undefined;
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -45,11 +48,21 @@ export default function ReportDetailPage() {
           </h1>
           <p className="mt-1 font-mono text-xs text-muted">{executionId}</p>
         </div>
-        <a
-          href={`${API_URL}/api/v1/executions/${executionId}/download-zip`}
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => {
+            void (async () => {
+              const orgId = await getDefaultOrgId();
+              await downloadAuthenticated(
+                `/api/v1/orgs/${orgId}/executions/${executionId}/download-zip`,
+                `report-${executionId}.zip`,
+              );
+            })();
+          }}
         >
-          <Button variant="secondary">Download ZIP</Button>
-        </a>
+          Download ZIP
+        </Button>
       </div>
 
       {data?.scores ? (
@@ -76,12 +89,16 @@ export default function ReportDetailPage() {
       <Card className="overflow-hidden p-0">
         {isLoading ? (
           <p className="p-5 text-sm text-muted">Loading report…</p>
-        ) : (
+        ) : htmlSrc ? (
           <iframe
             title="QAForge HTML report"
             src={htmlSrc}
             className="h-[70vh] w-full bg-white"
           />
+        ) : (
+          <p className="p-5 text-sm text-muted">
+            No HTML report artifact for this execution yet.
+          </p>
         )}
       </Card>
     </div>

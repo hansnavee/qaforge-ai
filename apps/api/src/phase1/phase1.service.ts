@@ -296,6 +296,7 @@ export class Phase1Service {
         status: ExecutionStatus.QUEUED,
         phase: 'INIT',
         runMode: 'STLC',
+        cycleNumber: 1,
         startedAt: new Date(),
       },
     });
@@ -304,6 +305,7 @@ export class Phase1Service {
       where: { id: project.id },
       data: {
         stlcStage: 'PLANNING',
+        currentCycle: 1,
         testPlanApprovedAt: null,
         testPlanApprovedBy: null,
         testDesignApprovedAt: null,
@@ -727,73 +729,101 @@ export class Phase1Service {
     }
 
     if (!buf) {
-      const [cases, bugs, results] = await Promise.all([
+      const [cases, bugs, results, evidenceArts] = await Promise.all([
         prisma.testCase.findMany({ where: { executionId: execution.id } }),
         prisma.bug.findMany({ where: { executionId: execution.id } }),
         prisma.testResult.findMany({
           where: { executionId: execution.id },
           include: { testCase: true },
         }),
+        prisma.artifact.findMany({
+          where: {
+            executionId: execution.id,
+            type: { in: [ArtifactType.SCREENSHOT, ArtifactType.VIDEO] },
+          },
+        }),
       ]);
-      if (!cases.length && !bugs.length && !results.length && !artifact) {
+      if (
+        !cases.length &&
+        !bugs.length &&
+        !results.length &&
+        !evidenceArts.length &&
+        !artifact
+      ) {
         throw new NotFoundException('Final STLC pack not ready');
       }
-      buf = await buildZipPackage({
-        files: {
-          'test-cases.csv': rowsToCsv(
-            [
-              'id',
-              'module',
-              'scenario',
-              'expected',
-              'priority',
-              'type',
-              'testData',
-            ],
-            cases.map((c) => ({
-              id: c.externalId,
-              module: c.module,
-              scenario: c.scenario,
-              expected: c.expected,
-              priority: c.priority,
-              type: c.type,
-              testData: c.testData ? JSON.stringify(c.testData) : '',
-            })),
-          ),
-          'bugs.csv': rowsToCsv(
-            ['id', 'title', 'severity', 'status', 'description'],
-            bugs.map((b) => ({
-              id: b.id,
-              title: b.title,
-              severity: b.severity,
-              status: b.status,
-              description: b.description,
-            })),
-          ),
-          'results.csv': rowsToCsv(
-            ['id', 'testCase', 'status', 'message', 'durationMs'],
-            results.map((r) => ({
-              id: r.id,
-              testCase: r.testCase?.externalId ?? '',
-              status: r.status,
-              message: r.message,
-              durationMs: r.durationMs,
-            })),
-          ),
-          'manifest.json': JSON.stringify(
-            {
-              executionId: execution.id,
-              projectId,
-              projectName: project.name,
-              appUrl: project.appUrl,
-              rebuiltOnDownload: true,
-              generatedAt: new Date().toISOString(),
-            },
-            null,
-            2,
-          ),
-        },
-      });
+
+      const files: Record<string, Buffer | string> = {
+        'test-cases.csv': rowsToCsv(
+          [
+            'id',
+            'module',
+            'scenario',
+            'expected',
+            'priority',
+            'type',
+            'testData',
+          ],
+          cases.map((c) => ({
+            id: c.externalId,
+            module: c.module,
+            scenario: c.scenario,
+            expected: c.expected,
+            priority: c.priority,
+            type: c.type,
+            testData: c.testData ? JSON.stringify(c.testData) : '',
+          })),
+        ),
+        'bugs.csv': rowsToCsv(
+          ['id', 'title', 'severity', 'status', 'description'],
+          bugs.map((b) => ({
+            id: b.id,
+            title: b.title,
+            severity: b.severity,
+            status: b.status,
+            description: b.description,
+          })),
+        ),
+        'results.csv': rowsToCsv(
+          ['id', 'testCase', 'status', 'message', 'durationMs'],
+          results.map((r) => ({
+            id: r.id,
+            testCase: r.testCase?.externalId ?? '',
+            status: r.status,
+            message: r.message,
+            durationMs: r.durationMs,
+          })),
+        ),
+        'manifest.json': JSON.stringify(
+          {
+            executionId: execution.id,
+            projectId,
+            projectName: project.name,
+            appUrl: project.appUrl,
+            rebuiltOnDownload: true,
+            generatedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      };
+
+      if (evidenceArts.length) {
+        const store = new R2ArtifactStore({
+          fallbackRootDir: `${process.cwd()}/.artifacts`,
+        });
+        for (const art of evidenceArts) {
+          try {
+            const body = await store.get(art.storageKey);
+            const name = `evidence/${art.storageKey.split('/').pop()}`;
+            files[name] = body;
+          } catch {
+            /* skip missing */
+          }
+        }
+      }
+
+      buf = await buildZipPackage({ files });
     }
 
     res.setHeader('Content-Type', 'application/zip');
@@ -1027,6 +1057,9 @@ export class Phase1Service {
     await this.requireProject(userId, orgId, projectId);
     return prisma.bug.findMany({
       where: { projectId },
+      include: {
+        testCase: { select: { externalId: true, scenario: true } },
+      },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -1214,5 +1247,153 @@ export class Phase1Service {
         : '',
     }));
     this.sendDownload(res, format, 'test-results', headers, rows);
+  }
+
+  async listAutomationForOrg(userId: string, orgId: string) {
+    await this.orgs.requireMembership(userId, orgId, Role.VIEWER);
+    const projects = await prisma.project.findMany({
+      where: { organizationId: orgId, deletedAt: null },
+      select: { id: true, name: true },
+    });
+    const items = [];
+    for (const p of projects) {
+      const row = await this.listAutomationForProject(userId, orgId, p.id);
+      if (row) items.push({ ...row, projectId: p.id, projectName: p.name });
+    }
+    return { items };
+  }
+
+  async listAutomationForProject(
+    userId: string,
+    orgId: string,
+    projectId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    const execution = await prisma.execution.findFirst({
+      where: { projectId, runMode: { in: [...STLC_RUN_MODES] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!execution) return null;
+
+    const manifestArt = await prisma.artifact.findFirst({
+      where: { executionId: execution.id, type: 'AUTOMATION_MANIFEST' },
+      orderBy: { createdAt: 'desc' },
+    });
+    let manifest: Record<string, unknown> = {
+      executionId: execution.id,
+      files: [] as string[],
+    };
+    if (manifestArt) {
+      try {
+        const store = new R2ArtifactStore({
+          fallbackRootDir: `${process.cwd()}/.artifacts`,
+        });
+        const buf = await store.get(manifestArt.storageKey);
+        manifest = JSON.parse(buf.toString('utf8')) as Record<string, unknown>;
+      } catch {
+        /* keep defaults */
+      }
+    }
+
+    const frameworkFiles = await prisma.artifact.findMany({
+      where: {
+        executionId: execution.id,
+        type: ArtifactType.AUTOMATION_FRAMEWORK,
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { storageKey: true },
+    });
+    const filesFromStore = frameworkFiles.map((f) => f.storageKey);
+    const files = Array.isArray(manifest.files)
+      ? (manifest.files as string[])
+      : filesFromStore;
+
+    if (!files.length && !manifestArt) return null;
+
+    return {
+      executionId: execution.id,
+      framework: (manifest.framework as string) ?? 'playwright',
+      language: (manifest.language as string) ?? 'typescript',
+      baseUrl: (manifest.baseUrl as string) ?? undefined,
+      files,
+    };
+  }
+
+  async listReports(userId: string, orgId: string) {
+    await this.orgs.requireMembership(userId, orgId, Role.VIEWER);
+    const arts = await prisma.artifact.findMany({
+      where: {
+        type: ArtifactType.REPORT_HTML,
+        execution: { project: { organizationId: orgId, deletedAt: null } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+      include: {
+        execution: {
+          select: {
+            id: true,
+            status: true,
+            createdAt: true,
+            project: { select: { name: true } },
+          },
+        },
+      },
+    });
+    return arts.map((a) => ({
+      id: a.executionId,
+      executionId: a.executionId,
+      status: a.execution.status,
+      projectName: a.execution.project.name,
+      createdAt: a.createdAt.toISOString(),
+    }));
+  }
+
+  async getReport(userId: string, orgId: string, executionId: string) {
+    await this.orgs.requireMembership(userId, orgId, Role.VIEWER);
+    const execution = await prisma.execution.findFirst({
+      where: {
+        id: executionId,
+        project: { organizationId: orgId },
+      },
+      include: { project: true },
+    });
+    if (!execution) throw new NotFoundException('Execution not found');
+
+    const htmlArt = await prisma.artifact.findFirst({
+      where: { executionId, type: ArtifactType.REPORT_HTML },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let html: string | undefined;
+    if (htmlArt) {
+      try {
+        const store = new R2ArtifactStore({
+          fallbackRootDir: `${process.cwd()}/.artifacts`,
+        });
+        html = (await store.get(htmlArt.storageKey)).toString('utf8');
+      } catch {
+        html = undefined;
+      }
+    }
+
+    const scores =
+      execution.scores && typeof execution.scores === 'object'
+        ? (execution.scores as Record<string, number>)
+        : undefined;
+
+    return {
+      html,
+      htmlUrl: `/api/v1/orgs/${orgId}/executions/${executionId}/artifacts/by-type/${ArtifactType.REPORT_HTML}`,
+      scores,
+      summary: scores
+        ? {
+            passed: scores.passed,
+            failed: scores.failed,
+            total: scores.total,
+          }
+        : undefined,
+      projectName: execution.project.name,
+      executionId,
+    };
   }
 }

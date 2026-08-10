@@ -83,4 +83,13 @@ export class StlcController {
       res,
     );
   }
+
+  @Post('orgs/:orgId/projects/:projectId/stlc/cycles')
+  startNextCycle(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.stlc.startNextCycle(user, orgId, projectId);
+  }
 }

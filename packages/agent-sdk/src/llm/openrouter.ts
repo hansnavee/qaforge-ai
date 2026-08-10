@@ -441,6 +441,8 @@ export class OpenRouterLlmClient implements LlmClient {
     prompt: string;
     json?: boolean;
     model?: 'fast' | 'reasoning';
+    maxTokens?: number;
+    temperature?: number;
   }): Promise<{ text: string; tokensUsed: number }> {
     if (!this.apiKey) {
       return mockComplete(opts);
@@ -476,6 +478,12 @@ export class OpenRouterLlmClient implements LlmClient {
         model,
         messages,
       };
+      if (typeof opts.temperature === 'number') {
+        body.temperature = opts.temperature;
+      }
+      if (typeof opts.maxTokens === 'number') {
+        body.max_tokens = opts.maxTokens;
+      }
       // Some free models reject response_format — only request it on first try.
       if (opts.json && model !== 'openrouter/free') {
         body.response_format = { type: 'json_object' };

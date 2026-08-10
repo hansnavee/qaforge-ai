@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Card } from '@/components/Card';
 import { Badge } from '@/components/Badge';
 import { api, ApiError } from '@/lib/api';
+import { getDefaultOrgId } from '@/lib/org';
 
 type ReportRow = {
   id: string;
@@ -19,9 +20,8 @@ export default function ReportsPage() {
     queryKey: ['reports'],
     queryFn: async () => {
       try {
-        return await api<ReportRow[] | { items: ReportRow[] }>(
-          '/api/v1/reports',
-        );
+        const orgId = await getDefaultOrgId();
+        return await api<ReportRow[]>(`/api/v1/orgs/${orgId}/reports`);
       } catch (e) {
         if (e instanceof ApiError) return [] as ReportRow[];
         throw e;
@@ -29,11 +29,7 @@ export default function ReportsPage() {
     },
   });
 
-  const items = Array.isArray(data)
-    ? data
-    : data && 'items' in data
-      ? data.items
-      : [];
+  const items = Array.isArray(data) ? data : [];
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">

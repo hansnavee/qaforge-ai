@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Param,
+  Query,
   Res,
   UseGuards,
 } from '@nestjs/common';
@@ -25,6 +26,40 @@ export class ArtifactsController {
     return this.artifacts.list(user.id, orgId, executionId);
   }
 
+  @Get('artifacts/by-key')
+  async getByKey(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+    @Query('key') key: string,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.artifacts.getByStorageKey(
+      user.id,
+      orgId,
+      executionId,
+      decodeURIComponent(key || ''),
+      res,
+    );
+  }
+
+  @Get('artifacts/by-type/:type')
+  async getByType(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+    @Param('type') type: string,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.artifacts.downloadByType(
+      user.id,
+      orgId,
+      executionId,
+      type,
+      res,
+    );
+  }
+
   @Get('download-zip')
   async downloadZip(
     @CurrentUser() user: SessionUser,
@@ -32,10 +67,6 @@ export class ArtifactsController {
     @Param('executionId') executionId: string,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const result = await this.artifacts.downloadZip(user.id, orgId, executionId, res);
-    if (result && typeof result === 'object' && 'url' in result) {
-      return result;
-    }
-    return result;
+    return this.artifacts.downloadZip(user.id, orgId, executionId, res);
   }
 }

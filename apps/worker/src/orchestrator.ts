@@ -86,6 +86,7 @@ async function runAgent(
   });
 
   try {
+    if (ctx.tokensUsed) ctx.tokensUsed.total = 0;
     const output = await step.agent.run(ctx, input);
     const durationMs = Date.now() - started;
     await prisma.agentRun.update({
@@ -93,6 +94,7 @@ async function runAgent(
       data: {
         status: 'COMPLETED',
         durationMs,
+        tokensUsed: ctx.tokensUsed?.total ?? 0,
         outputRef: typeof output === 'string' ? output : undefined,
       },
     });
@@ -100,7 +102,11 @@ async function runAgent(
       type: 'agent.completed',
       phase: step.phase,
       message: `${step.agent.name} completed`,
-      data: { agentId: step.agentId, durationMs },
+      data: {
+        agentId: step.agentId,
+        durationMs,
+        tokensUsed: ctx.tokensUsed?.total ?? 0,
+      },
     });
     return output;
   } catch (err) {
@@ -111,6 +117,7 @@ async function runAgent(
         status: 'FAILED',
         durationMs: Date.now() - started,
         error: message,
+        tokensUsed: ctx.tokensUsed?.total ?? 0,
       },
     });
     await ctx.emit({

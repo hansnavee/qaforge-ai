@@ -17,6 +17,7 @@ export type TestCaseRow = {
   priority: string | null;
   severity: string | null;
   type: string | null;
+  testData?: unknown;
 };
 
 function stepsToText(steps: unknown): string {
@@ -50,7 +51,9 @@ export function DesignCasesPanel({
     steps: '',
     expected: '',
     priority: 'P1',
+    severity: 'medium',
     type: 'functional',
+    testData: '',
   });
   const [adding, setAdding] = useState(false);
 
@@ -76,7 +79,17 @@ export function DesignCasesPanel({
         steps: textToSteps(draft.steps),
         expected: draft.expected.trim(),
         priority: draft.priority || 'P1',
+        severity: draft.severity || 'medium',
         type: draft.type || 'functional',
+        testData: (() => {
+          const raw = draft.testData.trim();
+          if (!raw) return undefined;
+          try {
+            return JSON.parse(raw) as Record<string, string>;
+          } catch {
+            return { note: raw };
+          }
+        })(),
       };
       if (adding) {
         return api(`/api/v1/orgs/${orgId}/projects/${projectId}/test-cases`, {
@@ -125,7 +138,12 @@ export function DesignCasesPanel({
       steps: stepsToText(row.steps),
       expected: row.expected,
       priority: row.priority ?? 'P1',
+      severity: row.severity ?? 'medium',
       type: row.type ?? 'functional',
+      testData:
+        row.testData && typeof row.testData === 'object'
+          ? JSON.stringify(row.testData, null, 2)
+          : '',
     });
   }
 
@@ -140,7 +158,9 @@ export function DesignCasesPanel({
       steps: '1. ',
       expected: '',
       priority: 'P1',
+      severity: 'medium',
       type: 'functional',
+      testData: '',
     });
   }
 
@@ -295,6 +315,40 @@ export function DesignCasesPanel({
                             </p>
                             <p className="mt-1 text-fg">{row.expected}</p>
                           </div>
+                          <div className="grid gap-3 sm:grid-cols-3">
+                            <div>
+                              <p className="text-xs font-medium uppercase text-muted">
+                                Priority
+                              </p>
+                              <p className="mt-1 text-fg">
+                                {row.priority ?? '—'}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium uppercase text-muted">
+                                Severity
+                              </p>
+                              <p className="mt-1 text-fg">
+                                {row.severity ?? '—'}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium uppercase text-muted">
+                                Type
+                              </p>
+                              <p className="mt-1 text-fg">{row.type ?? '—'}</p>
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-xs font-medium uppercase text-muted">
+                              Test data
+                            </p>
+                            <pre className="mt-1 overflow-auto rounded border border-border bg-bg-elevated p-2 font-mono text-xs text-fg">
+                              {row.testData
+                                ? JSON.stringify(row.testData, null, 2)
+                                : '—'}
+                            </pre>
+                          </div>
                         </td>
                       </tr>
                     ) : null}
@@ -384,6 +438,16 @@ export function DesignCasesPanel({
               />
             </label>
             <label className="space-y-1 text-xs text-muted">
+              Severity
+              <input
+                className="w-full rounded-md border border-border bg-bg-elevated px-2 py-1.5 text-sm text-fg"
+                value={draft.severity}
+                onChange={(e) =>
+                  setDraft((d) => ({ ...d, severity: e.target.value }))
+                }
+              />
+            </label>
+            <label className="space-y-1 text-xs text-muted">
               Type
               <input
                 className="w-full rounded-md border border-border bg-bg-elevated px-2 py-1.5 text-sm text-fg"
@@ -391,6 +455,17 @@ export function DesignCasesPanel({
                 onChange={(e) =>
                   setDraft((d) => ({ ...d, type: e.target.value }))
                 }
+              />
+            </label>
+            <label className="space-y-1 text-xs text-muted sm:col-span-2">
+              Test data (JSON)
+              <textarea
+                className="min-h-[70px] w-full rounded-md border border-border bg-bg-elevated px-2 py-1.5 font-mono text-sm text-fg"
+                value={draft.testData}
+                onChange={(e) =>
+                  setDraft((d) => ({ ...d, testData: e.target.value }))
+                }
+                placeholder='{"username":"standard_user"}'
               />
             </label>
           </div>

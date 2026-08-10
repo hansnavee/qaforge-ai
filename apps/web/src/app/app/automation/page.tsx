@@ -3,10 +3,14 @@
 import { useQuery } from '@tanstack/react-query';
 import { Card } from '@/components/Card';
 import { Badge } from '@/components/Badge';
-import { api, ApiError } from '@/lib/api';
+import { api, ApiError, downloadAuthenticated } from '@/lib/api';
+import { getDefaultOrgId } from '@/lib/org';
+import { Button } from '@/components/Button';
 
 type AutomationManifest = {
   executionId?: string;
+  projectId?: string;
+  projectName?: string;
   framework?: string;
   language?: string;
   files?: string[];
@@ -18,23 +22,18 @@ export default function AutomationPage() {
     queryKey: ['automation'],
     queryFn: async () => {
       try {
-        return await api<
-          AutomationManifest | { items: AutomationManifest[] }
-        >('/api/v1/automation');
+        const orgId = await getDefaultOrgId();
+        return await api<{ items: AutomationManifest[] }>(
+          `/api/v1/orgs/${orgId}/automation`,
+        );
       } catch (e) {
-        if (e instanceof ApiError) return null;
+        if (e instanceof ApiError) return { items: [] };
         throw e;
       }
     },
   });
 
-  const manifests: AutomationManifest[] = Array.isArray(data)
-    ? data
-    : data && 'items' in data
-      ? data.items
-      : data
-        ? [data]
-        : [];
+  const manifests = data?.items ?? [];
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -57,9 +56,32 @@ export default function AutomationPage() {
       ) : (
         manifests.map((m, i) => (
           <Card key={m.executionId ?? i}>
-            <div className="flex flex-wrap gap-2">
-              {m.framework ? <Badge tone="accent">{m.framework}</Badge> : null}
-              {m.language ? <Badge>{m.language}</Badge> : null}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap gap-2">
+                {m.projectName ? (
+                  <Badge tone="accent">{m.projectName}</Badge>
+                ) : null}
+                {m.framework ? <Badge>{m.framework}</Badge> : null}
+                {m.language ? <Badge>{m.language}</Badge> : null}
+              </div>
+              {m.projectId && m.executionId ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    void (async () => {
+                      const orgId = await getDefaultOrgId();
+                      await downloadAuthenticated(
+                        `/api/v1/orgs/${orgId}/executions/${m.executionId}/download-zip`,
+                        `automation-${m.executionId}.zip`,
+                      );
+                    })();
+                  }}
+                >
+                  Download ZIP
+                </Button>
+              ) : null}
             </div>
             <p className="mt-3 font-mono text-xs text-muted">
               {m.baseUrl ?? m.executionId ?? 'Framework package'}

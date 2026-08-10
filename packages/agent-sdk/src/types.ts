@@ -12,6 +12,8 @@ export interface AgentContext {
   browserSessionId?: string;
   artifactStore: ArtifactStore;
   llm: LlmClient;
+  /** Accumulated LLM tokens for the current agent run (reset by orchestrator). */
+  tokensUsed?: { total: number };
   emit: (event: {
     type: string;
     phase?: string;
@@ -38,5 +40,7 @@ export interface LlmClient {
     prompt: string;
     json?: boolean;
     model?: 'fast' | 'reasoning';
+    maxTokens?: number;
+    temperature?: number;
   }): Promise<{ text: string; tokensUsed: number }>;
 }

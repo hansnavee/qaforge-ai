@@ -170,24 +170,24 @@ export const testcaseAgent: AgentHandler<{ appUrl: string }, unknown> = {
     let raw: unknown;
     try {
       const llm = await ctx.llm.complete({
-        system: `You are a Senior QA writing executable manual test cases for documentation and handoff.
-Each case MUST include full detail a tester can execute without guessing:
-- clear scenario title
-- preconditions (environment, data, login state)
-- 4+ numbered atomic steps (UI action + where)
-- observable expected result
-- priority (P0-P2), severity, type (smoke|sanity|functional|negative|boundary|accessibility)
-Do not return one-line stubs.`,
+        system: `You are a Senior QA writing executable manual test cases.
+HARD RULES:
+- Ground every case in the provided requirements only — never invent product features.
+- Prefer requirementKey when requirements include keys; reject unmapped inventiveness.
+- Short fields: scenario ≤120 chars, expected ≤200, steps 3–6 × ≤100 chars.
+- Return JSON only.`,
         prompt: `App: ${input.appUrl}
-Requirements: ${JSON.stringify(requirements)?.slice(0, 12000)}
-Map: ${JSON.stringify(map)?.slice(0, 8000)}
-Functional: ${JSON.stringify(functional)?.slice(0, 4000)}
+Requirements: ${JSON.stringify(requirements)?.slice(0, 10000)}
+Map: ${JSON.stringify(map)?.slice(0, 5000)}
+Functional: ${JSON.stringify(functional)?.slice(0, 3000)}
 
-Cover happy path, negative, and at least one CRUD/cart or core feature from requirements.
+Cover happy path, negative, and core features from requirements only.
 Return JSON only:
-{ "testCases": [{ "id": "TC-001", "module", "scenario", "preconditions", "steps": ["1. ...","2. ..."], "expected", "priority", "severity", "type", "automationCandidate": true }] }`,
+{ "testCases": [{ "id": "TC-001", "module", "scenario", "preconditions", "steps": ["1. ...","2. ..."], "expected", "priority", "severity", "type", "automationCandidate": true, "requirementKey"?: string }] }`,
         json: true,
         model: 'reasoning',
+        temperature: 0.2,
+        maxTokens: 3000,
       });
       raw = JSON.parse(llm.text);
     } catch {

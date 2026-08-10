@@ -50,24 +50,23 @@ export const designAgent: AgentHandler<
     try {
       const llm = await ctx.llm.complete({
         system: `You are a Senior QA Test Design agent.
-Rewrite/expand every case into a fully documented executable test case.
-Required per case:
-- module, scenario (business outcome)
-- preconditions (>= 1 sentence: data, role, page state)
-- steps: 4+ concrete UI steps
-- expected: observable pass criteria
-- priority, severity, type, testingLevel (SMOKE|SANITY|FUNCTIONAL|NEGATIVE)
-- testData: realistic values for this app (Sauce Demo: standard_user / secret_sauce when applicable)
-No stub one-liners.`,
+HARD RULES (anti-hallucination):
+- Use ONLY the provided requirements + strategy. Do not invent features, pages, or APIs not present there.
+- Every case MUST map to a requirementKey from requirements when keys exist; drop cases that cannot.
+- Keep fields short: scenario ≤120 chars, expected ≤200 chars, each step ≤100 chars, preconditions ≤160 chars.
+- Return JSON only matching the schema. No prose outside JSON.
+Required per case: module, scenario, preconditions, steps (3–6), expected, priority, severity, type, testingLevel, testData.`,
         prompt: `App URL: ${input.appUrl}
-Strategy: ${JSON.stringify(strategy)?.slice(0, 6000)}
-Requirements: ${JSON.stringify(requirements)?.slice(0, 10000)}
-Draft cases: ${JSON.stringify(cases)}
+Strategy: ${JSON.stringify(strategy)?.slice(0, 4000)}
+Requirements: ${JSON.stringify(requirements)?.slice(0, 8000)}
+Draft cases: ${JSON.stringify(cases)?.slice(0, 6000)}
 
 Return JSON only:
-{ "testCases": [{ "id","module","scenario","preconditions","steps":string[],"expected","priority","severity","type","testingLevel","automationCandidate":boolean,"testData":Record<string,string> }] }`,
+{ "testCases": [{ "id","module","scenario","preconditions","steps":string[],"expected","priority","severity","type","testingLevel","automationCandidate":boolean,"testData":Record<string,string>,"requirementKey"?:string }] }`,
         json: true,
         model: 'reasoning',
+        temperature: 0.2,
+        maxTokens: 3500,
       });
       const parsed = JSON.parse(llm.text) as { testCases?: DesignedCase[] };
       if (Array.isArray(parsed.testCases) && parsed.testCases.length) {

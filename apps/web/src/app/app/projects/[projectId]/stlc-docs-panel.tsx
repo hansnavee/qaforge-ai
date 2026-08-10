@@ -3,11 +3,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '@/lib/api';
+import { api, downloadAuthenticated } from '@/lib/api';
 import { getDefaultOrgId } from '@/lib/org';
 import { Button } from '@/components/Button';
 import { cn } from '@/lib/cn';
 import { DesignCasesPanel } from './design-cases-panel';
+import { DefectsPanel } from './defects-panel';
 
 type PhaseSummary = {
   id: string;
@@ -52,6 +53,9 @@ function friendlyDocPreview(doc: Record<string, unknown>): string[] {
       ? doc.cases
       : null;
   if (cases) lines.push(`${cases.length} item(s) in this package`);
+  if (Array.isArray(doc.bugs)) {
+    lines.push(`${doc.bugs.length} defect(s) on the board`);
+  }
   if (Array.isArray(doc.checklist)) {
     lines.push(`${doc.checklist.length} environment check(s)`);
   }
@@ -60,6 +64,13 @@ function friendlyDocPreview(doc: Record<string, unknown>): string[] {
   }
   if (doc.strategy && typeof doc.strategy === 'object') {
     lines.push('Test strategy package included');
+  }
+  const generation = doc.generation as { files?: string[]; manifest?: unknown } | undefined;
+  if (generation?.files?.length) {
+    lines.push(`${generation.files.length} automation file(s) generated`);
+  }
+  if (doc.scores && typeof doc.scores === 'object') {
+    lines.push('Scorecard / report metrics included');
   }
   if (!lines.length) {
     const keys = Object.keys(doc);
@@ -70,6 +81,13 @@ function friendlyDocPreview(doc: Record<string, unknown>): string[] {
     );
   }
   return lines;
+}
+
+function phaseTick(status: string): string {
+  if (status === 'ACCEPTED') return '✓';
+  if (status === 'READY_FOR_REVIEW' || status === 'RUNNING') return '●';
+  if (status === 'FAILED') return '!';
+  return '○';
 }
 
 export function StlcDocsPanel({ projectId }: { projectId: string }) {
@@ -88,6 +106,8 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
       return api<{
         phases: PhaseSummary[];
         stlcStage: string;
+        currentCycle?: number;
+        canStartNextCycle?: boolean;
         latestExecutionId: string | null;
         latestExecutionStatus: string | null;
         currentPhaseId: string | null;
@@ -215,6 +235,22 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
     },
   });
 
+  const nextCycleMutation = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      return api<{ cycleNumber: number }>(
+        `/api/v1/orgs/${orgId}/projects/${projectId}/stlc/cycles`,
+        { method: 'POST' },
+      );
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['stlc-phases', projectId] });
+      await qc.invalidateQueries({ queryKey: ['stlc-phase', projectId] });
+      void qc.invalidateQueries({ queryKey: ['project', projectId] });
+      router.replace(`?tab=stlc&phase=EXECUTION`, { scroll: false });
+    },
+  });
+
   const detail = phaseQuery.data;
   const stepNum = viewingPhase?.index ?? 1;
   const total = phases.length || 10;
@@ -232,10 +268,27 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
 
   async function download(format: string) {
     const orgId = await getDefaultOrgId();
-    window.open(
+    await downloadAuthenticated(
       `/api/v1/orgs/${orgId}/projects/${projectId}/stlc/phases/${selected}/download?format=${format}`,
-      '_blank',
-      'noopener,noreferrer',
+      `stlc-${selected.toLowerCase()}.${format === 'junit' ? 'xml' : format}`,
+    );
+  }
+
+  async function downloadProjectExport(
+    kind: 'test-cases' | 'bugs' | 'results' | 'final-pack',
+    format = 'csv',
+  ) {
+    const orgId = await getDefaultOrgId();
+    if (kind === 'final-pack') {
+      await downloadAuthenticated(
+        `/api/v1/orgs/${orgId}/projects/${projectId}/stlc/final-pack`,
+        `stlc-final-pack.zip`,
+      );
+      return;
+    }
+    await downloadAuthenticated(
+      `/api/v1/orgs/${orgId}/projects/${projectId}/${kind}/download?format=${format}`,
+      `${kind}.${format}`,
     );
   }
 
@@ -256,7 +309,7 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
-      {/* Single progress strip — not a list of all tabs */}
+      {/* Progress + phase ticks */}
       <div className="space-y-2">
         <div className="flex items-center justify-between text-sm">
           <span className="font-medium text-fg">
@@ -267,9 +320,40 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
         <div className="h-2 overflow-hidden rounded-full bg-border">
           <div
             className="h-full rounded-full bg-accent transition-all"
-            style={{ width: `${Math.max(8, (stepNum / total) * 100)}%` }}
+            style={{
+              width: `${Math.max(8, (doneCount / Math.max(total, 1)) * 100)}%`,
+            }}
           />
         </div>
+        <ol className="flex flex-wrap gap-1.5 pt-1">
+          {phases.map((p) => (
+            <li key={p.id}>
+              <button
+                type="button"
+                title={`${p.label}: ${p.status}`}
+                disabled={p.status === 'LOCKED'}
+                onClick={() => {
+                  if (p.status === 'LOCKED') return;
+                  setDirty(false);
+                  router.replace(`?tab=stlc&phase=${p.id}`, { scroll: false });
+                }}
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px]',
+                  p.id === selected
+                    ? 'border-accent bg-accent/10 text-fg'
+                    : p.status === 'ACCEPTED'
+                      ? 'border-success/30 bg-success/10 text-success'
+                      : p.status === 'LOCKED'
+                        ? 'border-border text-muted opacity-50'
+                        : 'border-border text-muted hover:bg-panel',
+                )}
+              >
+                <span aria-hidden>{phaseTick(p.status)}</span>
+                <span>{p.label}</span>
+              </button>
+            </li>
+          ))}
+        </ol>
       </div>
 
       {browsingPastGate && gatePhase ? (
@@ -368,6 +452,11 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
                     detail.status === 'ACCEPTED',
                 )}
               />
+            ) : selected === 'DEFECTS' ? (
+              <DefectsPanel
+                projectId={projectId}
+                executionId={latestExecutionId}
+              />
             ) : (
               <div className="mt-5 rounded-lg border border-border bg-panel/40 p-4">
                 <p className="text-sm font-medium text-fg">What to review</p>
@@ -376,25 +465,67 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
                     <li key={line}>{line}</li>
                   ))}
                 </ul>
+                {selected === 'AUTOMATION' &&
+                Array.isArray(
+                  (detail.document.generation as { files?: string[] } | undefined)
+                    ?.files,
+                ) ? (
+                  <ul className="mt-3 max-h-40 space-y-1 overflow-auto font-mono text-xs text-muted">
+                    {(
+                      (detail.document.generation as { files: string[] }).files ??
+                      []
+                    ).map((f) => (
+                      <li key={f}>{f}</li>
+                    ))}
+                  </ul>
+                ) : null}
               </div>
             )}
 
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <span className="text-xs text-muted">Download</span>
-              {(detail.downloads ?? [])
-                .filter((d) => ['md', 'html', 'csv', 'json'].includes(d.format))
-                .map((d) => (
+              {(detail.downloads ?? []).map((d) => (
+                <Button
+                  key={d.format}
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => void download(d.format)}
+                >
+                  {d.format.toUpperCase()}
+                </Button>
+              ))}
+              {selected === 'DESIGN' ? (
+                <>
                   <Button
-                    key={d.format}
                     type="button"
                     size="sm"
                     variant="secondary"
-                    onClick={() => void download(d.format)}
+                    onClick={() => void downloadProjectExport('test-cases', 'csv')}
                   >
-                    {d.format.toUpperCase()}
+                    Cases CSV
                   </Button>
-                ))}
-              {selected !== 'DESIGN' ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => void downloadProjectExport('test-cases', 'json')}
+                  >
+                    Cases JSON
+                  </Button>
+                </>
+              ) : null}
+              {selected === 'REPORTING' || selected === 'SIGNOFF' ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => void downloadProjectExport('final-pack')}
+                >
+                  Final ZIP
+                </Button>
+              ) : null}
+              {selected !== 'DESIGN' && selected !== 'DEFECTS' ? (
                 <Button
                   type="button"
                   size="sm"
@@ -505,6 +636,30 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
             ? 'You can revisit completed steps. Accept only applies on your current turn.'
             : 'After Accept, we take you to the next phase automatically.'}
       </p>
+
+      {phasesQuery.data?.canStartNextCycle ? (
+        <div className="rounded-lg border border-border bg-panel/40 p-4 text-center">
+          <p className="text-sm text-fg">
+            Cycle {phasesQuery.data.currentCycle ?? 1} complete — start the next
+            post-fix cycle (reuses Design / Env / Data).
+          </p>
+          <Button
+            type="button"
+            className="mt-3"
+            disabled={nextCycleMutation.isPending}
+            onClick={() => nextCycleMutation.mutate()}
+          >
+            {nextCycleMutation.isPending
+              ? 'Starting…'
+              : `Start Cycle ${(phasesQuery.data.currentCycle ?? 1) + 1} (post-fix)`}
+          </Button>
+          {nextCycleMutation.isError ? (
+            <p className="mt-2 text-sm text-danger">
+              {nextCycleMutation.error.message}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

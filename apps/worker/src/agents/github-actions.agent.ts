@@ -43,6 +43,24 @@ jobs:
         with:
           name: playwright-report
           path: automation/playwright-report
+
+  # Optional: after deploy, start STLC Cycle N+1 (reuses Design/Env/Data).
+  # Requires a session cookie or future project deploy token.
+  # start-next-stlc-cycle:
+  #   needs: [deploy] # wire to your deploy job
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Start next STLC cycle
+  #       env:
+  #         QAFORGE_API_URL: https://api.example.com
+  #         QAFORGE_ORG_ID: \${{ secrets.QAFORGE_ORG_ID }}
+  #         QAFORGE_PROJECT_ID: \${{ secrets.QAFORGE_PROJECT_ID }}
+  #         QAFORGE_SESSION_COOKIE: \${{ secrets.QAFORGE_SESSION_COOKIE }}
+  #       run: |
+  #         curl -fsS -X POST \\
+  #           -H "Cookie: qf_session=\$QAFORGE_SESSION_COOKIE" \\
+  #           -H "Content-Type: application/json" \\
+  #           "\$QAFORGE_API_URL/api/v1/orgs/\$QAFORGE_ORG_ID/projects/\$QAFORGE_PROJECT_ID/stlc/cycles"
 `;
 
     await putBinaryArtifact({

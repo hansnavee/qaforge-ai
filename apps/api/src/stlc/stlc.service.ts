@@ -5,7 +5,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { prisma } from '@qaforge/database';
+import { R2ArtifactStore } from '@qaforge/agent-sdk';
 import {
+  ArtifactType,
+  ExecutionStatus,
   getStlcPhase,
   listPhaseSummaries,
   markPhaseAccepted,
@@ -22,6 +25,7 @@ import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
 import { ExecutionsService } from '../executions/executions.service';
 import { RequirementReviewService } from '../projects/requirement-review.service';
+import { QueueService } from '../queue/queue.service';
 import type { Response } from 'express';
 
 type PhaseId = Exclude<StlcPhaseId, 'DONE'>;
@@ -49,10 +53,17 @@ const EXEC_PHASE_TO_STLC: Record<string, PhaseId> = {
   AUTHENTICATION: 'EXECUTION',
   DISCOVERY: 'EXECUTION',
   FUNCTIONAL: 'EXECUTION',
+  API: 'EXECUTION',
+  MANUAL_TEST: 'EXECUTION',
   EXECUTION: 'EXECUTION',
+  RETEST: 'DEFECTS',
   BUGS: 'DEFECTS',
+  BUG_ANALYSIS: 'DEFECTS',
   AUTOMATION: 'AUTOMATION',
+  REPORT: 'REPORTING',
   REPORTING: 'REPORTING',
+  QUALITY_ANALYSIS: 'REPORTING',
+  GITHUB: 'REPORTING',
   QA_SIGNOFF: 'SIGNOFF',
   SIGNOFF: 'SIGNOFF',
 };
@@ -63,6 +74,7 @@ export class StlcService {
     private readonly orgs: OrgsService,
     private readonly executions: ExecutionsService,
     private readonly review: RequirementReviewService,
+    private readonly queue: QueueService,
   ) {}
 
   private async loadProject(userId: string, orgId: string, projectId: string) {
@@ -205,10 +217,19 @@ export class StlcService {
 
     return {
       stlcStage: project.stlcStage,
+      currentCycle: project.currentCycle ?? 1,
       latestExecutionId: latest?.id ?? null,
       latestExecutionStatus: latest?.status ?? null,
+      latestCycleNumber: latest?.cycleNumber ?? null,
       currentPhaseId: activePhaseId,
       phases,
+      canStartNextCycle: Boolean(
+        project.testDataApprovedAt &&
+          project.testDesignApprovedAt &&
+          (project.qaSignedOffAt ||
+            latest?.status === ExecutionStatus.COMPLETED ||
+            project.stlcStage === 'DONE'),
+      ),
     };
   }
 
@@ -425,6 +446,36 @@ export class StlcService {
       return;
     }
     if (fmt === 'html') {
+      if (phaseId === 'REPORTING' || phaseId === 'SIGNOFF') {
+        const project = await this.loadProject(user.id, orgId, projectId);
+        const latest = await this.latestExecution(project.id);
+        if (latest) {
+          const reportHtml = await prisma.artifact.findFirst({
+            where: {
+              executionId: latest.id,
+              type: ArtifactType.REPORT_HTML,
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+          if (reportHtml) {
+            try {
+              const store = new R2ArtifactStore({
+                fallbackRootDir: `${process.cwd()}/.artifacts`,
+              });
+              const buf = await store.get(reportHtml.storageKey);
+              res.setHeader('Content-Type', 'text/html; charset=utf-8');
+              res.setHeader(
+                'Content-Disposition',
+                `attachment; filename="${base}-executive.html"`,
+              );
+              res.send(buf);
+              return;
+            } catch {
+              /* fall through */
+            }
+          }
+        }
+      }
       const body = phaseDocumentToHtml(
         phaseId,
         phase.document,
@@ -446,6 +497,61 @@ export class StlcService {
         `attachment; filename="${base}.csv"`,
       );
       res.send(rows);
+      return;
+    }
+
+    if (fmt === 'zip' || fmt === 'junit') {
+      const project = await this.loadProject(user.id, orgId, projectId);
+      const latest = await this.latestExecution(project.id);
+      if (!latest) {
+        throw new NotFoundException('No execution found for this project');
+      }
+      const type =
+        fmt === 'junit'
+          ? ArtifactType.REPORT_JUNIT
+          : phaseId === 'REPORTING' || phaseId === 'SIGNOFF'
+            ? ArtifactType.STLC_FINAL_ZIP
+            : phaseId === 'AUTOMATION'
+              ? ArtifactType.ZIP_PACKAGE
+              : ArtifactType.STLC_FINAL_ZIP;
+      const types =
+        fmt === 'junit'
+          ? [ArtifactType.REPORT_JUNIT]
+          : [
+              type,
+              ArtifactType.STLC_FINAL_ZIP,
+              ArtifactType.ZIP_PACKAGE,
+            ];
+      const artifact = await prisma.artifact.findFirst({
+        where: { executionId: latest.id, type: { in: types } },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!artifact) {
+        throw new NotFoundException(
+          `${fmt.toUpperCase()} artifact not ready for ${phaseId}`,
+        );
+      }
+      const store = new R2ArtifactStore({
+        fallbackRootDir: `${process.cwd()}/.artifacts`,
+      });
+      let buf: Buffer;
+      try {
+        buf = await store.get(artifact.storageKey);
+      } catch {
+        throw new NotFoundException(
+          `Artifact file missing: ${artifact.storageKey}`,
+        );
+      }
+      const ext = fmt === 'junit' ? 'xml' : 'zip';
+      res.setHeader(
+        'Content-Type',
+        fmt === 'junit' ? 'application/xml' : 'application/zip',
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${base}.${ext}"`,
+      );
+      res.send(buf);
       return;
     }
 
@@ -471,6 +577,190 @@ export class StlcService {
 
   catalog() {
     return { phases: STLC_PHASES };
+  }
+
+  /**
+   * Start Cycle N+1 after sign-off: reuse Design/Env/Data approvals,
+   * re-run from Authentication → Execution → Sign-off.
+   */
+  async startNextCycle(user: SessionUser, orgId: string, projectId: string) {
+    const project = await this.loadProject(user.id, orgId, projectId);
+
+    if (!project.testDataApprovedAt || !project.testDesignApprovedAt) {
+      throw new BadRequestException(
+        'Complete Design through Test Data (and prefer Sign-off) before starting the next cycle',
+      );
+    }
+
+    const active = await prisma.execution.findFirst({
+      where: {
+        projectId,
+        runMode: { in: ['STLC', 'PHASE1'] },
+        status: {
+          in: [
+            ExecutionStatus.QUEUED,
+            ExecutionStatus.PENDING,
+            ExecutionStatus.RUNNING,
+            ExecutionStatus.AWAITING_LOGIN,
+            ExecutionStatus.AWAITING_CLARIFICATION,
+            ExecutionStatus.AWAITING_DESIGN_APPROVAL,
+            ExecutionStatus.AWAITING_ENV_APPROVAL,
+            ExecutionStatus.AWAITING_DATA_APPROVAL,
+            ExecutionStatus.AWAITING_EXECUTION_APPROVAL,
+            ExecutionStatus.AWAITING_DEFECT_APPROVAL,
+            ExecutionStatus.AWAITING_AUTOMATION_APPROVAL,
+            ExecutionStatus.AWAITING_REPORT_APPROVAL,
+            ExecutionStatus.AWAITING_QA_SIGNOFF,
+            ExecutionStatus.AWAITING_PLAN_APPROVAL,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (active) {
+      throw new BadRequestException(
+        `Cannot start next cycle while execution ${active.id} is still active (${active.status})`,
+      );
+    }
+
+    const parent = await prisma.execution.findFirst({
+      where: { projectId, runMode: { in: ['STLC', 'PHASE1'] } },
+      orderBy: [{ cycleNumber: 'desc' }, { createdAt: 'desc' }],
+    });
+    if (!parent) {
+      throw new BadRequestException('No prior STLC execution to cycle from');
+    }
+
+    const nextCycle = Math.max(project.currentCycle ?? 1, parent.cycleNumber ?? 1) + 1;
+
+    const docs = {
+      ...((project.stlcPhaseDocs ?? {}) as StlcPhaseDocsMap),
+    };
+    for (const pid of [
+      'EXECUTION',
+      'DEFECTS',
+      'AUTOMATION',
+      'REPORTING',
+      'SIGNOFF',
+    ] as PhaseId[]) {
+      delete docs[pid];
+    }
+
+    const execution = await prisma.execution.create({
+      data: {
+        projectId,
+        status: ExecutionStatus.QUEUED,
+        phase: 'AUTHENTICATION',
+        runMode: 'STLC',
+        cycleNumber: nextCycle,
+        parentExecutionId: parent.id,
+        startedAt: new Date(),
+      },
+    });
+
+    const priorCases = await prisma.testCase.findMany({
+      where: { executionId: parent.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    for (const tc of priorCases) {
+      await prisma.testCase.create({
+        data: {
+          projectId,
+          executionId: execution.id,
+          externalId: tc.externalId,
+          module: tc.module,
+          scenario: tc.scenario,
+          preconditions: tc.preconditions,
+          steps: tc.steps as never,
+          expected: tc.expected,
+          priority: tc.priority,
+          severity: tc.severity,
+          type: tc.type,
+          testData: tc.testData as never,
+        },
+      });
+    }
+
+    // Copy grounded planning artifacts so agents can still read JSON by type
+    const copyTypes = [
+      ArtifactType.REQUIREMENTS_JSON,
+      ArtifactType.TEST_STRATEGY_JSON,
+      ArtifactType.TEST_DESIGN_JSON,
+      ArtifactType.TEST_DATA_JSON,
+      ArtifactType.ENVIRONMENT_JSON,
+      ArtifactType.TEST_CASES_JSON,
+      ArtifactType.CLARIFICATION_ANSWERS,
+    ];
+    const store = new R2ArtifactStore({
+      fallbackRootDir: `${process.cwd()}/.artifacts`,
+    });
+    for (const type of copyTypes) {
+      const art = await prisma.artifact.findFirst({
+        where: { executionId: parent.id, type },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!art) continue;
+      try {
+        const body = await store.get(art.storageKey);
+        const key = `${execution.id}/${type.toLowerCase().replace(/_/g, '-')}.json`;
+        const stored = await store.put(key, body, art.mime || 'application/json');
+        await prisma.artifact.create({
+          data: {
+            executionId: execution.id,
+            type,
+            storageKey: stored.key,
+            mime: art.mime,
+            size: stored.size,
+            checksum: art.checksum,
+          },
+        });
+      } catch {
+        /* skip missing blobs */
+      }
+    }
+
+    await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        currentCycle: nextCycle,
+        stlcStage: 'EXECUTION',
+        stlcPhaseDocs: docs as never,
+        // Keep planning/design/env/data approvals; clear post-data gates
+        testExecutionApprovedAt: null,
+        testExecutionApprovedBy: null,
+        defectsApprovedAt: null,
+        defectsApprovedBy: null,
+        regressionApprovedAt: null,
+        regressionApprovedBy: null,
+        automationApprovedAt: null,
+        automationApprovedBy: null,
+        reportApprovedAt: null,
+        reportApprovedBy: null,
+        qaSignedOffAt: null,
+        qaSignedOffBy: null,
+      },
+    });
+
+    await this.queue.enqueueRunExecution(execution.id, {
+      jobId: `stlc-cycle-${nextCycle}-${execution.id}`,
+      runMode: 'STLC',
+    });
+
+    await this.queue.publishExecutionEvent(execution.id, {
+      executionId: execution.id,
+      type: 'stlc.cycle_started',
+      phase: 'AUTHENTICATION',
+      message: `Cycle ${nextCycle} queued — reusing Design/Env/Data; re-running Execution → Sign-off`,
+      timestamp: new Date().toISOString(),
+      data: { cycleNumber: nextCycle, parentExecutionId: parent.id },
+    });
+
+    return {
+      execution,
+      cycleNumber: nextCycle,
+      parentExecutionId: parent.id,
+      reusedApprovals: ['PLANNING', 'DESIGN', 'ENVIRONMENT', 'DATA'] as const,
+    };
   }
 }
 

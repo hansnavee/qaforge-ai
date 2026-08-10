@@ -38,10 +38,12 @@ export const bugAgent: AgentHandler<BugAgentInput, { bugCount: number }> = {
       try {
         const llm = await ctx.llm.complete({
           system:
-            'You are a QA bug analyst. Write a concise structured bug report as JSON.',
-          prompt: `Test: ${fail.externalId} ${fail.scenario}\nError: ${fail.message}\nSteps:\n${fail.steps.join('\n')}\n\nReturn JSON: { title, description, rootCause, suggestedFix, severity }`,
+            'You are a QA bug analyst. Use ONLY the provided failure, scenario, and steps. Do not invent root causes or product behavior beyond the error text. Keep title ≤80 chars and description ≤240 chars. Return JSON only.',
+          prompt: `Test: ${fail.externalId} ${fail.scenario}\nError: ${fail.message}\nSteps:\n${fail.steps.join('\n')}\n\nReturn JSON: { "title": string, "description": string, "rootCause": string, "suggestedFix": string, "severity": "low"|"medium"|"high"|"critical" }`,
           json: true,
           model: 'fast',
+          temperature: 0.2,
+          maxTokens: 500,
         });
         const parsed = JSON.parse(llm.text) as {
           title?: string;

@@ -364,4 +364,78 @@ export class Phase1Controller {
       res,
     );
   }
+
+  @Get('orgs/:orgId/automation')
+  listAutomationOrg(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+  ) {
+    return this.phase1.listAutomationForOrg(user.id, orgId);
+  }
+
+  @Get('automation')
+  async listAutomationCompat(@CurrentUser() user: SessionUser) {
+    const { prisma } = await import('@qaforge/database');
+    const m = await prisma.membership.findFirst({
+      where: { userId: user.id },
+      select: { organizationId: true },
+    });
+    if (!m) return { items: [] };
+    return this.phase1.listAutomationForOrg(user.id, m.organizationId);
+  }
+
+  @Get('orgs/:orgId/projects/:projectId/automation')
+  listAutomationProject(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.phase1.listAutomationForProject(user.id, orgId, projectId);
+  }
+
+  @Get('orgs/:orgId/reports')
+  listReports(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+  ) {
+    return this.phase1.listReports(user.id, orgId);
+  }
+
+  @Get('reports')
+  async listReportsCompat(@CurrentUser() user: SessionUser) {
+    const { prisma } = await import('@qaforge/database');
+    const m = await prisma.membership.findFirst({
+      where: { userId: user.id },
+      select: { organizationId: true },
+    });
+    if (!m) return [];
+    return this.phase1.listReports(user.id, m.organizationId);
+  }
+
+  @Get('orgs/:orgId/reports/:executionId')
+  getReport(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('executionId') executionId: string,
+  ) {
+    return this.phase1.getReport(user.id, orgId, executionId);
+  }
+
+  @Get('reports/:executionId')
+  async getReportCompat(
+    @CurrentUser() user: SessionUser,
+    @Param('executionId') executionId: string,
+  ) {
+    const { prisma } = await import('@qaforge/database');
+    const ex = await prisma.execution.findUnique({
+      where: { id: executionId },
+      select: { project: { select: { organizationId: true } } },
+    });
+    if (!ex) return null;
+    return this.phase1.getReport(
+      user.id,
+      ex.project.organizationId,
+      executionId,
+    );
+  }
 }

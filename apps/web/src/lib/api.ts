@@ -28,13 +28,16 @@ function errorMessage(data: unknown, fallback: string): string {
   return fallback;
 }
 
+function apiUrl(path: string): string {
+  if (path.startsWith('http')) return path;
+  return `${API_URL.replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 export async function api<T = unknown>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const url = path.startsWith('http')
-    ? path
-    : `${API_URL.replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
+  const url = apiUrl(path);
 
   let res: Response;
   try {
@@ -73,6 +76,55 @@ export async function api<T = unknown>(
   }
 
   return data as T;
+}
+
+/** Authenticated binary download (cookies) — saves via blob URL. */
+export async function downloadAuthenticated(
+  path: string,
+  fallbackFilename: string,
+): Promise<void> {
+  const url = apiUrl(path);
+  let res: Response;
+  try {
+    res = await fetch(url, { credentials: 'include' });
+  } catch {
+    throw new ApiError('API unreachable', 0);
+  }
+  if (!res.ok) {
+    let data: unknown = null;
+    try {
+      data = JSON.parse(await res.text());
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(
+      errorMessage(data, res.statusText || 'Download failed'),
+      res.status,
+      data,
+    );
+  }
+
+  const contentType = res.headers.get('content-type') ?? '';
+  if (contentType.includes('application/json')) {
+    const data = (await res.json()) as { url?: string };
+    if (data.url) {
+      window.open(data.url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+  }
+
+  const blob = await res.blob();
+  const cd = res.headers.get('content-disposition') ?? '';
+  const match = /filename="?([^";]+)"?/i.exec(cd);
+  const filename = match?.[1] ?? fallbackFilename;
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objectUrl);
 }
 
 export { API_URL };

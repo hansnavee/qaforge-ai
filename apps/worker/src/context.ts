@@ -27,7 +27,15 @@ export async function createAgentContext(opts: {
       fallbackRootDir: `${process.cwd()}/.artifacts`,
     });
 
-  const llm = new OpenRouterLlmClient();
+  const llmBase = new OpenRouterLlmClient();
+  const tokensUsed = { total: 0 };
+  const llm: import('@qaforge/agent-sdk').LlmClient = {
+    complete: async (opts) => {
+      const result = await llmBase.complete(opts);
+      tokensUsed.total += result.tokensUsed ?? 0;
+      return result;
+    },
+  };
 
   const putArtifactJson = async (type: string, data: unknown): Promise<string> => {
     const key = `${opts.executionId}/${type.toLowerCase().replace(/_/g, '-')}.json`;
@@ -79,6 +87,7 @@ export async function createAgentContext(opts: {
     browserSessionId: opts.browserSessionId,
     artifactStore,
     llm,
+    tokensUsed,
     emit,
     getArtifactJson,
     putArtifactJson,
