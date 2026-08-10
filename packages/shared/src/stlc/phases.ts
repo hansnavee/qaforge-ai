@@ -186,7 +186,7 @@ export const STLC_PHASES: StlcPhaseDefinition[] = [
     stage: StlcPhaseId.SIGNOFF,
     nextStage: StlcPhaseId.DONE,
     approveAction: 'approve-qa-signoff',
-    downloads: ['json', 'md', 'html'],
+    downloads: ['json', 'md', 'html', 'zip'],
     description:
       'Senior QA evaluates exit criteria and recommends go/no-go; human Accepts',
   },

@@ -506,19 +506,10 @@ export class StlcService {
       if (!latest) {
         throw new NotFoundException('No execution found for this project');
       }
-      const type =
-        fmt === 'junit'
-          ? ArtifactType.REPORT_JUNIT
-          : phaseId === 'REPORTING' || phaseId === 'SIGNOFF'
-            ? ArtifactType.STLC_FINAL_ZIP
-            : phaseId === 'AUTOMATION'
-              ? ArtifactType.ZIP_PACKAGE
-              : ArtifactType.STLC_FINAL_ZIP;
       const types =
         fmt === 'junit'
           ? [ArtifactType.REPORT_JUNIT]
           : [
-              type,
               ArtifactType.STLC_FINAL_ZIP,
               ArtifactType.ZIP_PACKAGE,
             ];
@@ -526,20 +517,117 @@ export class StlcService {
         where: { executionId: latest.id, type: { in: types } },
         orderBy: { createdAt: 'desc' },
       });
-      if (!artifact) {
-        throw new NotFoundException(
-          `${fmt.toUpperCase()} artifact not ready for ${phaseId}`,
-        );
-      }
       const store = new R2ArtifactStore({
         fallbackRootDir: `${process.cwd()}/.artifacts`,
       });
-      let buf: Buffer;
-      try {
-        buf = await store.get(artifact.storageKey);
-      } catch {
+      let buf: Buffer | null = null;
+      if (artifact) {
+        try {
+          buf = await store.get(artifact.storageKey);
+        } catch {
+          buf = null;
+        }
+      }
+
+      if (!buf && fmt === 'junit') {
+        const { renderJunitXml } = await import('@qaforge/report-engine');
+        const results = await prisma.testResult.findMany({
+          where: { executionId: latest.id },
+          include: { testCase: true },
+        });
+        const scores =
+          latest.scores && typeof latest.scores === 'object'
+            ? (latest.scores as Record<string, number>)
+            : {};
+        buf = Buffer.from(
+          renderJunitXml({
+            executionId: latest.id,
+            projectName: project.name,
+            appUrl: project.appUrl ?? '',
+            status: latest.status,
+            scores: {},
+            summary: {
+              passed:
+                scores.passed ??
+                results.filter((r) => r.status === 'PASSED').length,
+              failed:
+                scores.failed ??
+                results.filter((r) => r.status === 'FAILED').length,
+              total: scores.total ?? results.length,
+            },
+            findings: [],
+            testCases: results.map((r) => ({
+              id: r.testCase?.externalId ?? r.id,
+              title: r.testCase?.scenario ?? r.id,
+              status: r.status,
+              message: r.message,
+            })),
+            recommendations: [],
+          }),
+          'utf8',
+        );
+      }
+
+      if (!buf && fmt === 'zip') {
+        const { buildZipPackage, rowsToCsv } = await import(
+          '@qaforge/report-engine'
+        );
+        const [cases, bugs, results] = await Promise.all([
+          prisma.testCase.findMany({ where: { executionId: latest.id } }),
+          prisma.bug.findMany({ where: { executionId: latest.id } }),
+          prisma.testResult.findMany({
+            where: { executionId: latest.id },
+            include: { testCase: true },
+          }),
+        ]);
+        buf = await buildZipPackage({
+          files: {
+            'test-cases.csv': rowsToCsv(
+              ['id', 'module', 'scenario', 'expected', 'priority', 'type'],
+              cases.map((c) => ({
+                id: c.externalId,
+                module: c.module,
+                scenario: c.scenario,
+                expected: c.expected,
+                priority: c.priority,
+                type: c.type,
+              })),
+            ),
+            'bugs.csv': rowsToCsv(
+              ['id', 'title', 'severity', 'status'],
+              bugs.map((b) => ({
+                id: b.id,
+                title: b.title,
+                severity: b.severity,
+                status: b.status,
+              })),
+            ),
+            'results.csv': rowsToCsv(
+              ['id', 'testCase', 'status', 'message'],
+              results.map((r) => ({
+                id: r.id,
+                testCase: r.testCase?.externalId ?? '',
+                status: r.status,
+                message: r.message,
+              })),
+            ),
+            'manifest.json': JSON.stringify(
+              {
+                executionId: latest.id,
+                phaseId,
+                rebuiltOnDownload: true,
+                generatedAt: new Date().toISOString(),
+              },
+              null,
+              2,
+            ),
+          },
+        });
+      }
+
+      if (!buf) {
         throw new NotFoundException(
-          `Artifact file missing: ${artifact.storageKey}`,
+          `${fmt.toUpperCase()} artifact not ready for ${phaseId}`,
         );
       }
       const ext = fmt === 'junit' ? 'xml' : 'zip';

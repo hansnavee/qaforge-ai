@@ -21,6 +21,7 @@ import {
 } from '@qaforge/shared';
 import {
   buildZipPackage,
+  renderHtmlReport,
   rowsToCsv,
   rowsToHtmlTable,
   rowsToSpreadsheetMl,
@@ -1380,6 +1381,52 @@ export class Phase1Service {
       execution.scores && typeof execution.scores === 'object'
         ? (execution.scores as Record<string, number>)
         : undefined;
+
+    if (!html) {
+      const [results, bugs] = await Promise.all([
+        prisma.testResult.findMany({
+          where: { executionId },
+          include: { testCase: true },
+        }),
+        prisma.bug.findMany({ where: { executionId } }),
+      ]);
+      html = renderHtmlReport({
+        executionId,
+        projectName: execution.project.name,
+        appUrl: execution.project.appUrl ?? '',
+        status: execution.status,
+        scores: {
+          functional: scores?.functional,
+          accessibility: scores?.accessibility,
+          performance: scores?.performance,
+          security: scores?.security,
+          uiux: scores?.uiux,
+        },
+        summary: {
+          passed:
+            scores?.passed ??
+            results.filter((r) => r.status === 'PASSED').length,
+          failed:
+            scores?.failed ??
+            results.filter((r) => r.status === 'FAILED').length,
+          total: scores?.total ?? results.length,
+        },
+        findings: bugs.map((b) => ({
+          category: 'defect',
+          severity: b.severity,
+          title: b.title,
+          description: b.description,
+        })),
+        testCases: results.map((r) => ({
+          id: r.testCase?.externalId ?? r.id,
+          title: r.testCase?.scenario ?? r.id,
+          status: r.status,
+          message: r.message,
+          priority: r.testCase?.priority,
+        })),
+        recommendations: [],
+      });
+    }
 
     return {
       html,
