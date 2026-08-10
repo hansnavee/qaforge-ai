@@ -79,6 +79,17 @@ jobs:
               --detach
           elif [ -n "${RAILWAY_TOKEN:-}" ]; then
             echo "Using project token (RAILWAY_TOKEN), length=${#RAILWAY_TOKEN}"
+            # Validate token type via GraphQL (project tokens use Project-Access-Token).
+            CODE=$(curl -s -o /tmp/rt.json -w "%{http_code}" \
+              -X POST https://backboard.railway.com/graphql/v2 \
+              -H "Project-Access-Token: ${RAILWAY_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d '{"query":"query { projectToken { projectId environmentId } }"}')
+            echo "projectToken GraphQL HTTP ${CODE}: $(cat /tmp/rt.json)"
+            if ! grep -q projectId /tmp/rt.json; then
+              echo "::error::RAILWAY_TOKEN is not a valid Project Token. Create it under Project → Settings → Tokens (environment: production), not Account Tokens."
+              exit 1
+            fi
             railway up \
               --service api \
               --ci \
