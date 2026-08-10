@@ -458,11 +458,22 @@ export class StlcService {
             orderBy: { createdAt: 'desc' },
           });
           if (reportHtml) {
+            let buf: Buffer | null = null;
             try {
               const store = new R2ArtifactStore({
                 fallbackRootDir: `${process.cwd()}/.artifacts`,
               });
-              const buf = await store.get(reportHtml.storageKey);
+              buf = await store.get(reportHtml.storageKey);
+            } catch {
+              /* try durable DB blob */
+            }
+            if (!buf) {
+              const blob = await prisma.artifactBlob.findUnique({
+                where: { storageKey: reportHtml.storageKey },
+              });
+              if (blob) buf = Buffer.from(blob.body);
+            }
+            if (buf) {
               res.setHeader('Content-Type', 'text/html; charset=utf-8');
               res.setHeader(
                 'Content-Disposition',
@@ -470,8 +481,6 @@ export class StlcService {
               );
               res.send(buf);
               return;
-            } catch {
-              /* fall through */
             }
           }
         }
