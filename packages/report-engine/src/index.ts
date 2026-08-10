@@ -10,3 +10,11 @@ export {
   rowsToSpreadsheetMl,
   rowsToHtmlTable,
 } from './tabular.js';
+export {
+  buildRequirementsExcel,
+  buildRequirementsCsv,
+  buildRequirementsWord,
+  buildRequirementsPdfReport,
+  type RequirementExportItem,
+  type RequirementsExportMeta,
+} from './requirements-export.js';

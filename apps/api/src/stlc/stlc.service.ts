@@ -25,6 +25,7 @@ import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
 import { ExecutionsService } from '../executions/executions.service';
 import { RequirementReviewService } from '../projects/requirement-review.service';
+import { RequirementExtractionService } from '../projects/requirement-extraction.service';
 import { QueueService } from '../queue/queue.service';
 import type { Response } from 'express';
 
@@ -75,6 +76,7 @@ export class StlcService {
     private readonly executions: ExecutionsService,
     private readonly review: RequirementReviewService,
     private readonly queue: QueueService,
+    private readonly extraction: RequirementExtractionService,
   ) {}
 
   private async loadProject(userId: string, orgId: string, projectId: string) {
@@ -431,6 +433,21 @@ export class StlcService {
     }
 
     const base = `stlc-${phaseId.toLowerCase()}`;
+
+    if (
+      phaseId === 'REQUIREMENTS' &&
+      ['xlsx', 'xls', 'docx', 'doc', 'word', 'pdf', 'csv'].includes(fmt)
+    ) {
+      await this.extraction.exportRequirements(
+        user.id,
+        orgId,
+        projectId,
+        fmt,
+        res,
+      );
+      return;
+    }
+
     if (fmt === 'md') {
       const body = phaseDocumentToMarkdown(
         phaseId,

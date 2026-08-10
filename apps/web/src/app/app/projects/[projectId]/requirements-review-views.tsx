@@ -487,6 +487,7 @@ export function RequirementsFeaturesView({
   onOpenList,
   onDuplicateDecision,
   duplicatePending,
+  onExport,
 }: {
   features: FeatureGroupModel[];
   summary: ReviewSummaryModel | null | undefined;
@@ -500,6 +501,7 @@ export function RequirementsFeaturesView({
     decision: 'keep_both' | 'merge' | 'mark_not_duplicate';
   }) => void;
   duplicatePending: boolean;
+  onExport?: (format: 'xlsx' | 'docx' | 'pdf') => void;
 }) {
   const areas = useMemo(() => {
     return Object.entries(
@@ -521,6 +523,31 @@ export function RequirementsFeaturesView({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {onExport ? (
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onExport('xlsx')}
+              >
+                Excel
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onExport('docx')}
+              >
+                Word
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onExport('pdf')}
+              >
+                PDF
+              </Button>
+            </>
+          ) : null}
           <Button variant="secondary" size="sm" onClick={onOpenDashboard}>
             Readiness
           </Button>

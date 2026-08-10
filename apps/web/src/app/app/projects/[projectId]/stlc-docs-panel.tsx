@@ -484,17 +484,37 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
 
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <span className="text-xs text-muted">Download</span>
-              {(detail.downloads ?? []).map((d) => (
-                <Button
-                  key={d.format}
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => void download(d.format)}
-                >
-                  {d.format.toUpperCase()}
-                </Button>
-              ))}
+              {(detail.downloads ?? []).map((d) => {
+                const label =
+                  d.format === 'xlsx'
+                    ? 'Excel'
+                    : d.format === 'docx'
+                      ? 'Word'
+                      : d.format === 'pdf'
+                        ? 'PDF'
+                        : d.format === 'csv'
+                          ? 'CSV'
+                          : d.format === 'html'
+                            ? 'HTML'
+                            : d.format === 'md'
+                              ? 'Markdown'
+                              : d.format === 'junit'
+                                ? 'JUnit'
+                                : d.format === 'zip'
+                                  ? 'ZIP'
+                                  : d.format.toUpperCase();
+                return (
+                  <Button
+                    key={d.format}
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => void download(d.format)}
+                  >
+                    {label}
+                  </Button>
+                );
+              })}
               {selected === 'DESIGN' ? (
                 <>
                   <Button
@@ -509,9 +529,9 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
                     type="button"
                     size="sm"
                     variant="secondary"
-                    onClick={() => void downloadProjectExport('test-cases', 'json')}
+                    onClick={() => void downloadProjectExport('test-cases', 'xlsx')}
                   >
-                    Cases JSON
+                    Cases Excel
                   </Button>
                 </>
               ) : null}
@@ -525,7 +545,9 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
                   Final ZIP
                 </Button>
               ) : null}
-              {selected !== 'DESIGN' && selected !== 'DEFECTS' ? (
+              {selected !== 'DESIGN' &&
+              selected !== 'DEFECTS' &&
+              selected !== 'REQUIREMENTS' ? (
                 <Button
                   type="button"
                   size="sm"

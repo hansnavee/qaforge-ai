@@ -17,6 +17,14 @@ import {
   type ExtractedRequirementInput,
   type ExtractionDecision,
 } from '@qaforge/shared';
+import {
+  buildRequirementsCsv,
+  buildRequirementsExcel,
+  buildRequirementsPdfReport,
+  buildRequirementsWord,
+  type RequirementExportItem,
+} from '@qaforge/report-engine';
+import type { Response } from 'express';
 import { parseBody } from '../common/parse-body';
 import { AuditService } from '../common/audit.service';
 import type { SessionUser } from '../auth/auth';
@@ -204,6 +212,60 @@ export class RequirementExtractionService {
       orderBy: { requirementKey: 'asc' },
     });
     return rows.map((r) => this.mapRequirement(r));
+  }
+
+  async exportRequirements(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    format: string,
+    res: Response,
+  ) {
+    const project = await this.requireProject(userId, orgId, projectId);
+    const mapped = await this.list(userId, orgId, projectId);
+    const items: RequirementExportItem[] = mapped.map((r) => ({
+      requirementKey: r.requirementKey,
+      title: r.title,
+      description: r.description,
+      type: String(r.primaryType ?? r.type),
+      businessImpact: r.businessImpact,
+      reviewStatus: r.reviewStatus,
+      readinessScore: r.readinessScore,
+      businessIntent: r.businessIntent,
+      acceptanceCriteria: r.acceptanceCriteria,
+      businessRules: r.businessRules,
+      dependencies: r.dependencies,
+      featureName: r.featureGroup?.name ?? null,
+      businessArea: r.featureGroup?.businessArea ?? null,
+      openQuestions: (r.questions ?? [])
+        .filter((q) => q.status === 'OPEN')
+        .map((q) => q.question),
+    }));
+
+    const meta = {
+      projectName: project.name,
+      exportedAt: new Date().toISOString(),
+      total: items.length,
+    };
+
+    const fmt = (format || 'xlsx').toLowerCase();
+    let pack: { body: string; filename: string; contentType: string };
+    if (fmt === 'docx' || fmt === 'doc' || fmt === 'word') {
+      pack = buildRequirementsWord(items, meta);
+    } else if (fmt === 'pdf') {
+      pack = buildRequirementsPdfReport(items, meta);
+    } else if (fmt === 'csv') {
+      pack = buildRequirementsCsv(items);
+    } else {
+      pack = buildRequirementsExcel(items);
+    }
+
+    res.setHeader('Content-Type', pack.contentType);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${pack.filename}"`,
+    );
+    res.send(pack.body);
   }
 
   async getByKey(

@@ -45,7 +45,10 @@ export type StlcDownloadFormat =
   | 'html'
   | 'csv'
   | 'zip'
-  | 'junit';
+  | 'junit'
+  | 'xlsx'
+  | 'docx'
+  | 'pdf';
 
 export type StlcPhaseDefinition = {
   index: number;
@@ -73,7 +76,7 @@ export const STLC_PHASES: StlcPhaseDefinition[] = [
     stage: StlcPhaseId.REQUIREMENTS,
     nextStage: StlcPhaseId.PLANNING,
     approveAction: 'approve-requirements',
-    downloads: ['json', 'md', 'csv', 'html'],
+    downloads: ['xlsx', 'docx', 'pdf', 'csv'],
     description:
       'Senior QA analyzes requirements, gaps, and clarifying questions',
   },

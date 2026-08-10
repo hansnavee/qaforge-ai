@@ -10,7 +10,7 @@ import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Input } from '@/components/Input';
-import { api, ApiError } from '@/lib/api';
+import { api, ApiError, downloadAuthenticated } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { StlcDocsPanel } from './stlc-docs-panel';
 import {
@@ -18,6 +18,12 @@ import {
   RequirementsFeaturesView,
   RequirementsReviewDashboard,
 } from './requirements-review-views';
+
+const REQUIREMENT_EXPORTS = [
+  { format: 'xlsx', label: 'Excel spreadsheet', filename: 'requirements.xls' },
+  { format: 'docx', label: 'Word document', filename: 'requirements.doc' },
+  { format: 'pdf', label: 'PDF report', filename: 'requirements-report.html' },
+] as const;
 
 type RequirementDoc = {
   id: string;
@@ -1756,6 +1762,35 @@ export default function ProjectWorkspacePage() {
               >
                 Import / Source
               </Button>
+              {extracted.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {REQUIREMENT_EXPORTS.map((item) => (
+                    <Button
+                      key={item.format}
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        void downloadAuthenticated(
+                          `/api/v1/projects/${projectId}/extracted-requirements/export?format=${item.format}`,
+                          item.filename,
+                        ).catch((err) => {
+                          setReviewError(
+                            err instanceof Error
+                              ? err.message
+                              : 'Export failed',
+                          );
+                        });
+                      }}
+                    >
+                      {item.format === 'xlsx'
+                        ? 'Excel'
+                        : item.format === 'docx'
+                          ? 'Word'
+                          : 'PDF'}
+                    </Button>
+                  ))}
+                </div>
+              ) : null}
               <Button size="sm" onClick={runAnalysis} disabled={analysisBusy || (!sourceDoc?.originalContent && extracted.length === 0)}>
                 {extracted.length > 0 ? 'Run Fresh Analysis' : 'Analyze first'}
               </Button>
@@ -1827,54 +1862,114 @@ export default function ProjectWorkspacePage() {
 
       {tab !== 'overview' &&
       tab !== 'stlc' && !extractMutation.isPending && view === 'summary' && summary ? (
-        <Card className="space-y-4">
-          <h2 className="text-base font-medium text-success">
-            ✓ Requirement Extraction Complete
-          </h2>
-          <div className="grid gap-2 text-sm sm:grid-cols-2">
-            <div>Requirements Extracted</div>
-            <div className="font-medium">{summary.total}</div>
-            <div>Functional</div>
-            <div className="font-medium">{summary.functional}</div>
-            <div>Non-Functional</div>
-            <div className="font-medium">{summary.nonFunctional}</div>
-            <div>Business Rules</div>
-            <div className="font-medium">{summary.businessRules}</div>
-            {summary.rejected != null ? (
-              <>
-                <div>Rejected Candidates</div>
-                <div className="font-medium">{summary.rejected}</div>
-              </>
-            ) : null}
-            {summary.merged != null ? (
-              <>
-                <div>Merged Duplicates</div>
-                <div className="font-medium">{summary.merged}</div>
-              </>
-            ) : null}
-            {summary.retitled != null ? (
-              <>
-                <div>Titles Regenerated</div>
-                <div className="font-medium">{summary.retitled}</div>
-              </>
-            ) : null}
-            {summary.reclassified != null ? (
-              <>
-                <div>Types Reclassified</div>
-                <div className="font-medium">{summary.reclassified}</div>
-              </>
-            ) : null}
-            <div>Source Document</div>
-            <div className="font-medium">{summary.sourceDocument}</div>
+        <Card className="space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-success">
+                Extraction complete
+              </p>
+              <h2 className="mt-1 text-xl font-semibold tracking-tight">
+                {summary.total} requirement
+                {summary.total === 1 ? '' : 's'} ready to review
+              </h2>
+              <p className="mt-1 text-sm text-muted">
+                From {summary.sourceDocument}. Next: open the list, run analysis,
+                then answer clarifying questions.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {REQUIREMENT_EXPORTS.map((item) => (
+                <Button
+                  key={item.format}
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    void downloadAuthenticated(
+                      `/api/v1/projects/${projectId}/extracted-requirements/export?format=${item.format}`,
+                      item.filename,
+                    ).catch((err) => {
+                      setReviewError(
+                        err instanceof Error ? err.message : 'Export failed',
+                      );
+                    });
+                  }}
+                >
+                  {item.format === 'xlsx'
+                    ? 'Excel'
+                    : item.format === 'docx'
+                      ? 'Word'
+                      : 'PDF'}
+                </Button>
+              ))}
+            </div>
           </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              { label: 'Total', value: summary.total },
+              { label: 'Functional', value: summary.functional },
+              { label: 'Non-functional', value: summary.nonFunctional },
+              { label: 'Business rules', value: summary.businessRules },
+            ].map((tile) => (
+              <div
+                key={tile.label}
+                className="rounded-xl border border-border/80 bg-bg-elevated/30 px-4 py-3"
+              >
+                <div className="text-[11px] uppercase tracking-wide text-muted">
+                  {tile.label}
+                </div>
+                <div className="mt-1 text-2xl font-semibold tabular-nums">
+                  {tile.value}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {(summary.merged != null && summary.merged > 0) ||
+          (summary.rejected != null && summary.rejected > 0) ? (
+            <p className="text-sm text-muted">
+              Cleanup during extraction
+              {summary.merged ? ` · ${summary.merged} merged` : ''}
+              {summary.rejected ? ` · ${summary.rejected} rejected` : ''}
+              {summary.retitled ? ` · ${summary.retitled} retitled` : ''}
+            </p>
+          ) : null}
+
+          {extracted.length > 0 ? (
+            <div className="space-y-2">
+              <div className="text-xs font-medium uppercase tracking-wide text-muted">
+                Preview
+              </div>
+              <ul className="space-y-2">
+                {extracted.slice(0, 4).map((r) => (
+                  <li key={r.id}>
+                    <button
+                      type="button"
+                      className="w-full rounded-xl border border-border bg-bg-elevated/20 px-4 py-3 text-left transition hover:border-accent/40 hover:bg-bg-elevated/40"
+                      onClick={() => setView('detail', r.requirementKey)}
+                    >
+                      <div className="font-mono text-[11px] text-muted">
+                        {r.requirementKey}
+                      </div>
+                      <div className="mt-0.5 font-medium">{r.title}</div>
+                      <p className="mt-1 line-clamp-2 text-sm text-muted">
+                        {r.description}
+                      </p>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap gap-2">
-            <Button onClick={() => setView('list')}>View Requirements</Button>
+            <Button onClick={() => setView('list')}>Browse requirements</Button>
             <Button
               variant="secondary"
               onClick={() => reviewMutation.mutate()}
               disabled={reviewMutation.isPending}
             >
-              Run Analysis
+              Run analysis
             </Button>
             {SHOW_EXTRACTION_DEBUG ? (
               <Button variant="secondary" onClick={() => setView('debug')}>
@@ -1886,8 +1981,8 @@ export default function ProjectWorkspacePage() {
             <p className="text-sm text-danger">{reviewError}</p>
           ) : (
             <p className="text-xs text-muted">
-              Business review analyzes intent, rules, actors, states, and
-              functional gaps — it does not invent confirmed business rules.
+              Analysis finds gaps and clarifying questions — it does not invent
+              business rules.
             </p>
           )}
         </Card>
@@ -2033,6 +2128,22 @@ export default function ProjectWorkspacePage() {
           onOpenList={() => setView('list')}
           onDuplicateDecision={(opts) => duplicateDecisionMutation.mutate(opts)}
           duplicatePending={duplicateDecisionMutation.isPending}
+          onExport={(format) => {
+            const filename =
+              format === 'xlsx'
+                ? 'requirements.xls'
+                : format === 'docx'
+                  ? 'requirements.doc'
+                  : 'requirements-report.html';
+            void downloadAuthenticated(
+              `/api/v1/projects/${projectId}/extracted-requirements/export?format=${format}`,
+              filename,
+            ).catch((err) => {
+              setReviewError(
+                err instanceof Error ? err.message : 'Export failed',
+              );
+            });
+          }}
         />
       ) : null}
 
@@ -2112,9 +2223,38 @@ export default function ProjectWorkspacePage() {
                     size="sm"
                     onClick={() => setView('review-dashboard')}
                   >
-                    Review Dashboard
+                    Readiness
                   </Button>
                 </>
+              ) : null}
+              {extracted.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {REQUIREMENT_EXPORTS.map((item) => (
+                    <Button
+                      key={item.format}
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        void downloadAuthenticated(
+                          `/api/v1/projects/${projectId}/extracted-requirements/export?format=${item.format}`,
+                          item.filename,
+                        ).catch((err) => {
+                          setReviewError(
+                            err instanceof Error
+                              ? err.message
+                              : 'Export failed',
+                          );
+                        });
+                      }}
+                    >
+                      {item.format === 'xlsx'
+                        ? 'Excel'
+                        : item.format === 'docx'
+                          ? 'Word'
+                          : 'PDF'}
+                    </Button>
+                  ))}
+                </div>
               ) : null}
               <Button
                 variant="secondary"
@@ -2183,134 +2323,93 @@ export default function ProjectWorkspacePage() {
                 </select>
               </div>
 
-              <div className="overflow-x-auto rounded-lg border border-border">
-                <table className="min-w-full text-left text-sm">
-                  <thead className="bg-bg-elevated text-xs uppercase tracking-wide text-muted">
-                    <tr>
-                      <th className="px-3 py-2 font-medium">ID</th>
-                      <th className="px-3 py-2 font-medium">Requirement</th>
-                      <th className="px-3 py-2 font-medium">Type</th>
-                      <th className="px-3 py-2 font-medium">Business Impact</th>
-                      <th className="px-3 py-2 font-medium">Review</th>
-                      <th className="px-3 py-2 font-medium">Questions</th>
-                      <th className="px-3 py-2 font-medium">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filtered.length === 0 ? (
-                      <tr>
-                        <td
-                          colSpan={7}
-                          className="px-3 py-6 text-center text-muted"
-                        >
-                          No requirements match your filters.
-                        </td>
-                      </tr>
-                    ) : (
-                      filtered.map((r) => (
-                        <tr
-                          key={r.id}
-                          className="cursor-pointer border-t border-border hover:bg-bg-elevated/60"
+              <div className="space-y-2">
+                {filtered.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
+                    No requirements match your filters.
+                  </div>
+                ) : (
+                  filtered.map((r) => (
+                    <div
+                      key={r.id}
+                      className="group rounded-xl border border-border bg-bg-elevated/20 px-4 py-3 transition hover:border-accent/35 hover:bg-bg-elevated/40"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 text-left"
                           onClick={() => setView('detail', r.requirementKey)}
                         >
-                          <td className="px-3 py-2 font-mono text-xs">
-                            {r.requirementKey.replace('-', '')}
-                          </td>
-                          <td className="px-3 py-2">
-                            <div className="line-clamp-2 font-medium">
-                              {r.title}
+                          <div className="font-mono text-[11px] text-muted">
+                            {r.requirementKey}
+                          </div>
+                          <div className="mt-0.5 text-sm font-medium leading-snug">
+                            {r.title}
+                          </div>
+                          {r.description ? (
+                            <p className="mt-1 line-clamp-2 text-sm text-muted">
+                              {r.description}
+                            </p>
+                          ) : null}
+                          {r.analysisStale ? (
+                            <div className="mt-1 text-xs text-warning">
+                              Stale — re-analyze after edits
                             </div>
-                            {r.description ? (
-                              <div className="mt-0.5 line-clamp-2 text-xs text-muted">
-                                {r.description}
-                              </div>
-                            ) : null}
-                            {r.analysisStale ? (
-                              <div className="text-xs text-warning">Stale</div>
-                            ) : null}
-                            {(() => {
-                              const rel = primaryRelationship(r.relationships);
-                              if (!rel) {
-                                // Do not fall back to legacy possibleDuplicateOf + %
-                                return null;
-                              }
-                              if (rel.relationship === 'NOT_DUPLICATE') {
-                                return (
-                                  <div className="text-xs text-muted">
-                                    NO DUPLICATE · {rel.targetRequirementId}
-                                  </div>
-                                );
-                              }
-                              return (
-                                <div className="text-xs text-muted">
-                                  {rel.relationship === 'RELATED' ||
-                                  rel.relationship === 'PRECEDES'
-                                    ? 'RELATED to '
-                                    : `${rel.relationship.replace(/_/g, ' ')} · `}
-                                  {rel.targetRequirementId}
-                                  {rel.reason
-                                    ? ` — ${rel.reason.split('\n')[0]}`
-                                    : ''}
-                                </div>
-                              );
-                            })()}
-                          </td>
-                          <td className="px-3 py-2">
-                            {typeLabel(r.primaryType ?? r.type)}
-                          </td>
-                          <td className="px-3 py-2">
-                            <Badge tone={impactTone(r.businessImpact)}>
-                              {impactLabel(r.businessImpact)}
+                          ) : null}
+                          {(r.openQuestionCount ?? 0) > 0 ? (
+                            <div className="mt-1 text-xs text-warning">
+                              {r.openQuestionCount} open question
+                              {r.openQuestionCount === 1 ? '' : 's'}
+                            </div>
+                          ) : null}
+                        </button>
+                        <div className="flex shrink-0 items-start gap-2">
+                          <div className="flex flex-wrap justify-end gap-1">
+                            <Badge>
+                              {typeLabel(r.primaryType ?? r.type)}
                             </Badge>
-                          </td>
-                          <td className="px-3 py-2">
+                            {r.businessImpact &&
+                            (r.businessImpact === 'CRITICAL' ||
+                              r.businessImpact === 'HIGH') ? (
+                              <Badge tone={impactTone(r.businessImpact)}>
+                                {impactLabel(r.businessImpact)}
+                              </Badge>
+                            ) : null}
                             <Badge tone={reviewStatusTone(r.reviewStatus)}>
                               {reviewStatusLabel(r.reviewStatus)}
                             </Badge>
-                          </td>
-                          <td className="px-3 py-2 font-mono text-xs">
-                            {(r.criticalOpenCount ?? 0) > 0
-                              ? `🔴${r.criticalOpenCount}`
-                              : (r.highOpenCount ?? 0) > 0
-                                ? `🟠${r.highOpenCount}`
-                                : '—'}
-                          </td>
-                          <td
-                            className="px-3 py-2"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <ActionMenu
-                              items={[
-                                {
-                                  label: 'View',
-                                  onClick: () =>
-                                    setView('detail', r.requirementKey),
-                                },
-                                {
-                                  label: 'Edit',
-                                  onClick: () => openEditReq(r),
-                                },
-                                {
-                                  label: 'Analyze',
-                                  onClick: () =>
-                                    reanalyzeMutation.mutate(r.requirementKey),
-                                  disabled:
-                                    reanalyzeMutation.isPending ||
-                                    analysisStatus === 'RUNNING',
-                                },
-                                {
-                                  label: 'Delete',
-                                  danger: true,
-                                  onClick: () => setDeleteReq(r),
-                                },
-                              ]}
-                            />
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+                          </div>
+                          <ActionMenu
+                            items={[
+                              {
+                                label: 'View',
+                                onClick: () =>
+                                  setView('detail', r.requirementKey),
+                              },
+                              {
+                                label: 'Edit',
+                                onClick: () => openEditReq(r),
+                              },
+                              {
+                                label: 'Analyze',
+                                onClick: () =>
+                                  reanalyzeMutation.mutate(r.requirementKey),
+                                disabled:
+                                  reanalyzeMutation.isPending ||
+                                  analysisStatus === 'RUNNING',
+                              },
+                              {
+                                label: 'Delete',
+                                danger: true,
+                                onClick: () => setDeleteReq(r),
+                              },
+                            ]}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </>
           )}

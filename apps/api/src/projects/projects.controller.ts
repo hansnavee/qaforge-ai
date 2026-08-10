@@ -7,12 +7,15 @@ import {
   Param,
   Patch,
   Post,
+  Query,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
+import type { Response } from 'express';
 import { CurrentUser } from '../auth/auth.decorator';
 import { SessionAuthGuard } from '../auth/auth.guard';
 import type { SessionUser } from '../auth/auth';
@@ -161,6 +164,23 @@ export class ProjectsController {
     @Param('projectId') projectId: string,
   ) {
     return this.extraction.list(user.id, orgId, projectId);
+  }
+
+  @Get(':projectId/extracted-requirements/export')
+  exportExtracted(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Query('format') format: string,
+    @Res() res: Response,
+  ) {
+    return this.extraction.exportRequirements(
+      user.id,
+      orgId,
+      projectId,
+      format || 'xlsx',
+      res,
+    );
   }
 
   @Get(':projectId/extracted-requirements/:requirementKey')
