@@ -1,9 +1,9 @@
 name: Deploy Railway
 
-# Primary deploy path for API/worker.
-# GitHub→Railway webhooks alone are unreliable after CLI `railway up` uploads.
-# Requires repo secret: RAILWAY_TOKEN (Railway account token from
-# https://railway.app/account/tokens — prefer a dedicated CI token).
+# Deploys API/worker via Railway CLI.
+# Requires repo secret: RAILWAY_TOKEN = Project Token from
+# Railway → Project → Settings → Tokens (scoped to production).
+# Project tokens already bind project+environment — do not use Account Tokens here.
 
 on:
   push:
@@ -34,12 +34,6 @@ concurrency:
   group: deploy-railway-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  RAILWAY_PROJECT_ID: b16f09df-7481-49d2-add1-0fcd49a9cfe4
-  RAILWAY_ENVIRONMENT: production
-  RAILWAY_REPO: hansnavee/qaforge-ai
-  RAILWAY_BRANCH: master
-
 jobs:
   deploy-api:
     if: ${{ github.event_name == 'push' || github.event.inputs.service == 'api' || github.event.inputs.service == 'both' }}
@@ -56,26 +50,17 @@ jobs:
         run: |
           if [ -z "$RAILWAY_TOKEN" ]; then
             echo "::error::RAILWAY_TOKEN secret is missing."
-            echo "Create an Account Token at https://railway.app/account/tokens (OAuth session tokens do not work)."
-            echo "Then: gh secret set RAILWAY_TOKEN"
+            echo "Create a Project Token in Railway → Project → Settings → Tokens"
+            echo "(environment: production), then: gh secret set RAILWAY_TOKEN"
             exit 1
           fi
+          # Project token is already scoped to project + environment.
           railway up \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT" \
             --service api \
             --ci \
             --detach \
             --yes \
             --message "GHA api ${GITHUB_SHA::7}"
-          # Keep GitHub source connected so dashboard still shows repo deploys
-          railway service source connect \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT" \
-            --service api \
-            --repo "$RAILWAY_REPO" \
-            --branch "$RAILWAY_BRANCH" \
-            --json
 
   deploy-worker:
     if: ${{ github.event_name == 'push' || github.event.inputs.service == 'worker' || github.event.inputs.service == 'both' }}
@@ -96,23 +81,14 @@ jobs:
           fi
           if [ "${{ github.event_name }}" = "push" ]; then
             if ! git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" | \
-              grep -E '^(apps/worker/|packages/|docker/worker\.Dockerfile|hosting/railway\.worker\.toml|package\.json|pnpm-lock\.yaml)' >/dev/null; then
+              grep -E '^(apps/worker/|packages/|docker/worker\.Dockerfile|hosting/railway\.worker\.toml|package\.json|pnpm-lock\.yaml|\.github/workflows/deploy-railway\.yml)' >/dev/null; then
               echo "No worker-relevant changes; skipping worker deploy."
               exit 0
             fi
           fi
           railway up \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT" \
             --service worker \
             --ci \
             --detach \
             --yes \
             --message "GHA worker ${GITHUB_SHA::7}"
-          railway service source connect \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT" \
-            --service worker \
-            --repo "$RAILWAY_REPO" \
-            --branch "$RAILWAY_BRANCH" \
-            --json
