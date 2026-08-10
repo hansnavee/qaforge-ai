@@ -76,17 +76,13 @@ jobs:
               --environment "$RAILWAY_ENVIRONMENT" \
               --service api \
               --ci \
-              --detach \
-              --yes \
-              --message "GHA api ${GITHUB_SHA::7}"
+              --detach
           elif [ -n "${RAILWAY_TOKEN:-}" ]; then
             echo "Using project token (RAILWAY_TOKEN), length=${#RAILWAY_TOKEN}"
             railway up \
               --service api \
               --ci \
-              --detach \
-              --yes \
-              --message "GHA api ${GITHUB_SHA::7}"
+              --detach
           else
             echo "::error::Set RAILWAY_TOKEN (project) or RAILWAY_API_TOKEN (account)."
             exit 1
@@ -135,17 +131,13 @@ jobs:
               --environment "$RAILWAY_ENVIRONMENT" \
               --service worker \
               --ci \
-              --detach \
-              --yes \
-              --message "GHA worker ${GITHUB_SHA::7}"
+              --detach
           elif [ -n "${RAILWAY_TOKEN:-}" ]; then
             echo "Using project token (RAILWAY_TOKEN), length=${#RAILWAY_TOKEN}"
             railway up \
               --service worker \
               --ci \
-              --detach \
-              --yes \
-              --message "GHA worker ${GITHUB_SHA::7}"
+              --detach
           else
             echo "::error::Set RAILWAY_TOKEN (project) or RAILWAY_API_TOKEN (account)."
             exit 1
