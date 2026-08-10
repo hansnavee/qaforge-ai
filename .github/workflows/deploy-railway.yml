@@ -1,9 +1,15 @@
 name: Deploy Railway
 
 # Deploys API/worker via Railway CLI.
-# Requires repo secret: RAILWAY_TOKEN = Project Token from
-# Railway → Project → Settings → Tokens (scoped to production).
-# Project tokens already bind project+environment — do not use Account Tokens here.
+#
+# Auth (set EXACTLY one):
+#   RAILWAY_TOKEN     = Project Token
+#                       Railway → your project → Settings → Tokens
+#                       (pick environment: production)
+#   RAILWAY_API_TOKEN = Account / Workspace Token
+#                       https://railway.app/account/tokens
+#
+# Do not put an account token in RAILWAY_TOKEN (CLI returns Not signed in / Unauthorized).
 
 on:
   push:
@@ -34,6 +40,10 @@ concurrency:
   group: deploy-railway-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  RAILWAY_PROJECT_ID: b16f09df-7481-49d2-add1-0fcd49a9cfe4
+  RAILWAY_ENVIRONMENT: production
+
 jobs:
   deploy-api:
     if: ${{ github.event_name == 'push' || github.event.inputs.service == 'api' || github.event.inputs.service == 'both' }}
@@ -47,26 +57,43 @@ jobs:
       - name: Deploy API
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
         run: |
-          if [ -z "$RAILWAY_TOKEN" ]; then
-            echo "::error::RAILWAY_TOKEN secret is missing."
-            echo "Create a Project Token in Railway → Project → Settings → Tokens"
-            echo "(environment: production), then: gh secret set RAILWAY_TOKEN"
+          set -euo pipefail
+          if [ -n "${RAILWAY_API_TOKEN:-}" ] && [ -n "${RAILWAY_TOKEN:-}" ]; then
+            echo "::warning::Both RAILWAY_API_TOKEN and RAILWAY_TOKEN are set; using RAILWAY_API_TOKEN only."
+            unset RAILWAY_TOKEN
+          fi
+          if [ -n "${RAILWAY_API_TOKEN:-}" ]; then
+            echo "Using account/workspace token (RAILWAY_API_TOKEN)"
+            railway up \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment "$RAILWAY_ENVIRONMENT" \
+              --service api \
+              --ci \
+              --detach \
+              --yes \
+              --message "GHA api ${GITHUB_SHA::7}"
+          elif [ -n "${RAILWAY_TOKEN:-}" ]; then
+            echo "Using project token (RAILWAY_TOKEN)"
+            railway up \
+              --service api \
+              --ci \
+              --detach \
+              --yes \
+              --message "GHA api ${GITHUB_SHA::7}"
+          else
+            echo "::error::Set RAILWAY_TOKEN (project) or RAILWAY_API_TOKEN (account)."
             exit 1
           fi
-          # Project token is already scoped to project + environment.
-          railway up \
-            --service api \
-            --ci \
-            --detach \
-            --yes \
-            --message "GHA api ${GITHUB_SHA::7}"
 
   deploy-worker:
     if: ${{ github.event_name == 'push' || github.event.inputs.service == 'worker' || github.event.inputs.service == 'both' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Railway CLI
         run: npm i -g @railway/cli
@@ -74,21 +101,43 @@ jobs:
       - name: Deploy worker
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
         run: |
-          if [ -z "$RAILWAY_TOKEN" ]; then
-            echo "::error::RAILWAY_TOKEN secret is missing."
-            exit 1
-          fi
+          set -euo pipefail
           if [ "${{ github.event_name }}" = "push" ]; then
-            if ! git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" | \
-              grep -E '^(apps/worker/|packages/|docker/worker\.Dockerfile|hosting/railway\.worker\.toml|package\.json|pnpm-lock\.yaml|\.github/workflows/deploy-railway\.yml)' >/dev/null; then
-              echo "No worker-relevant changes; skipping worker deploy."
-              exit 0
+            BEFORE="${{ github.event.before }}"
+            if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+              && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              if ! git diff --name-only "$BEFORE" "${{ github.sha }}" | \
+                grep -E '^(apps/worker/|packages/|docker/worker\.Dockerfile|hosting/railway\.worker\.toml|package\.json|pnpm-lock\.yaml|\.github/workflows/deploy-railway\.yml)' >/dev/null; then
+                echo "No worker-relevant changes; skipping worker deploy."
+                exit 0
+              fi
             fi
           fi
-          railway up \
-            --service worker \
-            --ci \
-            --detach \
-            --yes \
-            --message "GHA worker ${GITHUB_SHA::7}"
+          if [ -n "${RAILWAY_API_TOKEN:-}" ] && [ -n "${RAILWAY_TOKEN:-}" ]; then
+            echo "::warning::Both tokens set; using RAILWAY_API_TOKEN only."
+            unset RAILWAY_TOKEN
+          fi
+          if [ -n "${RAILWAY_API_TOKEN:-}" ]; then
+            echo "Using account/workspace token (RAILWAY_API_TOKEN)"
+            railway up \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment "$RAILWAY_ENVIRONMENT" \
+              --service worker \
+              --ci \
+              --detach \
+              --yes \
+              --message "GHA worker ${GITHUB_SHA::7}"
+          elif [ -n "${RAILWAY_TOKEN:-}" ]; then
+            echo "Using project token (RAILWAY_TOKEN)"
+            railway up \
+              --service worker \
+              --ci \
+              --detach \
+              --yes \
+              --message "GHA worker ${GITHUB_SHA::7}"
+          else
+            echo "::error::Set RAILWAY_TOKEN (project) or RAILWAY_API_TOKEN (account)."
+            exit 1
+          fi
