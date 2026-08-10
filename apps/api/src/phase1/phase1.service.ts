@@ -815,7 +815,16 @@ export class Phase1Service {
         });
         for (const art of evidenceArts) {
           try {
-            const body = await store.get(art.storageKey);
+            let body: Buffer;
+            try {
+              body = await store.get(art.storageKey);
+            } catch {
+              const blob = await prisma.artifactBlob.findUnique({
+                where: { storageKey: art.storageKey },
+              });
+              if (!blob) continue;
+              body = Buffer.from(blob.body);
+            }
             const name = `evidence/${art.storageKey.split('/').pop()}`;
             files[name] = body;
           } catch {

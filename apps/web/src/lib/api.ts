@@ -104,19 +104,34 @@ export async function downloadAuthenticated(
     );
   }
 
+  // Read body once — JSON downloads are real files (Content-Disposition),
+  // not redirect envelopes. Only treat tiny {url} payloads as redirects.
+  const buf = await res.arrayBuffer();
   const contentType = res.headers.get('content-type') ?? '';
-  if (contentType.includes('application/json')) {
-    const data = (await res.json()) as { url?: string };
-    if (data.url) {
-      window.open(data.url, '_blank', 'noopener,noreferrer');
-      return;
+  const cd = res.headers.get('content-disposition') ?? '';
+  const isAttachment = /attachment/i.test(cd);
+
+  if (contentType.includes('application/json') && !isAttachment) {
+    try {
+      const data = JSON.parse(new TextDecoder().decode(buf)) as {
+        url?: unknown;
+      };
+      if (data && typeof data.url === 'string' && data.url.startsWith('http')) {
+        window.open(data.url, '_blank', 'noopener,noreferrer');
+        return;
+      }
+    } catch {
+      /* fall through and save bytes */
     }
   }
 
-  const blob = await res.blob();
-  const cd = res.headers.get('content-disposition') ?? '';
-  const match = /filename="?([^";]+)"?/i.exec(cd);
-  const filename = match?.[1] ?? fallbackFilename;
+  const match = /filename\*?=(?:UTF-8''|")?([^\";]+)"?/i.exec(cd);
+  const filename = match?.[1]
+    ? decodeURIComponent(match[1])
+    : fallbackFilename;
+  const blob = new Blob([buf], {
+    type: contentType || 'application/octet-stream',
+  });
   const objectUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = objectUrl;

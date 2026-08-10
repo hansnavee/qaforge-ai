@@ -52,6 +52,21 @@ export async function createAgentContext(opts: {
         checksum,
       },
     });
+    const buf = Buffer.from(body, 'utf8');
+    await prisma.artifactBlob.upsert({
+      where: { storageKey: stored.key },
+      create: {
+        storageKey: stored.key,
+        mime: 'application/json',
+        size: buf.length,
+        body: buf,
+      },
+      update: {
+        mime: 'application/json',
+        size: buf.length,
+        body: buf,
+      },
+    });
     return stored.key;
   };
 
@@ -65,7 +80,11 @@ export async function createAgentContext(opts: {
       const buf = await artifactStore.get(row.storageKey);
       return JSON.parse(buf.toString('utf8')) as T;
     } catch {
-      return null;
+      const blob = await prisma.artifactBlob.findUnique({
+        where: { storageKey: row.storageKey },
+      });
+      if (!blob) return null;
+      return JSON.parse(Buffer.from(blob.body).toString('utf8')) as T;
     }
   };
 
@@ -115,6 +134,21 @@ export async function putBinaryArtifact(opts: {
       mime: opts.mime,
       size: stored.size,
       checksum,
+    },
+  });
+  // Survive ephemeral worker disks / missing R2
+  await prisma.artifactBlob.upsert({
+    where: { storageKey: stored.key },
+    create: {
+      storageKey: stored.key,
+      mime: opts.mime,
+      size: buf.length,
+      body: buf,
+    },
+    update: {
+      mime: opts.mime,
+      size: buf.length,
+      body: buf,
     },
   });
   return stored.key;

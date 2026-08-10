@@ -1,6 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import { api, API_URL, downloadAuthenticated } from '@/lib/api';
 import { getDefaultOrgId } from '@/lib/org';
 import { Button } from '@/components/Button';
@@ -15,15 +16,16 @@ type BugRow = {
   stepsToReproduce?: string | null;
   evidenceKeys?: string[] | null;
   testCaseId?: string | null;
+  executionId?: string | null;
   testCase?: { externalId?: string | null; scenario?: string | null } | null;
 };
 
-function evidenceUrl(
+function evidencePath(
   orgId: string,
   executionId: string,
   key: string,
 ): string {
-  return `${API_URL.replace(/\/$/, '')}/api/v1/orgs/${orgId}/executions/${executionId}/artifacts/by-key?key=${encodeURIComponent(key)}`;
+  return `/api/v1/orgs/${orgId}/executions/${executionId}/artifacts/by-key?key=${encodeURIComponent(key)}`;
 }
 
 export function DefectsPanel({
@@ -89,6 +91,7 @@ export function DefectsPanel({
       <ul className="space-y-3">
         {bugs.map((b) => {
           const keys = Array.isArray(b.evidenceKeys) ? b.evidenceKeys : [];
+          const mediaExecId = b.executionId ?? executionId;
           return (
             <li
               key={b.id}
@@ -115,8 +118,8 @@ export function DefectsPanel({
                   {b.stepsToReproduce}
                 </pre>
               ) : null}
-              {keys.length && executionId ? (
-                <EvidenceList executionId={executionId} keys={keys} />
+              {keys.length && mediaExecId ? (
+                <EvidenceList executionId={mediaExecId} keys={keys} />
               ) : null}
             </li>
           );
@@ -141,50 +144,113 @@ function EvidenceList({
 
   return (
     <div className="mt-3 flex flex-wrap gap-3">
-      {keys.map((key) => {
-        const url = evidenceUrl(orgId, executionId, key);
-        const isVideo = /\.(webm|mp4)$/i.test(key);
-        const isImage = /\.(png|jpe?g|gif|webp)$/i.test(key);
-        if (isImage) {
-          return (
-            <a
-              key={key}
-              href={url}
-              target="_blank"
-              rel="noreferrer"
-              className="block overflow-hidden rounded border border-border"
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={url}
-                alt={key}
-                className="h-28 w-auto max-w-[220px] object-cover"
-              />
-            </a>
-          );
-        }
-        if (isVideo) {
-          return (
-            <video
-              key={key}
-              src={url}
-              controls
-              className="h-28 max-w-[240px] rounded border border-border"
-            />
-          );
-        }
-        return (
-          <a
-            key={key}
-            href={url}
-            target="_blank"
-            rel="noreferrer"
-            className="text-xs text-accent underline"
-          >
-            {key.split('/').pop()}
-          </a>
-        );
-      })}
+      {keys.map((key) => (
+        <EvidenceItem
+          key={key}
+          orgId={orgId}
+          executionId={executionId}
+          storageKey={key}
+        />
+      ))}
     </div>
+  );
+}
+
+function EvidenceItem({
+  orgId,
+  executionId,
+  storageKey,
+}: {
+  orgId: string;
+  executionId: string;
+  storageKey: string;
+}) {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const isVideo = /\.(webm|mp4)$/i.test(storageKey);
+  const isImage = /\.(png|jpe?g|gif|webp)$/i.test(storageKey);
+
+  useEffect(() => {
+    let revoked = false;
+    let created: string | null = null;
+    void (async () => {
+      try {
+        const path = evidencePath(orgId, executionId, storageKey);
+        const res = await fetch(`${API_URL.replace(/\/$/, '')}${path}`, {
+          credentials: 'include',
+        });
+        if (!res.ok) {
+          if (!revoked) setError(res.status === 404 ? 'missing' : `HTTP ${res.status}`);
+          return;
+        }
+        const blob = await res.blob();
+        created = URL.createObjectURL(blob);
+        if (!revoked) setObjectUrl(created);
+      } catch {
+        if (!revoked) setError('failed');
+      }
+    })();
+    return () => {
+      revoked = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [orgId, executionId, storageKey]);
+
+  if (error === 'missing') {
+    return (
+      <span className="rounded border border-border px-2 py-1 text-xs text-muted">
+        Evidence unavailable (pre-persistence run)
+      </span>
+    );
+  }
+  if (error) {
+    return (
+      <span className="rounded border border-border px-2 py-1 text-xs text-danger">
+        Evidence error
+      </span>
+    );
+  }
+  if (!objectUrl) {
+    return (
+      <span className="rounded border border-border px-2 py-1 text-xs text-muted">
+        Loading evidence…
+      </span>
+    );
+  }
+
+  if (isImage) {
+    return (
+      <a
+        href={objectUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="block overflow-hidden rounded border border-border"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={objectUrl}
+          alt={storageKey}
+          className="h-28 w-auto max-w-[220px] object-cover"
+        />
+      </a>
+    );
+  }
+  if (isVideo) {
+    return (
+      <video
+        src={objectUrl}
+        controls
+        className="h-28 max-w-[240px] rounded border border-border"
+      />
+    );
+  }
+  return (
+    <a
+      href={objectUrl}
+      download={storageKey.split('/').pop()}
+      className="text-xs text-accent underline"
+    >
+      {storageKey.split('/').pop()}
+    </a>
   );
 }

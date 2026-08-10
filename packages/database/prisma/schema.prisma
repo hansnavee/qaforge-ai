@@ -525,6 +525,17 @@ model Artifact {
   execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
 
   @@index([executionId, type])
+  @@index([storageKey])
+}
+
+/// Durable bytes for artifacts when R2/local disk is ephemeral (Railway).
+model ArtifactBlob {
+  storageKey String   @id
+  mime       String
+  size       Int      @default(0)
+  body       Bytes
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 model BrowserSession {

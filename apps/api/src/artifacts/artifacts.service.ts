@@ -26,6 +26,20 @@ export class ArtifactsService {
     });
   }
 
+  /** Prefer object store; fall back to durable DB blob (survives Railway redeploys). */
+  private async resolveBody(storageKey: string): Promise<Buffer | null> {
+    try {
+      return await this.store().get(storageKey);
+    } catch {
+      /* try DB */
+    }
+    const blob = await prisma.artifactBlob.findUnique({
+      where: { storageKey },
+    });
+    if (!blob) return null;
+    return Buffer.from(blob.body);
+  }
+
   private async rebuildExecutionZip(executionId: string, projectId: string) {
     const [project, cases, bugs, results, evidenceArts] = await Promise.all([
       prisma.project.findUnique({ where: { id: projectId } }),
@@ -100,8 +114,12 @@ export class ArtifactsService {
     const store = this.store();
     for (const art of evidenceArts) {
       try {
-        const body = await store.get(art.storageKey);
-        files[`evidence/${art.storageKey.split('/').pop()}`] = body;
+        const body =
+          (await this.resolveBody(art.storageKey)) ??
+          (await store.get(art.storageKey).catch(() => null));
+        if (body) {
+          files[`evidence/${art.storageKey.split('/').pop()}`] = body;
+        }
       } catch {
         /* skip missing evidence blobs */
       }
@@ -251,8 +269,13 @@ export class ArtifactsService {
 
     let buf: Buffer;
     try {
-      buf = await this.store().get(storageKey);
-    } catch {
+      const resolved = await this.resolveBody(storageKey);
+      if (!resolved) {
+        throw new NotFoundException(`Artifact file missing: ${storageKey}`);
+      }
+      buf = resolved;
+    } catch (err) {
+      if (err instanceof NotFoundException) throw err;
       throw new NotFoundException(`Artifact file missing: ${storageKey}`);
     }
 
@@ -302,11 +325,7 @@ export class ArtifactsService {
 
     let buf: Buffer | null = null;
     if (zip) {
-      try {
-        buf = await this.store().get(zip.storageKey);
-      } catch {
-        buf = null;
-      }
+      buf = await this.resolveBody(zip.storageKey);
     }
 
     if (!buf) {
@@ -344,11 +363,7 @@ export class ArtifactsService {
 
     let buf: Buffer | null = null;
     if (row) {
-      try {
-        buf = await this.store().get(row.storageKey);
-      } catch {
-        buf = null;
-      }
+      buf = await this.resolveBody(row.storageKey);
     }
 
     if (!buf && type === ArtifactType.REPORT_HTML) {
