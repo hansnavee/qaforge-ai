@@ -65,7 +65,8 @@ jobs:
             unset RAILWAY_TOKEN
           fi
           if [ -n "${RAILWAY_API_TOKEN:-}" ]; then
-            echo "Using account/workspace token (RAILWAY_API_TOKEN)"
+            echo "Using account token (RAILWAY_API_TOKEN), length=${#RAILWAY_API_TOKEN}"
+            railway whoami || true
             railway up \
               --project "$RAILWAY_PROJECT_ID" \
               --environment "$RAILWAY_ENVIRONMENT" \
@@ -75,7 +76,7 @@ jobs:
               --yes \
               --message "GHA api ${GITHUB_SHA::7}"
           elif [ -n "${RAILWAY_TOKEN:-}" ]; then
-            echo "Using project token (RAILWAY_TOKEN)"
+            echo "Using project token (RAILWAY_TOKEN), length=${#RAILWAY_TOKEN}"
             railway up \
               --service api \
               --ci \
@@ -120,7 +121,8 @@ jobs:
             unset RAILWAY_TOKEN
           fi
           if [ -n "${RAILWAY_API_TOKEN:-}" ]; then
-            echo "Using account/workspace token (RAILWAY_API_TOKEN)"
+            echo "Using account token (RAILWAY_API_TOKEN), length=${#RAILWAY_API_TOKEN}"
+            railway whoami || true
             railway up \
               --project "$RAILWAY_PROJECT_ID" \
               --environment "$RAILWAY_ENVIRONMENT" \
@@ -130,7 +132,7 @@ jobs:
               --yes \
               --message "GHA worker ${GITHUB_SHA::7}"
           elif [ -n "${RAILWAY_TOKEN:-}" ]; then
-            echo "Using project token (RAILWAY_TOKEN)"
+            echo "Using project token (RAILWAY_TOKEN), length=${#RAILWAY_TOKEN}"
             railway up \
               --service worker \
               --ci \
