@@ -1430,7 +1430,7 @@ export class Phase1Service {
 
     return {
       html,
-      htmlUrl: `/api/v1/orgs/${orgId}/executions/${executionId}/artifacts/by-type/${ArtifactType.REPORT_HTML}`,
+      htmlUrl: `${(process.env.BETTER_AUTH_URL ?? process.env.NEXT_PUBLIC_API_URL ?? '').replace(/\/$/, '')}/api/v1/orgs/${orgId}/executions/${executionId}/artifacts/by-type/${ArtifactType.REPORT_HTML}`,
       scores,
       summary: scores
         ? {
