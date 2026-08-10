@@ -1270,10 +1270,26 @@ export class Phase1Service {
     projectId: string,
   ) {
     await this.requireProject(userId, orgId, projectId);
-    const execution = await prisma.execution.findFirst({
-      where: { projectId, runMode: { in: [...STLC_RUN_MODES] } },
+
+    // Prefer an execution that actually produced automation artifacts
+    // (latest cycle may still be mid-run at Authentication).
+    const withManifest = await prisma.artifact.findFirst({
+      where: {
+        type: { in: ['AUTOMATION_MANIFEST', ArtifactType.AUTOMATION_FRAMEWORK] },
+        execution: {
+          projectId,
+          runMode: { in: [...STLC_RUN_MODES] },
+        },
+      },
       orderBy: { createdAt: 'desc' },
+      select: { executionId: true },
     });
+    const execution = withManifest
+      ? await prisma.execution.findUnique({ where: { id: withManifest.executionId } })
+      : await prisma.execution.findFirst({
+          where: { projectId, runMode: { in: [...STLC_RUN_MODES] } },
+          orderBy: { createdAt: 'desc' },
+        });
     if (!execution) return null;
 
     const manifestArt = await prisma.artifact.findFirst({
@@ -1292,7 +1308,7 @@ export class Phase1Service {
         const buf = await store.get(manifestArt.storageKey);
         manifest = JSON.parse(buf.toString('utf8')) as Record<string, unknown>;
       } catch {
-        /* keep defaults */
+        /* keep defaults — storage may be ephemeral after redeploy */
       }
     }
 
@@ -1305,11 +1321,12 @@ export class Phase1Service {
       select: { storageKey: true },
     });
     const filesFromStore = frameworkFiles.map((f) => f.storageKey);
-    const files = Array.isArray(manifest.files)
+    const filesFromManifest = Array.isArray(manifest.files)
       ? (manifest.files as string[])
-      : filesFromStore;
+      : [];
+    const files = filesFromManifest.length ? filesFromManifest : filesFromStore;
 
-    if (!files.length && !manifestArt) return null;
+    if (!files.length && !manifestArt && !frameworkFiles.length) return null;
 
     return {
       executionId: execution.id,
@@ -1317,6 +1334,7 @@ export class Phase1Service {
       language: (manifest.language as string) ?? 'typescript',
       baseUrl: (manifest.baseUrl as string) ?? undefined,
       files,
+      cycleNumber: execution.cycleNumber ?? 1,
     };
   }
 
