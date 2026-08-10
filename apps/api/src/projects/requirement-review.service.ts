@@ -28,6 +28,10 @@ import {
   summarizeFeature,
   SEMANTIC_ANALYSIS_ENGINE,
   SEMANTIC_ANALYSIS_VERSION,
+  buildRequirementsPhaseDocument,
+  buildRequirementsPhaseDocState,
+  upsertPhaseDoc,
+  type StlcPhaseDocsMap,
   type AiRequirementIntelligence,
   type BusinessReviewPayload,
   type FunctionalReviewPayload,
@@ -637,6 +641,16 @@ export class RequirementReviewService {
 
     const summary = await this.getSummary(user.id, orgId, projectId);
     const features = await this.listFeatures(user.id, orgId, projectId);
+    const projectRow = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { name: true },
+    });
+    await this.persistRequirementsPhaseDoc(
+      projectId,
+      projectRow?.name ?? 'Project',
+      summary,
+      { status: 'READY_FOR_REVIEW' },
+    );
     return { ok: true, summary, features, requirements: results };
   }
 
@@ -764,6 +778,7 @@ export class RequirementReviewService {
         businessImpact: r.businessImpact,
       })),
       openQuestions: openQuestionRows,
+      openConflicts: conflicts,
     });
 
     return {
@@ -812,6 +827,84 @@ export class RequirementReviewService {
     };
   }
 
+  /** Write a concise REQUIREMENTS analysis pack into stlcPhaseDocs (no invented REQ text). */
+  private async persistRequirementsPhaseDoc(
+    projectId: string,
+    projectName: string,
+    summary: Awaited<ReturnType<RequirementReviewService['getSummary']>>,
+    opts: { status: 'READY_FOR_REVIEW' | 'ACCEPTED' | 'FAILED' },
+  ) {
+    const requirements = await prisma.requirement.findMany({
+      where: { projectId },
+      select: {
+        requirementKey: true,
+        title: true,
+        type: true,
+        primaryType: true,
+        reviewStatus: true,
+        businessImpact: true,
+        readinessScore: true,
+      },
+      orderBy: { requirementKey: 'asc' },
+    });
+
+    const handoff = summary.stlcHandoff;
+    const document = buildRequirementsPhaseDocument({
+      projectName,
+      analysisId: summary.analysisId,
+      analysisVersion: summary.analysisVersion,
+      analysisEngine: summary.analysisEngine,
+      total: summary.total,
+      readyForTestDesign: summary.byReviewStatus.readyForTestDesign,
+      needsClarification: summary.byReviewStatus.needsClarification,
+      blocked: summary.byReviewStatus.blocked,
+      openQuestions:
+        summary.questions.critical +
+        summary.questions.high +
+        summary.questions.medium +
+        summary.questions.low,
+      openConflicts: summary.openConflicts ?? 0,
+      features: summary.features ?? 0,
+      blockers: handoff?.blockers ?? [],
+      requirements: requirements.map((r) => ({
+        requirementKey: r.requirementKey,
+        title: r.title,
+        type: r.primaryType ?? r.type,
+        reviewStatus: r.reviewStatus,
+        businessImpact: r.businessImpact,
+        readinessScore: r.readinessScore,
+      })),
+    });
+
+    const validation = {
+      passed: Boolean(handoff?.canApprove) || opts.status === 'ACCEPTED',
+      summary:
+        opts.status === 'ACCEPTED'
+          ? 'Requirements baseline accepted — Planning may start.'
+          : handoff?.canApprove
+            ? 'Exit criteria met — ready for human Approve.'
+            : `Not ready: ${(handoff?.blockers ?? []).join('; ') || 'complete analysis'}`,
+      blockers: handoff?.blockers ?? [],
+    };
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { stlcPhaseDocs: true },
+    });
+    const prevMap = (project?.stlcPhaseDocs ?? {}) as StlcPhaseDocsMap;
+    const state = buildRequirementsPhaseDocState({
+      document,
+      validation,
+      previous: prevMap.REQUIREMENTS ?? null,
+      status: opts.status,
+    });
+    const next = upsertPhaseDoc(prevMap, state);
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { stlcPhaseDocs: next as never },
+    });
+  }
+
   async approveRequirements(
     user: SessionUser,
     orgId: string,
@@ -838,6 +931,9 @@ export class RequirementReviewService {
       where: { projectId, status: 'OPEN' },
       select: { priority: true, blocking: true, status: true },
     });
+    const openConflicts = await prisma.requirementConflict.count({
+      where: { projectId, status: 'OPEN' },
+    });
 
     const readiness = evaluateRequirementsReadiness({
       analysisStatus: project.analysisStatus,
@@ -845,6 +941,7 @@ export class RequirementReviewService {
       requirementsApprovedAt: project.requirementsApprovedAt,
       requirements,
       openQuestions,
+      openConflicts,
     });
 
     if (!readiness.canApprove) {
@@ -880,6 +977,14 @@ export class RequirementReviewService {
       },
     });
 
+    const summaryAfter = await this.getSummary(user.id, orgId, projectId);
+    await this.persistRequirementsPhaseDoc(
+      projectId,
+      project.name,
+      summaryAfter,
+      { status: 'ACCEPTED' },
+    );
+
     return {
       projectId,
       requirementsApprovedAt: updated.requirementsApprovedAt,
@@ -892,6 +997,7 @@ export class RequirementReviewService {
         requirementsApprovedAt: updated.requirementsApprovedAt,
         requirements,
         openQuestions,
+        openConflicts,
       }),
     };
   }

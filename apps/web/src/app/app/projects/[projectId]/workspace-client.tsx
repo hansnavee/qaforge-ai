@@ -18,6 +18,12 @@ import {
   RequirementsFeaturesView,
   RequirementsReviewDashboard,
 } from './requirements-review-views';
+import {
+  RequirementsPhaseShell,
+  requirementsStepToView,
+  viewToRequirementsStep,
+  type RequirementsPhaseStep,
+} from './requirements-phase-shell';
 
 const REQUIREMENT_EXPORTS = [
   { format: 'xlsx', label: 'Excel spreadsheet', filename: 'requirements.xls' },
@@ -161,6 +167,7 @@ type StlcHandoff = {
   canStartPlanning: boolean;
   approved: boolean;
   blockers: string[];
+  checklist?: Array<{ id: string; label: string; done: boolean }>;
   counts: {
     total: number;
     blocked: number;
@@ -169,6 +176,8 @@ type StlcHandoff = {
     readyForTestDesign: number;
     stale: number;
     openBlockingCriticalQuestions: number;
+    openBlockingHighQuestions?: number;
+    openConflicts?: number;
   };
 };
 
@@ -1188,6 +1197,9 @@ export default function ProjectWorkspacePage() {
       reviewSummaryQuery.data?.stlcStage ?? project.stlcStage ?? 'REQUIREMENTS',
   });
   const handoffBlockers = stlcHandoff?.blockers ?? [];
+  const handoffChecklist = stlcHandoff?.checklist ?? [];
+  const reqPhaseStep: RequirementsPhaseStep =
+    view === 'approve' ? 'approve' : viewToRequirementsStep(view);
   const openEditProject = () => {
     setProjectForm({
       name: project.name,
@@ -1742,6 +1754,26 @@ export default function ProjectWorkspacePage() {
       tab !== 'stlc' &&
       !extractMutation.isPending &&
       !reviewMutation.isPending ? (
+        <RequirementsPhaseShell
+          step={reqPhaseStep}
+          onStepChange={(step) => {
+            setView(
+              requirementsStepToView(step, {
+                hasExtracted: extracted.length > 0,
+                hasReview: (reviewSummaryQuery.data?.reviewed ?? 0) > 0,
+              }),
+            );
+          }}
+          analysisLabel={analysisLabel(analysisStatus)}
+          extractedCount={extractedCount}
+          approved={requirementsApproved}
+          canApprove={Boolean(stlcHandoff?.canApprove)}
+          checklist={handoffChecklist}
+          blockers={handoffBlockers}
+          approvePending={approveRequirementsMutation.isPending}
+          onApprove={() => approveRequirementsMutation.mutate()}
+          onContinuePlanning={() => startPlanningMutation.mutate()}
+        >
         <Card className="sticky top-0 z-10 space-y-3 border-accent/30 bg-bg/95 backdrop-blur">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -1749,6 +1781,10 @@ export default function ProjectWorkspacePage() {
               <p className="mt-1 text-sm text-muted">
                 Requirements: {extractedCount} · Analysis:{' '}
                 {analysisLabel(analysisStatus)}
+              </p>
+              <p className="mt-1 text-xs text-muted">
+                Source text is never rewritten by analysis without your
+                confirmation.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1825,6 +1861,7 @@ export default function ProjectWorkspacePage() {
             </div>
           ) : null}
         </Card>
+        </RequirementsPhaseShell>
       ) : null}
 
       {tab !== 'overview' &&
@@ -2092,6 +2129,29 @@ export default function ProjectWorkspacePage() {
           </ul>
         </Card>
       ) : null}
+      {tab !== 'overview' &&
+      tab !== 'stlc' &&
+      !extractMutation.isPending &&
+      !reviewMutation.isPending &&
+      view === 'approve' ? (
+        <Card className="space-y-3">
+          <h2 className="text-base font-medium">Approve baseline</h2>
+          <p className="text-sm text-muted">
+            Use the exit criteria above. Approving freezes this requirements
+            pack for Planning — re-extract later will require re-approval.
+          </p>
+          {(reviewSummaryQuery.data?.reviewed ?? 0) > 0 ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setView('features')}
+            >
+              Review requirements first
+            </Button>
+          ) : null}
+        </Card>
+      ) : null}
+
       {tab !== 'overview' &&
       tab !== 'stlc' &&
       !extractMutation.isPending &&

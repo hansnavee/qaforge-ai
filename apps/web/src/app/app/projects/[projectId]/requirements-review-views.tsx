@@ -704,7 +704,7 @@ export function RequirementsFeaturesView({
                                           })
                                         }
                                       >
-                                        Merge
+                                        Merge as duplicate of
                                       </Button>
                                       <Button
                                         size="sm"
@@ -978,7 +978,7 @@ export function RequirementDetailView({
                   })
                 }
               >
-                Merge
+                Merge as duplicate of
               </Button>
               <Button
                 size="sm"

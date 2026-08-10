@@ -51,7 +51,7 @@ export function Sidebar() {
           STLC_PHASES.map((p) => {
             const isRequirements = p.id === 'REQUIREMENTS';
             const href = isRequirements
-              ? `/app/projects/${projectId}?tab=requirements&view=list`
+              ? `/app/projects/${projectId}?tab=requirements&view=source`
               : `/app/projects/${projectId}?tab=stlc&phase=${p.id}`;
             const active = isRequirements
               ? tab !== 'overview' && tab !== 'stlc'

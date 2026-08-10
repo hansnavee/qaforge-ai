@@ -861,11 +861,15 @@ export class RequirementExtractionService {
     ).slice(0, 60_000);
 
     const llm = await this.llm.complete({
-      system: `You extract CANDIDATE software requirements from a PARSED document.
+      system: `You extract CANDIDATE software requirements from a PARSED document for THIS application only.
 
 Return candidates only. A server-side quality gate will reject invalid ones.
 
 Hard rules:
+- Never invent requirements that are not present in the document.
+- Never invent sample data, users, passwords, or URLs not in the source.
+- Never rewrite or "improve" the author's wording — keep sourceText faithful.
+- Prefer concise candidates specific to this document over broad generic ones.
 - Never return HEADING text as a candidate (including markdown # headings).
 - Never return TABLE headers or rows as candidates.
 - Never return Acceptance Criteria labels or individual AC bullets as candidates; attach them to parent acceptanceCriteria.

@@ -1,6 +1,10 @@
 /**
  * Stage 1 → Stage 2 handoff readiness for STLC.
  * Pure checks — no DB / LLM. Used by API gate + UI.
+ *
+ * QA Lead rule: do not Approve while conflicts or blocking questions remain.
+ * Soft “needs clarification” is surfaced in counts but only CRITICAL/HIGH
+ * blocking questions (and conflicts/blocked/stale) stop the gate.
  */
 
 export type StlcRequirementRow = {
@@ -23,6 +27,8 @@ export type StlcReadinessInput = {
   requirementsApprovedAt?: string | Date | null;
   requirements: StlcRequirementRow[];
   openQuestions?: StlcQuestionRow[];
+  /** Open business conflicts that still need a human decision */
+  openConflicts?: number | null;
 };
 
 export type StlcReadiness = {
@@ -30,6 +36,8 @@ export type StlcReadiness = {
   canStartPlanning: boolean;
   approved: boolean;
   blockers: string[];
+  /** Plain checklist for UI — done vs pending exit criteria */
+  checklist: Array<{ id: string; label: string; done: boolean }>;
   counts: {
     total: number;
     blocked: number;
@@ -38,6 +46,8 @@ export type StlcReadiness = {
     readyForTestDesign: number;
     stale: number;
     openBlockingCriticalQuestions: number;
+    openBlockingHighQuestions: number;
+    openConflicts: number;
   };
 };
 
@@ -51,6 +61,7 @@ export function evaluateRequirementsReadiness(
   const requirements = input.requirements ?? [];
   const openQuestions = (input.openQuestions ?? []).filter(isOpen);
   const blockers: string[] = [];
+  const openConflicts = Math.max(0, input.openConflicts ?? 0);
 
   const blocked = requirements.filter((r) => r.reviewStatus === 'BLOCKED');
   const needsClarification = requirements.filter(
@@ -66,30 +77,89 @@ export function evaluateRequirementsReadiness(
   const openBlockingCriticalQuestions = openQuestions.filter(
     (q) => q.blocking && q.priority === 'CRITICAL',
   );
+  const openBlockingHighQuestions = openQuestions.filter(
+    (q) => q.blocking && q.priority === 'HIGH',
+  );
 
-  if (input.analysisStatus !== 'COMPLETED') {
+  const analysisDone = input.analysisStatus === 'COMPLETED';
+  const hasReqs = requirements.length > 0;
+  const noStale =
+    (input.staleRequirementCount ?? 0) === 0 && stale.length === 0;
+  const noBlocked = blocked.length === 0;
+  const noCriticalQs = openBlockingCriticalQuestions.length === 0;
+  const noHighBlockingQs = openBlockingHighQuestions.length === 0;
+  const noConflicts = openConflicts === 0;
+
+  if (!analysisDone) {
     blockers.push('Requirement analysis must be completed');
   }
-  if (requirements.length === 0) {
+  if (!hasReqs) {
     blockers.push('No extracted requirements to approve');
   }
-  if ((input.staleRequirementCount ?? 0) > 0 || stale.length > 0) {
+  if (!noStale) {
     blockers.push('Stale requirements — re-run analysis before approval');
   }
-  if (blocked.length > 0) {
+  if (!noBlocked) {
     blockers.push(
       `${blocked.length} requirement(s) are BLOCKED and must be resolved`,
     );
   }
-  if (openBlockingCriticalQuestions.length > 0) {
+  if (!noCriticalQs) {
     blockers.push(
       `${openBlockingCriticalQuestions.length} open CRITICAL blocking question(s)`,
     );
   }
+  if (!noHighBlockingQs) {
+    blockers.push(
+      `${openBlockingHighQuestions.length} open HIGH blocking question(s)`,
+    );
+  }
+  if (!noConflicts) {
+    blockers.push(
+      `${openConflicts} open conflict(s) must be resolved before approval`,
+    );
+  }
+
+  const checklist = [
+    {
+      id: 'analysis',
+      label: 'Analysis completed on the provided source',
+      done: analysisDone,
+    },
+    {
+      id: 'extracted',
+      label: 'At least one requirement extracted from source',
+      done: hasReqs,
+    },
+    {
+      id: 'fresh',
+      label: 'No stale requirements after edits',
+      done: noStale,
+    },
+    {
+      id: 'unblocked',
+      label: 'No requirements left in BLOCKED status',
+      done: noBlocked,
+    },
+    {
+      id: 'critical-qs',
+      label: 'No open CRITICAL blocking questions',
+      done: noCriticalQs,
+    },
+    {
+      id: 'high-qs',
+      label: 'No open HIGH blocking questions',
+      done: noHighBlockingQs,
+    },
+    {
+      id: 'conflicts',
+      label: 'No open requirement conflicts',
+      done: noConflicts,
+    },
+  ];
 
   const canApprove = blockers.length === 0;
   const approved = Boolean(input.requirementsApprovedAt);
-  // Once approved, Planning can always start (soft blockers must not freeze CTA).
   const canStartPlanning = approved;
 
   return {
@@ -97,6 +167,7 @@ export function evaluateRequirementsReadiness(
     canStartPlanning,
     approved,
     blockers,
+    checklist,
     counts: {
       total: requirements.length,
       blocked: blocked.length,
@@ -105,6 +176,8 @@ export function evaluateRequirementsReadiness(
       readyForTestDesign: readyForTestDesign.length,
       stale: stale.length,
       openBlockingCriticalQuestions: openBlockingCriticalQuestions.length,
+      openBlockingHighQuestions: openBlockingHighQuestions.length,
+      openConflicts,
     },
   };
 }

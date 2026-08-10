@@ -63,17 +63,33 @@ describe('evaluateRequirementsReadiness', () => {
     expect(r.counts.openBlockingCriticalQuestions).toBe(1);
   });
 
-  it('blocks on BLOCKED requirements', () => {
+  it('blocks on HIGH blocking open questions', () => {
     const r = evaluateRequirementsReadiness({
       analysisStatus: 'COMPLETED',
-      requirements: [
-        {
-          requirementKey: 'REQ-002',
-          title: 'Pay',
-          reviewStatus: 'BLOCKED',
-        },
-      ],
+      requirements: baseReqs,
+      openQuestions: [{ priority: 'HIGH', blocking: true, status: 'OPEN' }],
     });
     expect(r.canApprove).toBe(false);
+    expect(r.counts.openBlockingHighQuestions).toBe(1);
+  });
+
+  it('blocks on open conflicts', () => {
+    const r = evaluateRequirementsReadiness({
+      analysisStatus: 'COMPLETED',
+      requirements: baseReqs,
+      openConflicts: 2,
+    });
+    expect(r.canApprove).toBe(false);
+    expect(r.checklist.find((c) => c.id === 'conflicts')?.done).toBe(false);
+  });
+
+  it('exposes exit-criteria checklist', () => {
+    const r = evaluateRequirementsReadiness({
+      analysisStatus: 'COMPLETED',
+      requirements: baseReqs,
+      openQuestions: [],
+      openConflicts: 0,
+    });
+    expect(r.checklist.every((c) => c.done)).toBe(true);
   });
 });
