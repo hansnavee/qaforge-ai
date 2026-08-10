@@ -60,8 +60,11 @@ jobs:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
         run: |
           set -euo pipefail
+          # GitHub injects missing secrets as ""; CLI treats that as "both set".
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then unset RAILWAY_API_TOKEN; fi
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then unset RAILWAY_TOKEN; fi
           if [ -n "${RAILWAY_API_TOKEN:-}" ] && [ -n "${RAILWAY_TOKEN:-}" ]; then
-            echo "::warning::Both RAILWAY_API_TOKEN and RAILWAY_TOKEN are set; using RAILWAY_API_TOKEN only."
+            echo "::warning::Both tokens set; using RAILWAY_API_TOKEN only."
             unset RAILWAY_TOKEN
           fi
           if [ -n "${RAILWAY_API_TOKEN:-}" ]; then
@@ -116,6 +119,8 @@ jobs:
               fi
             fi
           fi
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then unset RAILWAY_API_TOKEN; fi
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then unset RAILWAY_TOKEN; fi
           if [ -n "${RAILWAY_API_TOKEN:-}" ] && [ -n "${RAILWAY_TOKEN:-}" ]; then
             echo "::warning::Both tokens set; using RAILWAY_API_TOKEN only."
             unset RAILWAY_TOKEN
