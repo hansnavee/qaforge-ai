@@ -1,6 +1,15 @@
 import type { AgentHandler } from '@qaforge/agent-sdk';
-import { ArtifactType } from '@qaforge/shared';
+import {
+  ArtifactType,
+  DESIGN_TECHNIQUES,
+  appAvailablePrecondition,
+  expandTechniqueCoverage,
+  openAppStep,
+  type DesignTechnique,
+} from '@qaforge/shared';
 import { putBinaryArtifact } from '../context.js';
+
+export { DESIGN_TECHNIQUES, type DesignTechnique };
 
 export type TestCase = {
   id: string;
@@ -13,6 +22,12 @@ export type TestCase = {
   severity: string;
   type: string;
   automationCandidate: boolean;
+  requirementKey?: string | null;
+  designTechnique?: DesignTechnique | string | null;
+  featureKey?: string | null;
+  designMode?: string | null;
+  priorityLabel?: string | null;
+  readyForExecution?: boolean;
 };
 
 function toCsv(cases: TestCase[]): string {
@@ -27,6 +42,8 @@ function toCsv(cases: TestCase[]): string {
     'severity',
     'type',
     'automationCandidate',
+    'requirementKey',
+    'designTechnique',
   ];
   const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
   const rows = cases.map((c) =>
@@ -41,6 +58,8 @@ function toCsv(cases: TestCase[]): string {
       c.severity,
       c.type,
       String(c.automationCandidate),
+      c.requirementKey ?? '',
+      c.designTechnique ?? '',
     ]
       .map((x) => escape(String(x)))
       .join(','),
@@ -49,64 +68,73 @@ function toCsv(cases: TestCase[]): string {
 }
 
 function defaultCases(appUrl: string): TestCase[] {
+  const open = openAppStep(appUrl);
+  const pre = appAvailablePrecondition(appUrl);
   return [
     {
       id: 'TC-001',
       module: 'Authentication',
-      scenario: 'Valid user can log in and reach inventory',
-      preconditions:
-        `App URL ${appUrl} is reachable. Standard user credentials are available (e.g. standard_user). Browser cookies/session cleared.`,
+      scenario: 'Valid user can log in with email and password',
+      preconditions: `${pre} Valid credentials available.`,
       steps: [
-        `Open ${appUrl} in a supported browser`,
-        'Verify Login page shows Username, Password, and Login controls',
-        'Enter a valid username in the Username field',
-        'Enter the matching valid password in the Password field',
-        'Click the Login button',
-        'Wait for navigation to complete',
+        open,
+        'Enter a valid email/username',
+        'Enter the matching password',
+        'Click Login',
       ],
-      expected:
-        'User is authenticated, URL changes to the inventory/products page, and product catalog is visible without an error banner.',
+      expected: 'User is authenticated and redirected to the dashboard.',
       priority: 'P0',
+      priorityLabel: 'HIGH',
       severity: 'critical',
       type: 'functional',
       automationCandidate: true,
+      requirementKey: 'REQ-001',
+      designTechnique: 'HAPPY_PATH',
+      designMode: 'GENERIC',
+      readyForExecution: false,
     },
     {
       id: 'TC-002',
       module: 'Authentication',
-      scenario: 'Invalid password shows login error and blocks access',
-      preconditions: `Login page at ${appUrl} is available. A known username exists but password used is incorrect.`,
+      scenario: 'Invalid credentials show an error and block access',
+      preconditions: pre,
       steps: [
-        `Open ${appUrl}`,
-        'Enter a valid username',
-        'Enter an incorrect password',
+        open,
+        'Enter a valid username with an incorrect password',
         'Click Login',
       ],
       expected:
-        'User remains on the login page, an error message is displayed, and inventory/products are not accessible.',
+        'User remains on login, an error message is displayed, dashboard is not shown.',
       priority: 'P0',
+      priorityLabel: 'HIGH',
       severity: 'high',
       type: 'negative',
       automationCandidate: true,
+      requirementKey: 'REQ-002',
+      designTechnique: 'NEGATIVE',
+      designMode: 'GENERIC',
+      readyForExecution: false,
     },
     {
       id: 'TC-003',
-      module: 'Cart',
-      scenario: 'Add a product to cart and verify cart badge/count',
-      preconditions: 'User is logged in and inventory page lists at least one product.',
+      module: 'Authentication',
+      scenario: 'Empty email/password fields are rejected (equivalence invalid class)',
+      preconditions: pre,
       steps: [
-        'On inventory, locate the first product card',
-        'Note the product name',
-        'Click Add to cart for that product',
-        'Observe the cart icon/badge in the header',
-        'Open the cart page',
+        open,
+        'Leave email and password empty',
+        'Click Login',
       ],
-      expected:
-        'Cart badge increments to 1 (or previous+1). Cart page lists the selected product with correct name and quantity.',
-      priority: 'P0',
-      severity: 'high',
-      type: 'functional',
+      expected: 'Login is blocked and validation/error feedback is shown.',
+      priority: 'P1',
+      priorityLabel: 'MEDIUM',
+      severity: 'medium',
+      type: 'negative',
       automationCandidate: true,
+      requirementKey: 'REQ-001',
+      designTechnique: 'EQUIVALENCE',
+      designMode: 'GENERIC',
+      readyForExecution: false,
     },
   ];
 }
@@ -119,6 +147,26 @@ function isDetailedCase(tc: TestCase): boolean {
     tc.expected.trim().length >= 20 &&
     tc.scenario.trim().length >= 10
   );
+}
+
+function normalizeTechnique(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const u = raw.trim().toUpperCase().replace(/[\s-]+/g, '_');
+  const alias: Record<string, string> = {
+    EP: 'EQUIVALENCE',
+    EQUIVALENCE_PARTITIONING: 'EQUIVALENCE',
+    BVA: 'BOUNDARY',
+    BOUNDARY_VALUE: 'BOUNDARY',
+    BOUNDARY_VALUE_ANALYSIS: 'BOUNDARY',
+    DECISION: 'DECISION_TABLE',
+    STATE: 'STATE_TRANSITION',
+    HAPPY: 'HAPPY_PATH',
+    POSITIVE: 'HAPPY_PATH',
+  };
+  const mapped = alias[u] ?? u;
+  return (DESIGN_TECHNIQUES as readonly string[]).includes(mapped)
+    ? mapped
+    : mapped;
 }
 
 function normalizeCases(raw: unknown, appUrl: string): TestCase[] {
@@ -145,18 +193,41 @@ function normalizeCases(raw: unknown, appUrl: string): TestCase[] {
       priority: String(tc.priority ?? 'P1'),
       severity: String(tc.severity ?? 'medium'),
       type: String(tc.type ?? tc.category ?? 'functional'),
-      automationCandidate: Boolean(
-        tc.automationCandidate ?? true,
+      automationCandidate: Boolean(tc.automationCandidate ?? true),
+      requirementKey: tc.requirementKey
+        ? String(tc.requirementKey)
+        : tc.requirementId
+          ? String(tc.requirementId)
+          : null,
+      designTechnique: normalizeTechnique(
+        tc.designTechnique ?? tc.technique ?? tc.testDesignTechnique,
       ),
-    };
+      featureKey: tc.featureKey ? String(tc.featureKey) : null,
+      designMode: tc.designMode ? String(tc.designMode) : null,
+      priorityLabel: tc.priorityLabel ? String(tc.priorityLabel) : null,
+      readyForExecution: Boolean(tc.readyForExecution),
+    } satisfies TestCase;
   });
 
   const detailed = normalized.filter(isDetailedCase);
-  // Prefer fully specified cases; if LLM returned thin stubs, use detailed defaults.
   return detailed.length >= Math.min(3, normalized.length)
-    ? normalized.map((tc, i) => (isDetailedCase(tc) ? tc : defaultCases(appUrl)[i % 3]!))
+    ? normalized.map((tc, i) =>
+        isDetailedCase(tc) ? tc : defaultCases(appUrl)[i % 3]!,
+      )
     : defaultCases(appUrl);
 }
+
+const TECHNIQUE_PROMPT = `Apply classic test design techniques — do NOT only write one case per requirement.
+For EACH requirementKey, generate multiple cases using appropriate techniques:
+- HAPPY_PATH: valid / successful primary flow
+- EQUIVALENCE: valid vs invalid input classes (not just one example)
+- BOUNDARY: min/max/empty/length edges when inputs exist
+- DECISION_TABLE: combinations of conditions/rules when AC has rules
+- STATE_TRANSITION: before/after login, redirect, session states when relevant
+- NEGATIVE: invalid credentials, blocked navigation, error handling
+- ERROR_GUESSING: common defects (XSS in fields, double-submit, trimmed spaces) only if grounded in the UI under test
+Every case MUST include requirementKey and designTechnique.
+Aim for technique coverage across requirements, not a 1:1 REQ→TC mapping.`;
 
 export const testcaseAgent: AgentHandler<{ appUrl: string }, unknown> = {
   id: 'TEST_CASE_GENERATION',
@@ -170,10 +241,11 @@ export const testcaseAgent: AgentHandler<{ appUrl: string }, unknown> = {
     let raw: unknown;
     try {
       const llm = await ctx.llm.complete({
-        system: `You are a Senior QA writing executable manual test cases.
+        system: `You are a Senior QA applying formal test design techniques.
 HARD RULES:
 - Ground every case in the provided requirements only — never invent product features.
-- Prefer requirementKey when requirements include keys; reject unmapped inventiveness.
+- If no application URL is provided, use generic steps ("Open the application under test") — never invent a host such as saucedemo.
+- ${TECHNIQUE_PROMPT}
 - Short fields: scenario ≤120 chars, expected ≤200, steps 3–6 × ≤100 chars.
 - Return JSON only.`,
         prompt: `App: ${input.appUrl}
@@ -181,21 +253,33 @@ Requirements: ${JSON.stringify(requirements)?.slice(0, 10000)}
 Map: ${JSON.stringify(map)?.slice(0, 5000)}
 Functional: ${JSON.stringify(functional)?.slice(0, 3000)}
 
-Cover happy path, negative, and core features from requirements only.
+${TECHNIQUE_PROMPT}
+
 Return JSON only:
-{ "testCases": [{ "id": "TC-001", "module", "scenario", "preconditions", "steps": ["1. ...","2. ..."], "expected", "priority", "severity", "type", "automationCandidate": true, "requirementKey"?: string }] }`,
+{ "testCases": [{ "id": "TC-001", "module", "scenario", "preconditions", "steps": ["1. ...","2. ..."], "expected", "priority", "severity", "type", "automationCandidate": true, "requirementKey": "REQ-001", "designTechnique": "HAPPY_PATH"|"EQUIVALENCE"|"BOUNDARY"|"DECISION_TABLE"|"STATE_TRANSITION"|"NEGATIVE"|"ERROR_GUESSING" }] }`,
         json: true,
         model: 'reasoning',
         temperature: 0.2,
-        maxTokens: 3000,
+        maxTokens: 4500,
       });
       raw = JSON.parse(llm.text);
     } catch {
       raw = { testCases: defaultCases(input.appUrl) };
     }
 
-    const testCases = normalizeCases(raw, input.appUrl);
-    const payload = { testCases, generatedAt: new Date().toISOString() };
+    const normalized = normalizeCases(raw, input.appUrl);
+    const expanded = expandTechniqueCoverage({
+      requirements,
+      existingCases: normalized,
+      appUrl: input.appUrl,
+    });
+    const testCases =
+      expanded.testCases.length > 0 ? expanded.testCases : normalized;
+    const payload = {
+      testCases,
+      coverage: expanded.coverage,
+      generatedAt: new Date().toISOString(),
+    };
     const csv = toCsv(testCases);
 
     await ctx.putArtifactJson(ArtifactType.TEST_CASES_JSON, payload);
@@ -211,7 +295,7 @@ Return JSON only:
     await ctx.emit({
       type: 'testcases.ready',
       phase: 'TEST_CASES',
-      message: `Generated ${testCases.length} test cases`,
+      message: `Generated ${testCases.length} technique-based test cases`,
       data: { count: testCases.length },
     });
     return payload;

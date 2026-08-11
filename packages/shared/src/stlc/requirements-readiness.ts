@@ -25,6 +25,8 @@ export type StlcReadinessInput = {
   analysisStatus?: string | null;
   staleRequirementCount?: number | null;
   requirementsApprovedAt?: string | Date | null;
+  requirementsRejectedAt?: string | Date | null;
+  requirementsRejectionReason?: string | null;
   requirements: StlcRequirementRow[];
   openQuestions?: StlcQuestionRow[];
   /** Open business conflicts that still need a human decision */
@@ -35,6 +37,8 @@ export type StlcReadiness = {
   canApprove: boolean;
   canStartPlanning: boolean;
   approved: boolean;
+  rejected: boolean;
+  rejectionReason: string | null;
   blockers: string[];
   /** Plain checklist for UI — done vs pending exit criteria */
   checklist: Array<{ id: string; label: string; done: boolean }>;
@@ -161,11 +165,17 @@ export function evaluateRequirementsReadiness(
   const canApprove = blockers.length === 0;
   const approved = Boolean(input.requirementsApprovedAt);
   const canStartPlanning = approved;
+  const rejected = Boolean(input.requirementsRejectedAt) && !approved;
+  const rejectionReason = rejected
+    ? (input.requirementsRejectionReason?.trim() || null)
+    : null;
 
   return {
     canApprove,
     canStartPlanning,
     approved,
+    rejected,
+    rejectionReason,
     blockers,
     checklist,
     counts: {

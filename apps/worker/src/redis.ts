@@ -55,6 +55,28 @@ export class ExecutionCancelledError extends Error {
   }
 }
 
+export async function throwIfCancelled(executionId: string): Promise<void> {
+  const redis = getRedis();
+  if (await redis.get(`execution:${executionId}:cancel-flag`)) {
+    throw new ExecutionCancelledError(executionId);
+  }
+}
+
+export async function waitWhilePaused(executionId: string): Promise<void> {
+  const redis = getRedis();
+  const pauseKey = `execution:${executionId}:pause-flag`;
+  const cancelKey = `execution:${executionId}:cancel-flag`;
+  while (await redis.get(pauseKey)) {
+    if (await redis.get(cancelKey)) {
+      throw new ExecutionCancelledError(executionId);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  if (await redis.get(cancelKey)) {
+    throw new ExecutionCancelledError(executionId);
+  }
+}
+
 export async function waitForContinueSignal(
   executionId: string,
   timeoutMs = 30 * 60 * 1000,

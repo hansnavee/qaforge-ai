@@ -187,7 +187,7 @@ function reviewStatusLabel(status?: string | null) {
   if (!status) return 'Not reviewed';
   if (status === 'READY_FOR_TEST_DESIGN') return 'Ready';
   if (status === 'NEEDS_CLARIFICATION') return 'Needs clarification';
-  if (status === 'REVIEW_RECOMMENDED') return 'Review recommended';
+  if (status === 'REVIEW_RECOMMENDED') return 'Needs tester review';
   if (status === 'BLOCKED') return 'Blocked';
   return status;
 }
@@ -355,7 +355,7 @@ function ReadinessStrip({ summary }: { summary: ReviewSummaryModel }) {
       </div>
       <div className="rounded-lg border border-border/80 bg-bg/40 px-3 py-2.5">
         <div className="text-[11px] uppercase tracking-wide text-muted">
-          Ready for design
+          Ready after approve
         </div>
         <div className="mt-0.5 text-lg font-semibold tabular-nums text-success">
           {summary.byReviewStatus.readyForTestDesign}

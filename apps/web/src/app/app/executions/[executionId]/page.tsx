@@ -516,7 +516,7 @@ export default function ExecutionLivePage() {
               </Button>
               {execution?.projectId || execution?.project?.id ? (
                 <Link
-                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=test-board`}
+                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=cases`}
                 >
                   <Button size="lg" variant="secondary">
                     Open Test Board
@@ -553,7 +553,7 @@ export default function ExecutionLivePage() {
               </Button>
               {execution?.projectId || execution?.project?.id ? (
                 <Link
-                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=stlc&phase=ENVIRONMENT`}
+                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=cases`}
                 >
                   <Button size="lg" variant="secondary">
                     Open STLC Docs
@@ -590,7 +590,7 @@ export default function ExecutionLivePage() {
               </Button>
               {execution?.projectId || execution?.project?.id ? (
                 <Link
-                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=test-board`}
+                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=cases`}
                 >
                   <Button size="lg" variant="secondary">
                     Open Test Board
@@ -628,7 +628,7 @@ export default function ExecutionLivePage() {
               </Button>
               {execution?.projectId || execution?.project?.id ? (
                 <Link
-                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=test-board`}
+                  href={`/app/projects/${execution.projectId ?? execution.project?.id}?tab=cases`}
                 >
                   <Button size="lg" variant="secondary">
                     Open Test Board

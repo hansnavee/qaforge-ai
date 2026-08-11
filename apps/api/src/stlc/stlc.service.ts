@@ -166,7 +166,7 @@ export class StlcService {
         return awaiting ? 'READY_FOR_REVIEW' : 'RUNNING';
       }
       if (opts.phaseIndex < activeIdx) return 'ACCEPTED';
-      if (opts.phaseIndex > activeIdx) return 'LOCKED';
+      if (opts.phaseIndex > activeIdx) return 'READY_FOR_REVIEW';
     }
 
     return opts.baseStatus;
@@ -203,9 +203,10 @@ export class StlcService {
       });
       // Stage pointer alone is not an AI run — avoid fake "RUNNING".
       if (!latest && status === 'RUNNING') {
-        status = p.id === 'PLANNING' && requirementsApproved
-          ? 'READY_FOR_REVIEW'
-          : 'LOCKED';
+        status =
+          p.id === 'PLANNING' && requirementsApproved
+            ? 'READY_FOR_REVIEW'
+            : 'READY_FOR_REVIEW';
       }
       return {
         ...p,
@@ -263,10 +264,7 @@ export class StlcService {
       requirementsApproved: Boolean(project.requirementsApprovedAt),
     });
     if (!latest && status === 'RUNNING') {
-      status =
-        def.id === 'PLANNING' && project.requirementsApprovedAt
-          ? 'READY_FOR_REVIEW'
-          : 'LOCKED';
+      status = 'READY_FOR_REVIEW';
     }
 
     const isActiveGate = Boolean(
@@ -368,6 +366,7 @@ export class StlcService {
     orgId: string,
     projectId: string,
     phaseId: string,
+    body: unknown = {},
   ) {
     const def = getStlcPhase(phaseId);
     if (!def) throw new NotFoundException(`Unknown phase ${phaseId}`);
@@ -399,7 +398,7 @@ export class StlcService {
       case 'ENVIRONMENT':
         return this.executions.approveEnvironment(user, orgId, latest.id);
       case 'DATA':
-        return this.executions.approveTestData(user, orgId, latest.id);
+        return this.executions.approveTestData(user, orgId, latest.id, body);
       case 'EXECUTION':
         return this.executions.approveTestExecution(user, orgId, latest.id);
       case 'DEFECTS':
@@ -759,16 +758,28 @@ export class StlcService {
     ] as PhaseId[]) {
       delete docs[pid];
     }
+    if (docs.DATA) {
+      docs.DATA = {
+        ...docs.DATA,
+        status: 'READY_FOR_REVIEW',
+        approvedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+    }
 
     const execution = await prisma.execution.create({
       data: {
         projectId,
         status: ExecutionStatus.QUEUED,
-        phase: 'AUTHENTICATION',
+        phase: 'TEST_DATA',
         runMode: 'STLC',
         cycleNumber: nextCycle,
         parentExecutionId: parent.id,
         startedAt: new Date(),
+        selection: {
+          testCaseIds: [],
+          runKind: 'SYSTEM',
+        } as never,
       },
     });
 
@@ -790,6 +801,12 @@ export class StlcService {
           priority: tc.priority,
           severity: tc.severity,
           type: tc.type,
+          requirementKey: tc.requirementKey,
+          designTechnique: tc.designTechnique,
+          featureKey: tc.featureKey,
+          designMode: tc.designMode,
+          priorityLabel: tc.priorityLabel,
+          readyForExecution: tc.readyForExecution,
           testData: tc.testData as never,
         },
       });
@@ -837,9 +854,11 @@ export class StlcService {
       where: { id: projectId },
       data: {
         currentCycle: nextCycle,
-        stlcStage: 'EXECUTION',
+        stlcStage: 'DATA',
         stlcPhaseDocs: docs as never,
-        // Keep planning/design/env/data approvals; clear post-data gates
+        // Keep planning/design/env; human picks cases again on DATA
+        testDataApprovedAt: null,
+        testDataApprovedBy: null,
         testExecutionApprovedAt: null,
         testExecutionApprovedBy: null,
         defectsApprovedAt: null,
@@ -863,8 +882,8 @@ export class StlcService {
     await this.queue.publishExecutionEvent(execution.id, {
       executionId: execution.id,
       type: 'stlc.cycle_started',
-      phase: 'AUTHENTICATION',
-      message: `Cycle ${nextCycle} queued — reusing Design/Env/Data; re-running Execution → Sign-off`,
+      phase: 'TEST_DATA',
+      message: `Cycle ${nextCycle} queued — pick ready cases (High → Medium → Low), then system / post-fix execution`,
       timestamp: new Date().toISOString(),
       data: { cycleNumber: nextCycle, parentExecutionId: parent.id },
     });
@@ -873,7 +892,7 @@ export class StlcService {
       execution,
       cycleNumber: nextCycle,
       parentExecutionId: parent.id,
-      reusedApprovals: ['PLANNING', 'DESIGN', 'ENVIRONMENT', 'DATA'] as const,
+      reusedApprovals: ['PLANNING', 'DESIGN', 'ENVIRONMENT'] as const,
     };
   }
 }

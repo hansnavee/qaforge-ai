@@ -1,5 +1,9 @@
 import type { AgentHandler } from '@qaforge/agent-sdk';
-import { ArtifactType } from '@qaforge/shared';
+import {
+  ArtifactType,
+  expandTechniqueCoverage,
+  type DesignedTestCase,
+} from '@qaforge/shared';
 import { putBinaryArtifact } from '../context.js';
 import { testcaseAgent, type TestCase } from './testcase.agent.js';
 
@@ -9,17 +13,21 @@ type DesignInput = {
 
 export type DesignedCase = TestCase & {
   testData?: Record<string, string>;
+  testingLevel?: string;
 };
 
-function enrichWithData(cases: TestCase[]): DesignedCase[] {
+function enrichWithData(cases: DesignedTestCase[] | TestCase[]): DesignedCase[] {
   return cases.map((tc, i) => ({
     ...tc,
-    testData: {
-      username: `qa_user_${i + 1}`,
-      password: '<<manual>>',
-      sampleInput: `sample-${tc.id.toLowerCase()}`,
-      expectedStatus: tc.expected.slice(0, 80),
-    },
+    testData:
+      'testData' in tc && tc.testData
+        ? tc.testData
+        : {
+            username: `qa_user_${i + 1}`,
+            password: '<<manual>>',
+            sampleInput: `sample-${tc.id.toLowerCase()}`,
+            expectedStatus: tc.expected.slice(0, 80),
+          },
   }));
 }
 
@@ -34,7 +42,8 @@ export const designAgent: AgentHandler<
     await ctx.emit({
       type: 'design.planning',
       phase: 'TEST_DESIGN',
-      message: 'Designing test cases from strategy (data finalized in Stage 4)',
+      message:
+        'Designing technique-based cases (EP/BVA/decision/state/negative) from requirements',
     });
 
     const strategy = await ctx.getArtifactJson(ArtifactType.TEST_STRATEGY_JSON);
@@ -45,28 +54,30 @@ export const designAgent: AgentHandler<
       appUrl: input.appUrl,
     })) as { testCases?: TestCase[] };
 
-    let cases = enrichWithData(base?.testCases ?? []);
+    let draftCases: TestCase[] = base?.testCases ?? [];
 
     try {
       const llm = await ctx.llm.complete({
-        system: `You are a Senior QA Test Design agent.
+        system: `You are a Senior QA Test Design agent applying formal design techniques.
 HARD RULES (anti-hallucination):
 - Use ONLY the provided requirements + strategy. Do not invent features, pages, or APIs not present there.
-- Every case MUST map to a requirementKey from requirements when keys exist; drop cases that cannot.
+- Do NOT output only one case per requirement. Expand each requirement with techniques:
+  HAPPY_PATH, EQUIVALENCE, BOUNDARY, DECISION_TABLE, STATE_TRANSITION, NEGATIVE, ERROR_GUESSING (when applicable).
+- Every case MUST include requirementKey and designTechnique.
 - Keep fields short: scenario ≤120 chars, expected ≤200 chars, each step ≤100 chars, preconditions ≤160 chars.
 - Return JSON only matching the schema. No prose outside JSON.
-Required per case: module, scenario, preconditions, steps (3–6), expected, priority, severity, type, testingLevel, testData.`,
+Required per case: module, scenario, preconditions, steps (3–6), expected, priority, severity, type, testingLevel, designTechnique, requirementKey, testData.`,
         prompt: `App URL: ${input.appUrl}
 Strategy: ${JSON.stringify(strategy)?.slice(0, 4000)}
 Requirements: ${JSON.stringify(requirements)?.slice(0, 8000)}
-Draft cases: ${JSON.stringify(cases)?.slice(0, 6000)}
+Draft cases: ${JSON.stringify(draftCases)?.slice(0, 6000)}
 
-Return JSON only:
-{ "testCases": [{ "id","module","scenario","preconditions","steps":string[],"expected","priority","severity","type","testingLevel","automationCandidate":boolean,"testData":Record<string,string>,"requirementKey"?:string }] }`,
+Expand for technique coverage (not 1:1 REQ→TC). Return JSON only:
+{ "testCases": [{ "id","module","scenario","preconditions","steps":string[],"expected","priority","severity","type","testingLevel","automationCandidate":boolean,"testData":Record<string,string>,"requirementKey":string,"designTechnique":"HAPPY_PATH"|"EQUIVALENCE"|"BOUNDARY"|"DECISION_TABLE"|"STATE_TRANSITION"|"NEGATIVE"|"ERROR_GUESSING" }] }`,
         json: true,
         model: 'reasoning',
         temperature: 0.2,
-        maxTokens: 3500,
+        maxTokens: 4500,
       });
       const parsed = JSON.parse(llm.text) as { testCases?: DesignedCase[] };
       if (Array.isArray(parsed.testCases) && parsed.testCases.length) {
@@ -81,6 +92,13 @@ Return JSON only:
           severity: tc.severity || 'medium',
           type: tc.type || 'functional',
           automationCandidate: Boolean(tc.automationCandidate ?? true),
+          requirementKey: tc.requirementKey ?? null,
+          designTechnique: tc.designTechnique ?? null,
+          featureKey: tc.featureKey ?? null,
+          designMode: tc.designMode ?? null,
+          priorityLabel: tc.priorityLabel ?? null,
+          readyForExecution: Boolean(tc.readyForExecution),
+          testingLevel: tc.testingLevel,
           testData: tc.testData ?? {
             username: `qa_user_${i + 1}`,
             password: '<<manual>>',
@@ -93,12 +111,21 @@ Return JSON only:
             tc.expected.length >= 20,
         );
         if (richEnough.length >= Math.min(3, next.length)) {
-          cases = next;
+          draftCases = next;
         }
       }
     } catch {
-      /* keep heuristic enrichment */
+      /* keep draft from testcase agent */
     }
+
+    const expanded = expandTechniqueCoverage({
+      requirements,
+      existingCases: draftCases,
+      appUrl: input.appUrl,
+    });
+    const cases = enrichWithData(
+      expanded.testCases.length ? expanded.testCases : draftCases,
+    );
 
     const design = {
       source: 'test-design-agent',
@@ -107,6 +134,7 @@ Return JSON only:
           ? (strategy as { summary?: string }).summary
           : undefined,
       testCases: cases,
+      coverage: expanded.coverage,
     };
 
     const testData = {
@@ -121,7 +149,7 @@ Return JSON only:
     await ctx.putArtifactJson(ArtifactType.TEST_CASES_JSON, { testCases: cases });
 
     const csvHeader =
-      'id,module,scenario,preconditions,steps,expected,priority,severity,type,testData\n';
+      'id,module,scenario,preconditions,steps,expected,priority,severity,type,requirementKey,designTechnique,testData\n';
     const csvBody = cases
       .map((c) => {
         const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
@@ -130,11 +158,13 @@ Return JSON only:
           c.module,
           c.scenario,
           c.preconditions,
-          c.steps.join(' | '),
+          Array.isArray(c.steps) ? c.steps.join(' | ') : '',
           c.expected,
           c.priority,
           c.severity,
           c.type,
+          c.requirementKey ?? '',
+          c.designTechnique ?? '',
           JSON.stringify(c.testData ?? {}),
         ]
           .map((x) => escape(String(x)))
@@ -154,8 +184,11 @@ Return JSON only:
     await ctx.emit({
       type: 'design.ready',
       phase: 'TEST_DESIGN',
-      message: `Designed ${cases.length} test case(s); Stage 4 will finalize data`,
-      data: { count: cases.length },
+      message: `Designed ${cases.length} technique-based case(s)`,
+      data: {
+        count: cases.length,
+        coverage: design.coverage,
+      },
     });
 
     return { testCases: cases, testData: cases.map((c) => c.testData) };

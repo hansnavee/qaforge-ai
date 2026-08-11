@@ -56,6 +56,9 @@ export function computeReadinessScore(
 /**
  * BLOCKED only for critical unresolved business gaps that prevent safe test design.
  * Cosmetic / minor UI gaps → REVIEW_RECOMMENDED.
+ *
+ * AI analysis never auto-marks READY_FOR_TEST_DESIGN — that requires tester
+ * approval (phase Approve or an explicit ready action).
  */
 export function deriveStatuses(opts: {
   openQuestions: ReviewQuestionDraft[];
@@ -75,31 +78,18 @@ export function deriveStatuses(opts: {
     (q) => q.priority === 'HIGH' && isBusinessCategory(q.category),
   );
   const hasAnyHigh = open.some((q) => q.priority === 'HIGH');
-  const onlyLowMedium =
-    open.length > 0 &&
-    open.every((q) => q.priority === 'MEDIUM' || q.priority === 'LOW');
-  const cosmeticOnly =
-    opts.openQuestions.length > 0 &&
-    opts.openQuestions.every((q) => isCosmeticQuestion(q));
 
-  let businessReadiness: BusinessReadiness = 'READY';
+  let businessReadiness: BusinessReadiness = 'NEEDS_CLARIFICATION';
   if (hasCriticalBlock) businessReadiness = 'BLOCKED';
-  else if (hasHighBusiness || hasAnyHigh) {
-    businessReadiness = 'NEEDS_CLARIFICATION';
+  else if (!hasHighBusiness && !hasAnyHigh) {
+    // Business gaps look clear enough for a tester to review — not approved yet
+    businessReadiness = 'READY';
   }
 
-  let reviewStatus: RequirementReviewStatus = 'READY_FOR_TEST_DESIGN';
+  let reviewStatus: RequirementReviewStatus = 'REVIEW_RECOMMENDED';
   if (hasCriticalBlock) reviewStatus = 'BLOCKED';
   else if (hasHighBusiness || hasAnyHigh) {
     reviewStatus = 'NEEDS_CLARIFICATION';
-  } else if (
-    onlyLowMedium ||
-    cosmeticOnly ||
-    opts.functionalCompleteness === 'INCOMPLETE'
-  ) {
-    reviewStatus = 'REVIEW_RECOMMENDED';
-  } else if (opts.functionalCompleteness === 'PARTIAL' && open.length > 0) {
-    reviewStatus = 'REVIEW_RECOMMENDED';
   }
 
   return { businessReadiness, reviewStatus };

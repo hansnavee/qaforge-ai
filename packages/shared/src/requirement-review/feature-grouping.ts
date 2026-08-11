@@ -42,6 +42,14 @@ const FEATURE_DEFS: FeatureDef[] = [
       /create an account/,
       /unique email/,
     ],
+    // Login-only wording must not land in Signup/Registration
+    exclude: [
+      /post-login/,
+      /successful login/,
+      /invalid credential/,
+      /redirected to the dashboard/,
+      /email and password/,
+    ],
   },
   {
     name: 'User Login',
@@ -52,12 +60,22 @@ const FEATURE_DEFS: FeatureDef[] = [
     weight: 10,
     patterns: [
       /\blogin\b/,
-      /sign in/,
+      /\blog\s*in\b/,
+      /sign[\s-]?in/,
       /invalid credential/,
       /failed login/,
+      /email and password/,
+      /post-login/,
+      /redirected to the dashboard/,
       /account.*lock/,
     ],
-    exclude: [/password reset/, /forgot password/, /\botp\b/],
+    exclude: [
+      /password reset/,
+      /forgot password/,
+      /\botp\b/,
+      /sign up/,
+      /create an account/,
+    ],
   },
   {
     name: 'Password Reset',

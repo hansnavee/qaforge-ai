@@ -551,7 +551,8 @@ export function listPhaseSummaries(
       if (p.index < stageIdx && stored.status !== 'FAILED') {
         status = 'ACCEPTED';
       } else if (p.index > stageIdx) {
-        status = 'LOCKED';
+        // Browseable ahead of gate — not editable/acceptable until stage reaches it
+        status = 'READY_FOR_REVIEW';
       } else {
         status = stored.status;
       }
@@ -560,6 +561,9 @@ export function listPhaseSummaries(
     } else if (p.index === stageIdx) {
       // Current phase unlocked — worker may still be preparing docs
       status = 'RUNNING';
+    } else {
+      // Ahead of gate — browseable, accept still gated by permissions API
+      status = 'READY_FOR_REVIEW';
     }
     return {
       id: p.id,

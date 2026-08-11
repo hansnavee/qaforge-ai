@@ -22,9 +22,11 @@ import type { SessionUser } from '../auth/auth';
 import { ProjectsService } from './projects.service';
 import { RequirementExtractionService } from './requirement-extraction.service';
 import { RequirementReviewService } from './requirement-review.service';
+import { parseBody } from '../common/parse-body';
 import {
   answerReviewQuestionSchema,
   createManualRequirementSchema,
+  rejectRequirementsSchema,
   updateManualRequirementSchema,
 } from '@qaforge/shared';
 
@@ -253,6 +255,22 @@ export class ProjectsController {
     return this.review.approveRequirements(user, orgId, projectId);
   }
 
+  @Post(':projectId/reject-requirements')
+  rejectRequirements(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    const parsed = parseBody(rejectRequirementsSchema, body);
+    return this.review.rejectRequirements(
+      user,
+      orgId,
+      projectId,
+      parsed.reason,
+    );
+  }
+
   @Get(':projectId/review-questions')
   reviewQuestions(
     @CurrentUser() user: SessionUser,
@@ -341,6 +359,16 @@ export class ProjectsController {
     @Param('projectId') projectId: string,
   ) {
     return this.projects.get(user.id, orgId, projectId);
+  }
+
+  @Post(':projectId/environment')
+  saveEnvironment(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    return this.projects.saveEnvironment(user, orgId, projectId, body);
   }
 
   @Patch(':projectId')

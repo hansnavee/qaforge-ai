@@ -42,13 +42,13 @@ export default function SignupPage() {
       <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-8 shadow-soft">
         <div className="mb-6">
           <div className="text-sm font-semibold">
-            QAForge <span className="text-accent">AI</span>
+            QAForge
           </div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight">
             Create your account
           </h1>
           <p className="mt-1 text-sm text-muted">
-            Start forging automation in minutes.
+            Create an account to manage test cases and runs.
           </p>
         </div>
         <form className="space-y-4" onSubmit={onSubmit}>

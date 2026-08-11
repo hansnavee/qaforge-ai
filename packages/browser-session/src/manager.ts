@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   chromium,
+  firefox,
+  webkit,
   type Browser,
   type BrowserContext,
   type Page,
@@ -35,19 +37,38 @@ export class BrowserSessionManager {
   async launch(opts: {
     executionId: string;
     startUrl: string;
+    headless?: boolean;
+    browser?: 'chromium' | 'firefox' | 'webkit';
   }): Promise<{ sessionId: string; viewerHint: string }> {
     const sessionId = randomUUID();
-    const headless = process.env.BROWSER_HEADLESS !== 'false';
-
-    const browser = await chromium.launch({
-      headless,
-      timeout: 60_000,
-      args: ['--no-sandbox', '--disable-dev-shm-usage'],
-    });
+    const headless =
+      typeof opts.headless === 'boolean'
+        ? opts.headless
+        : process.env.BROWSER_HEADLESS !== 'false';
+    const kind = opts.browser ?? 'chromium';
+    const slowMo = headless
+      ? 0
+      : Math.max(0, Number(process.env.PLAYWRIGHT_SLOWMO ?? 250) || 250);
+    const launchArgs = headless
+      ? ['--no-sandbox', '--disable-dev-shm-usage']
+      : ['--start-maximized'];
+    const chromiumOpts = { headless, timeout: 60_000, slowMo, args: launchArgs };
+    let browser: Browser;
+    try {
+      if (kind === 'firefox') {
+        browser = await firefox.launch({ headless, timeout: 60_000, slowMo });
+      } else if (kind === 'webkit') {
+        browser = await webkit.launch({ headless, timeout: 60_000, slowMo });
+      } else {
+        browser = await chromium.launch(chromiumOpts);
+      }
+    } catch {
+      browser = await chromium.launch(chromiumOpts);
+    }
     const videoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qaforge-video-'));
     // Intentionally no storageState / disk cookie persistence.
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 720 },
+      viewport: headless ? { width: 1280, height: 720 } : null,
       acceptDownloads: false,
       recordVideo: {
         dir: videoDir,
@@ -194,6 +215,23 @@ export class BrowserSessionManager {
       await fs.rm(videoDir, { recursive: true, force: true }).catch(() => undefined);
       return null;
     }
+  }
+
+  async flushAndCollectVideos(
+    sessionId: string,
+  ): Promise<Array<{ filename: string; body: Buffer }>> {
+    const session = this.requireSession(sessionId);
+    await session.page.close().catch(() => undefined);
+    await session.context.close().catch(() => undefined);
+    const files: Array<{ filename: string; body: Buffer }> = [];
+    if (!session.videoDir) return files;
+    const names = await fs.readdir(session.videoDir).catch(() => [] as string[]);
+    for (const name of names) {
+      if (!/\.(webm|mp4)$/i.test(name)) continue;
+      const body = await fs.readFile(path.join(session.videoDir, name));
+      files.push({ filename: name, body });
+    }
+    return files;
   }
 
   async destroy(sessionId: string): Promise<void> {

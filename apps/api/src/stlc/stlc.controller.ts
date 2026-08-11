@@ -61,8 +61,9 @@ export class StlcController {
     @Param('orgId') orgId: string,
     @Param('projectId') projectId: string,
     @Param('phaseId') phaseId: string,
+    @Body() body: unknown,
   ) {
-    return this.stlc.acceptPhase(user, orgId, projectId, phaseId);
+    return this.stlc.acceptPhase(user, orgId, projectId, phaseId, body);
   }
 
   @Get('orgs/:orgId/projects/:projectId/stlc/phases/:phaseId/download')

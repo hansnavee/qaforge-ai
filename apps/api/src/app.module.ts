@@ -10,6 +10,7 @@ import { ArtifactsModule } from './artifacts/artifacts.module';
 import { BillingModule } from './billing/billing.module';
 import { GithubModule } from './github/github.module';
 import { Phase1Module } from './phase1/phase1.module';
+import { RunnersModule } from './runners/runners.module';
 import { StlcModule } from './stlc/stlc.module';
 import { HealthController } from './health.controller';
 
@@ -26,6 +27,7 @@ import { HealthController } from './health.controller';
     BillingModule,
     GithubModule,
     Phase1Module,
+    RunnersModule,
     StlcModule,
   ],
   controllers: [HealthController],

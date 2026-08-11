@@ -10,13 +10,19 @@ import {
   Role,
   createProjectSchema,
   createRequirementPasteSchema,
+  isLikelyProductionUrl,
+  isUsableAppUrl,
+  normalizeStoredAppUrl,
+  saveEnvironmentSchema,
   updateProjectSchema,
 } from '@qaforge/shared';
 import { z } from 'zod';
 import { AuditService } from '../common/audit.service';
+import { encrypt, hasEncryptionKey } from '../common/encryption';
 import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
+import { QueueService } from '../queue/queue.service';
 import {
   isAllowedRequirementFile,
   parseRequirementFile,
@@ -56,6 +62,7 @@ export class ProjectsService {
   constructor(
     private readonly orgs: OrgsService,
     private readonly audit: AuditService,
+    private readonly queue: QueueService,
   ) {}
 
   private async requireProject(
@@ -238,9 +245,10 @@ export class ProjectsService {
       where: { projectId, analysisStale: true },
     });
 
-    const { requirements, _count, ...rest } = project;
+    const { requirements, _count, encryptedConfig, ...rest } = project;
     return {
       ...rest,
+      credentialsConfigured: Boolean(encryptedConfig),
       requirementCount: _count.requirements,
       extractedRequirementCount: _count.extractedRequirements,
       questionCount: _count.requirementQuestions,
@@ -299,12 +307,12 @@ export class ProjectsService {
   }
 
   async softDelete(user: SessionUser, orgId: string, projectId: string) {
-    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
-    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
+    await this.orgs.requireMembership(user.id, orgId, Role.ADMIN);
+    await this.requireProject(user.id, orgId, projectId, Role.ADMIN);
 
-    // Hard delete — cascades requirements, questions, features, relations
-    await prisma.$transaction(async (tx) => {
-      await tx.project.delete({ where: { id: projectId } });
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { deletedAt: new Date() },
     });
 
     await this.audit.log({
@@ -440,5 +448,96 @@ export class ProjectsService {
         parsedText: originalContent.trim() || null,
       },
     });
+  }
+
+  async saveEnvironment(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    await this.requireProject(user.id, orgId, projectId, Role.MEMBER);
+    const existing = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { encryptedConfig: true },
+    });
+    const input = parseBody(saveEnvironmentSchema, body);
+    const appUrl = normalizeStoredAppUrl(input.appUrl);
+    const loginUrl = normalizeStoredAppUrl(input.loginUrl) ?? appUrl;
+    const productionWarning = appUrl ? isLikelyProductionUrl(appUrl) : false;
+    if (productionWarning && !input.confirmProduction) {
+      throw new BadRequestException(
+        'This URL looks like production. Use a QA/UAT/staging URL, or set confirmProduction=true to proceed.',
+      );
+    }
+
+    let encryptedConfig: string | undefined;
+    if (input.username || input.password) {
+      if (!hasEncryptionKey()) {
+        throw new BadRequestException(
+          'ENCRYPTION_KEY is not configured — cannot store credentials',
+        );
+      }
+      encryptedConfig = encrypt(
+        JSON.stringify({
+          username: input.username ?? '',
+          password: input.password ?? '',
+          environment: 'non-prod',
+        }),
+      );
+    }
+
+    await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        appUrl,
+        loginUrl,
+        browserMode: input.browserMode ?? 'HEADLESS',
+        ...(encryptedConfig ? { encryptedConfig } : {}),
+      },
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'project.environment.save',
+      resource: 'project',
+      resourceId: projectId,
+      metadata: {
+        appUrl,
+        browserMode: input.browserMode ?? 'HEADLESS',
+        credentialsSaved: Boolean(encryptedConfig),
+        productionWarning,
+      },
+    });
+
+    const latest = await prisma.execution.findFirst({
+      where: { projectId, runMode: { in: ['STLC', 'PHASE1'] } },
+      orderBy: [{ cycleNumber: 'desc' }, { createdAt: 'desc' }],
+      select: { id: true },
+    });
+    let groundingQueued = false;
+    if (latest && isUsableAppUrl(appUrl)) {
+      const caseCount = await prisma.testCase.count({
+        where: { executionId: latest.id },
+      });
+      if (caseCount > 0) {
+        await this.queue.enqueueGroundCases(projectId, latest.id);
+        groundingQueued = true;
+      }
+    }
+
+    return {
+      ok: true,
+      appUrl,
+      loginUrl,
+      browserMode: input.browserMode ?? 'HEADLESS',
+      credentialsConfigured: Boolean(
+        encryptedConfig || existing?.encryptedConfig,
+      ),
+      productionWarning,
+      groundingQueued,
+    };
   }
 }

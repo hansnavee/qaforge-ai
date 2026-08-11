@@ -39,14 +39,12 @@ export default function LoginPage() {
     <main className="flex min-h-screen items-center justify-center bg-bg px-4">
       <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-8 shadow-soft">
         <div className="mb-6">
-          <div className="text-sm font-semibold">
-            QAForge <span className="text-accent">AI</span>
-          </div>
+          <div className="text-sm font-semibold">QAForge</div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight">
             Welcome back
           </h1>
           <p className="mt-1 text-sm text-muted">
-            Sign in to continue orchestrating quality.
+            Sign in to manage test cases, runs, and reports.
           </p>
         </div>
         <form className="space-y-4" onSubmit={onSubmit}>

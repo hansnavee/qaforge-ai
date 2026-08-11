@@ -3,8 +3,15 @@ import {
   AgentId,
   ArtifactType,
   buildReviewedRequirementsArtifact,
+  buildTechniqueCoverage,
   ExecutionPhase,
   ExecutionStatus,
+  isUsableAppUrl,
+  normalizeBrowserMode,
+  normalizePriorityLabel,
+  parseRequirementsFromArtifact,
+  sortCasesByPriority,
+  suggestExecutionSelection,
 } from '@qaforge/shared';
 import type { AgentContext, AgentHandler } from '@qaforge/agent-sdk';
 import { BrowserSessionManager } from '@qaforge/browser-session';
@@ -25,6 +32,7 @@ import { testdataAgent } from './agents/testdata.agent.js';
 import { environmentAgent } from './agents/environment.agent.js';
 import { authenticationAgent } from './agents/authentication.agent.js';
 import { discoveryAgent } from './agents/discovery.agent.js';
+import { groundExecutionCases } from './ground-cases-job.js';
 import { functionalAgent } from './agents/functional.agent.js';
 import { apiAgent } from './agents/api.agent.js';
 import { bugAgent } from './agents/bug.agent.js';
@@ -35,6 +43,9 @@ import { qualityAgent } from './agents/quality.agent.js';
 import { githubActionsAgent } from './agents/github-actions.agent.js';
 import { signoffAgent } from './agents/signoff.agent.js';
 import { persistPhaseDocument } from './stlc-phase-docs.js';
+import { executeTestSteps } from './execute-test-steps.js';
+
+export { executeTestSteps };
 
 const MAX_CLARIFY_ROUNDS = 3;
 const browserManager = new BrowserSessionManager();
@@ -136,84 +147,6 @@ function requirementsSeemClear(
   return questions.length === 0;
 }
 
-async function executeTestSteps(
-  page: import('playwright').Page,
-  steps: string[],
-  appUrl: string,
-  testData?: Record<string, string> | null,
-): Promise<void> {
-  const data = testData ?? {};
-  for (const rawStep of steps) {
-    let s = rawStep.trim();
-    for (const [k, v] of Object.entries(data)) {
-      s = s.split(`{{${k}}}`).join(v).split(`\${${k}}`).join(v);
-    }
-    const lower = s.toLowerCase();
-
-    if (/^navigate|^open|^go to|^visit/i.test(s)) {
-      const urlMatch = s.match(/https?:\/\/\S+/);
-      await page.goto(urlMatch?.[0] ?? appUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 45_000,
-      });
-      continue;
-    }
-
-    if (/click/i.test(lower)) {
-      const quoted = s.match(/['"]([^'"]+)['"]/);
-      const label = quoted?.[1] ?? s.replace(/click\s*/i, '').trim();
-      const locator = page
-        .getByRole('button', { name: new RegExp(label, 'i') })
-        .or(page.getByRole('link', { name: new RegExp(label, 'i') }))
-        .or(page.getByText(new RegExp(label, 'i')))
-        .first();
-      await locator.click({ timeout: 15_000 });
-      continue;
-    }
-
-    if (/type|enter|fill|input/i.test(lower)) {
-      const quoted = [...s.matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1]);
-      let value = quoted[quoted.length - 1] ?? data.sampleInput ?? 'test';
-      if (lower.includes('user') && data.username) value = data.username;
-      if (lower.includes('pass') && data.password && data.password !== '<<manual>>') {
-        value = data.password;
-      }
-      const fieldHint = quoted[0] && quoted.length > 1 ? quoted[0] : undefined;
-      if (fieldHint) {
-        await page
-          .getByLabel(new RegExp(fieldHint, 'i'))
-          .or(page.getByPlaceholder(new RegExp(fieldHint, 'i')))
-          .first()
-          .fill(value, { timeout: 10_000 })
-          .catch(async () => {
-            await page.locator('input:visible').first().fill(value);
-          });
-      } else {
-        await page.locator('input:visible').first().fill(value, {
-          timeout: 10_000,
-        });
-      }
-      continue;
-    }
-
-    if (/assert|expect|verify|should|check/i.test(lower)) {
-      const text = s
-        .replace(/^(assert|expect|verify|should|check)\s*/i, '')
-        .trim();
-      if (text) {
-        await page
-          .getByText(new RegExp(text.slice(0, 40), 'i'))
-          .first()
-          .waitFor({ state: 'visible', timeout: 10_000 })
-          .catch(() => undefined);
-      }
-      continue;
-    }
-
-    await page.waitForTimeout(400);
-  }
-}
-
 type ManualFailure = {
   testCaseId: string;
   testResultId: string;
@@ -242,7 +175,12 @@ async function runManualSuite(opts: {
   passLabel: string;
 }): Promise<{ passed: number; failed: number; failures: ManualFailure[] }> {
   const page = await browserManager.getPage(opts.browserSessionId);
-  const appUrl = opts.project.appUrl ?? 'https://example.com';
+  const appUrl = opts.project.appUrl;
+  if (!appUrl) {
+    throw new Error(
+      'Application URL is required before execution — set it on the Environment step.',
+    );
+  }
   let passed = 0;
   let failed = 0;
   const failures: ManualFailure[] = [];
@@ -512,7 +450,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
             filename: d.filename,
             parsedText: d.originalContent || d.parsedText,
           })),
-          appUrl: project.appUrl ?? 'https://example.com',
+          appUrl: project.appUrl ?? '',
         },
       );
 
@@ -704,7 +642,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         phase: ExecutionPhase.TEST_DESIGN,
         agentId: AgentId.TEST_DESIGN,
       },
-      { appUrl: project.appUrl },
+      { appUrl: project.appUrl ?? '' },
     )) as { testCases?: DesignedCase[] };
 
     const cases = designOut?.testCases ?? [];
@@ -724,6 +662,17 @@ export async function runStlcExecution(executionId: string): Promise<void> {
           priority: tc.priority,
           severity: tc.severity,
           type: tc.type,
+          requirementKey: tc.requirementKey ?? null,
+          designTechnique: tc.designTechnique
+            ? String(tc.designTechnique)
+            : null,
+          featureKey: tc.featureKey ?? null,
+          designMode:
+            tc.designMode === 'UI_GROUNDED' ? 'UI_GROUNDED' : 'GENERIC',
+          priorityLabel:
+            tc.priorityLabel ?? normalizePriorityLabel(tc.priority),
+          readyForExecution: Boolean(tc.readyForExecution),
+          caseStatus: tc.readyForExecution ? 'READY' : 'DRAFT',
           testData: (tc.testData ?? null) as never,
         },
       });
@@ -757,10 +706,16 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       };
     });
 
+    const techniqueCoverage = buildTechniqueCoverage(
+      cases,
+      parseRequirementsFromArtifact(
+        await ctx.getArtifactJson(ArtifactType.REQUIREMENTS_JSON),
+      ),
+    );
     const designValidation = {
       passed: cases.length > 0,
       blockers: cases.length ? [] : ['No test cases generated'],
-      summary: `${cases.length} case(s) with CRUD coverage matrix — ready for review`,
+      summary: `${cases.length} technique-based case(s) across ${techniqueCoverage.requirementCount} requirement(s) — ${techniqueCoverage.requirementsWithMultiTechnique} with multi-technique coverage`,
     };
     await persistPhaseDocument({
       projectId: project.id,
@@ -781,6 +736,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
           ),
         })),
         crudMatrix,
+        techniqueCoverage,
         testingLevelsCovered: [
           'SMOKE',
           'SANITY',
@@ -831,7 +787,10 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         environment: project.environment,
         framework: project.framework,
         language: project.language,
-        browserMode: 'CLOUD_HEADLESS',
+        browserMode:
+          normalizeBrowserMode(project.browserMode) === 'HEADED'
+            ? 'CLOUD_HEADED'
+            : 'CLOUD_HEADLESS',
         hasEncryptedConfig: Boolean(project.encryptedConfig),
       },
     )) as {
@@ -873,44 +832,79 @@ export async function runStlcExecution(executionId: string): Promise<void> {
 
     gates = await loadGates();
 
+    const liveEnv = await prisma.project.findUniqueOrThrow({
+      where: { id: project.id },
+      select: {
+        appUrl: true,
+        loginUrl: true,
+        browserMode: true,
+        encryptedConfig: true,
+      },
+    });
+    await groundExecutionCases({
+      projectId: project.id,
+      executionId,
+      browserManager,
+      ctx,
+    });
+
     // Stage 5 — Test Data
     if (!gates.testDataApprovedAt) {
     const dbCasesForData = await prisma.testCase.findMany({
       where: { executionId },
       orderBy: { createdAt: 'asc' },
     });
-    const dataOut = (await runAgent(
-      ctx,
-      {
-        agent: testdataAgent,
-        phase: ExecutionPhase.TEST_DATA,
-        agentId: AgentId.TEST_DATA,
-      },
-      {
-        appUrl: project.appUrl,
-        cases: dbCasesForData.map((tc) => ({
-          id: tc.id,
-          externalId: tc.externalId,
-          module: tc.module,
-          scenario: tc.scenario,
-          type: tc.type,
-          testData:
-            tc.testData && typeof tc.testData === 'object'
-              ? (tc.testData as Record<string, string>)
-              : null,
-        })),
-      },
-    )) as { cases?: Array<{ testCaseId: string; data: Record<string, string> }> };
+    const needsGenerate = dbCasesForData.some((tc) => {
+      if (!tc.testData || typeof tc.testData !== 'object') return true;
+      return Object.keys(tc.testData as object).length === 0;
+    });
+    let dataOut: {
+      cases?: Array<{ testCaseId: string; data: Record<string, string> }>;
+    } = {
+      cases: dbCasesForData.map((tc) => ({
+        testCaseId: tc.id,
+        data:
+          tc.testData && typeof tc.testData === 'object'
+            ? (tc.testData as Record<string, string>)
+            : {},
+      })),
+    };
+    if (needsGenerate) {
+      dataOut = (await runAgent(
+        ctx,
+        {
+          agent: testdataAgent,
+          phase: ExecutionPhase.TEST_DATA,
+          agentId: AgentId.TEST_DATA,
+        },
+        {
+          appUrl: liveEnv.appUrl ?? project.appUrl,
+          cases: dbCasesForData.map((tc) => ({
+            id: tc.id,
+            externalId: tc.externalId,
+            module: tc.module,
+            scenario: tc.scenario,
+            type: tc.type,
+            testData:
+              tc.testData && typeof tc.testData === 'object'
+                ? (tc.testData as Record<string, string>)
+                : null,
+          })),
+        },
+      )) as {
+        cases?: Array<{ testCaseId: string; data: Record<string, string> }>;
+      };
 
-    for (const row of dataOut?.cases ?? []) {
-      const match = dbCasesForData.find(
-        (tc) => tc.externalId === row.testCaseId || tc.id === row.testCaseId,
-      );
-      if (!match) continue;
-      await prisma.testCase.update({
-        where: { id: match.id },
-        data: { testData: row.data as never },
-      });
+      for (const row of dataOut?.cases ?? []) {
+        const match = dbCasesForData.find(
+          (tc) => tc.externalId === row.testCaseId || tc.id === row.testCaseId,
+        );
+        if (!match) continue;
+        await prisma.testCase.update({
+          where: { id: match.id },
+          data: { testData: row.data as never },
+        });
+      }
     }
 
     await prisma.projectRequirementSnapshot.create({
@@ -951,7 +945,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       type: 'stlc.awaiting_data_approval',
       phase: ExecutionPhase.TEST_DATA,
       message:
-        'Test data ready — awaiting human approval before Test Execution',
+        'Pick ready cases to run (High → Medium → Low across features), then Accept',
       data: { count: dataOut?.cases?.length ?? 0 },
     });
     throw new AwaitingHumanError(ExecutionStatus.AWAITING_DATA_APPROVAL);
@@ -963,19 +957,38 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       });
     }
 
+    // Confirm latest Environment URL and rewrite generic steps before run.
+    await groundExecutionCases({
+      projectId: project.id,
+      executionId,
+      browserManager,
+      ctx,
+    });
+
     // 5. Authentication pause
     await setExecution(executionId, {
       status: ExecutionStatus.AWAITING_LOGIN,
       phase: ExecutionPhase.AUTHENTICATION,
     });
 
-    const targetAppUrl =
-      (typeof project.appUrl === 'string' && project.appUrl.trim()) ||
-      (typeof project.loginUrl === 'string' && project.loginUrl.trim()) ||
-      'https://example.com';
+    const liveForRun = await prisma.project.findUniqueOrThrow({
+      where: { id: project.id },
+      select: { appUrl: true, loginUrl: true, browserMode: true },
+    });
+    const targetAppUrl = isUsableAppUrl(liveForRun.appUrl)
+      ? String(liveForRun.appUrl).trim()
+      : isUsableAppUrl(liveForRun.loginUrl)
+        ? String(liveForRun.loginUrl).trim()
+        : '';
+    if (!targetAppUrl) {
+      throw new Error(
+        'Application URL is required before execution — set it on the Environment step.',
+      );
+    }
     const targetLoginUrl =
-      (typeof project.loginUrl === 'string' && project.loginUrl.trim()) ||
+      (typeof liveForRun.loginUrl === 'string' && liveForRun.loginUrl.trim()) ||
       targetAppUrl;
+    const headed = normalizeBrowserMode(liveForRun.browserMode) === 'HEADED';
 
     const authResult = (await runAgent(
       ctx,
@@ -989,6 +1002,7 @@ export async function runStlcExecution(executionId: string): Promise<void> {
         startUrl: targetLoginUrl,
         loginUrl: targetLoginUrl,
         appUrl: targetAppUrl,
+        headless: !headed,
         waitForContinueSignal: () => waitForContinueSignal(executionId),
         onSessionLaunched: (sessionId: string) => {
           sessionRef.id = sessionId;
@@ -1053,10 +1067,44 @@ export async function runStlcExecution(executionId: string): Promise<void> {
       phase: ExecutionPhase.MANUAL_TEST,
     });
 
-    const dbCases = await prisma.testCase.findMany({
+    const allBoard = await prisma.testCase.findMany({
       where: { executionId },
       orderBy: { createdAt: 'asc' },
     });
+    const execRow = await prisma.execution.findUnique({
+      where: { id: executionId },
+      select: { selection: true },
+    });
+    const selection = (execRow?.selection ?? null) as {
+      testCaseIds?: string[];
+      runKind?: 'SPRINT' | 'REGRESSION' | 'SYSTEM';
+      featureKey?: string | null;
+    } | null;
+    const readyBoard = allBoard.filter((c) => c.readyForExecution);
+    const suggested = suggestExecutionSelection(readyBoard, {
+      runKind: selection?.runKind ?? 'SPRINT',
+      featureKey: selection?.featureKey ?? null,
+    });
+    const selectedIds = new Set(
+      selection?.testCaseIds?.length ? selection.testCaseIds : suggested.testCaseIds,
+    );
+    const dbCases = sortCasesByPriority(
+      readyBoard.filter((c) => selectedIds.has(c.id)),
+    );
+
+    for (const skipped of allBoard.filter((c) => !selectedIds.has(c.id))) {
+      await prisma.testResult.create({
+        data: {
+          projectId: project.id,
+          executionId,
+          testCaseId: skipped.id,
+          status: 'SKIPPED',
+          message: skipped.readyForExecution
+            ? 'Not selected for this run'
+            : 'Not marked ready for execution',
+        },
+      });
+    }
 
     const manual = await runManualSuite({
       ctx,

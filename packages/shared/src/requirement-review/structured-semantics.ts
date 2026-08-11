@@ -546,11 +546,21 @@ export function extractStructuredSemanticsHeuristic(
     confidence = 0.9;
   } else if (
     /\bredirect\b/.test(t) &&
-    /\b(registration|register|login|sign in)\b/.test(t)
+    /\b(registration|register|sign up)\b/.test(t) &&
+    !/\b(log\s*in|sign[\s-]?in|successful login)\b/.test(t)
   ) {
     object = 'user_account';
     action = 'navigate';
     capability = 'registration_redirect';
+    confidence = 0.93;
+  } else if (
+    /\bredirect\b/.test(t) &&
+    /\b(log\s*in|sign[\s-]?in|successful login|dashboard)\b/.test(t) &&
+    !/\b(register|registration|sign up|create an account)\b/.test(t)
+  ) {
+    object = 'user_account';
+    action = 'navigate';
+    capability = 'user_login';
     confidence = 0.93;
   } else if (/\b(register|registration|sign up|create an account)\b/.test(t)) {
     object = 'user_account';
@@ -558,7 +568,7 @@ export function extractStructuredSemanticsHeuristic(
     capability = 'user_registration';
     confidence = 0.93;
   } else if (
-    (/\b(login|sign[\s-]?in)\b/.test(t) ||
+    (/\b(log\s*in|login|sign[\s-]?in)\b/.test(t) ||
       /\b(invalid )?credentials?\b/.test(t) ||
       /\binvalid login\b/.test(t)) &&
     !/\b(register|registration|sign up|create an account)\b/.test(t)

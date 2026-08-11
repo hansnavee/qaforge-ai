@@ -9,7 +9,7 @@ type DiscoveryInput = {
   appUrl: string;
 };
 
-async function crawlSameOrigin(page: Page, appUrl: string, maxLinks = 15) {
+export async function crawlSameOrigin(page: Page, appUrl: string, maxLinks = 15) {
   const origin = new URL(appUrl).origin;
   const visited = new Set<string>();
   const queue: string[] = [page.url()];

@@ -46,6 +46,7 @@ async function bootstrap() {
   // JSON / urlencoded for Nest routes; preserve rawBody for Stripe webhooks
   expressApp.use(
     express.json({
+      limit: '12mb',
       verify: (req, _res, buf) => {
         (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
       },

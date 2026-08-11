@@ -3,6 +3,7 @@ import {
   createProjectSchema,
   createOrganizationSchema,
   extractionAiResponseSchema,
+  saveEnvironmentSchema,
   PLAN_LIMITS,
   ArtifactType,
   AgentId,
@@ -27,6 +28,14 @@ describe('@qaforge/shared schemas', () => {
       environment: 'QA',
     });
     expect(parsed.appUrl).toContain('https://');
+  });
+
+  it('allows environment save with empty or placeholder URL', () => {
+    expect(saveEnvironmentSchema.parse({ appUrl: '' }).appUrl).toBe('');
+    expect(saveEnvironmentSchema.parse({ appUrl: 'https://' }).appUrl).toBe(
+      'https://',
+    );
+    expect(saveEnvironmentSchema.parse({}).appUrl).toBe('');
   });
 
   it('allows project create without appUrl', () => {

@@ -51,6 +51,17 @@ describe('structured semantic extraction', () => {
     expect(s.requirementType).toBe('FUNCTIONAL');
   });
 
+  it('post-login dashboard redirect → USER_LOGIN not registration', () => {
+    const s = extractStructuredSemanticsHeuristic({
+      requirementKey: 'R3b',
+      title: 'Post-Login Redirect',
+      description:
+        'After successful login, the user should be redirected to the dashboard.',
+    });
+    expect(s.capability).toBe('user_login');
+    expect(s.capability).not.toBe('registration_redirect');
+  });
+
   it('OTP expiration → SYSTEM / OTP / BUSINESS_RULE', () => {
     const s = extractStructuredSemanticsHeuristic({
       requirementKey: 'R4',

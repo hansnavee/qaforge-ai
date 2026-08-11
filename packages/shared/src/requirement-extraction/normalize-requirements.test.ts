@@ -55,6 +55,24 @@ describe('generateSemanticTitle', () => {
       ),
     ).toBe('Add Product');
   });
+
+  it('titles post-login redirect as login, not registration/signup', () => {
+    expect(
+      generateSemanticTitle(
+        'After successful login, the user should be redirected to the dashboard.',
+        'User Login',
+        'FUNCTIONAL',
+      ),
+    ).toBe('Post-Login Redirect');
+
+    expect(
+      generateSemanticTitle(
+        'The user should be able to log in using their email and password.',
+        'User Login',
+        'FUNCTIONAL',
+      ),
+    ).toBe('User Login');
+  });
 });
 
 describe('classifyRequirementType', () => {

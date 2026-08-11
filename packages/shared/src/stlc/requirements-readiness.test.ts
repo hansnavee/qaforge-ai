@@ -92,4 +92,17 @@ describe('evaluateRequirementsReadiness', () => {
     });
     expect(r.checklist.every((c) => c.done)).toBe(true);
   });
+
+  it('surfaces rejection without unlocking planning', () => {
+    const r = evaluateRequirementsReadiness({
+      analysisStatus: 'STALE',
+      requirements: baseReqs,
+      requirementsRejectedAt: new Date().toISOString(),
+      requirementsRejectionReason: 'Signup coverage is wrong for login-only scope',
+    });
+    expect(r.rejected).toBe(true);
+    expect(r.rejectionReason).toMatch(/Signup coverage/i);
+    expect(r.canStartPlanning).toBe(false);
+    expect(r.canApprove).toBe(false);
+  });
 });

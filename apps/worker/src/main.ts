@@ -5,9 +5,38 @@ import { getRedis } from './redis.js';
 import { runExecution, type ExecutionJobData } from './orchestrator.js';
 import { runPhase1Execution } from './phase1-orchestrator.js';
 
-export type JobData = ExecutionJobData & { runMode?: string };
+export type JobData = ExecutionJobData & {
+  runMode?: string;
+  projectId?: string;
+};
 
 async function processJob(job: Job<JobData>): Promise<void> {
+  if (job.name === 'ground-cases') {
+    const projectId = (job.data as { projectId?: string }).projectId;
+    const executionId = job.data.executionId;
+    if (!projectId || !executionId) {
+      throw new Error('ground-cases job missing projectId/executionId');
+    }
+    const { groundExecutionCases } = await import('./ground-cases-job.js');
+    const result = await groundExecutionCases({ projectId, executionId });
+    console.log(
+      `[worker] Grounded ${result.grounded} case(s) for ${executionId} url=${result.appUrl}`,
+    );
+    return;
+  }
+
+  if (job.name === 'ai-execute-run') {
+    const executionId = job.data.executionId;
+    if (!executionId) {
+      throw new Error('ai-execute-run job missing executionId');
+    }
+    const { runAiExecuteJob } = await import('./ai-execute-job.js');
+    console.log(`[worker] AI execute ${executionId}`);
+    await runAiExecuteJob(job.data);
+    console.log(`[worker] AI execute finished ${executionId}`);
+    return;
+  }
+
   if (job.name !== 'run-execution') {
     console.warn(`[worker] Ignoring unknown job name: ${job.name}`);
     return;

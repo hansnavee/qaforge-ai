@@ -96,14 +96,39 @@ export function generateSemanticTitle(
   ) {
     return 'One Account Per Email';
   }
-  if (/\bredirect/.test(d) && /\b(login|registration)\b/.test(d)) return 'Registration Redirect';
-  if (/\b(create an account|register)\b/.test(d) && !/\blogin\b/.test(d)) {
+  // Post-login redirect must never be titled as registration/signup
+  if (
+    /\bredirect/.test(d) &&
+    /\b(log\s*in|sign\s*in|successful login|dashboard)\b/.test(d) &&
+    !/\b(register|registration|sign up|create an account)\b/.test(d)
+  ) {
+    return 'Post-Login Redirect';
+  }
+  if (
+    /\bredirect/.test(d) &&
+    /\b(register|registration|sign up)\b/.test(d) &&
+    !/\b(log\s*in|sign\s*in|successful login)\b/.test(d)
+  ) {
+    return 'Registration Redirect';
+  }
+  if (
+    /\b(create an account|register|sign up)\b/.test(d) &&
+    !/\b(log\s*in|sign\s*in|login)\b/.test(d)
+  ) {
     return 'User Registration';
   }
-  if (/\binvalid\b/.test(d) && /\b(credential|login|error)\b/.test(d)) {
+  if (
+    /\binvalid\b/.test(d) &&
+    /\b(credential|log\s*in|login|error)\b/.test(d)
+  ) {
     return 'Invalid Login Error';
   }
-  if (/\blogin\b/.test(d) && type !== 'BUSINESS_RULE') return 'User Login';
+  if (
+    /\b(log\s*in|sign\s*in|login)\b/.test(d) &&
+    type !== 'BUSINESS_RULE'
+  ) {
+    return 'User Login';
+  }
 
   // Password / OTP
   if (/\bexpire/.test(d) && /\botp\b/.test(d)) return 'OTP Expiration';

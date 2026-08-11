@@ -221,7 +221,7 @@ function refineCapability(
     return 'user_registration';
   }
   if (
-    /\b(login|sign in)\b/.test(t) &&
+    /\b(log\s*in|login|sign\s*in|sign-in)\b/.test(t) &&
     !/\b(register|registration|sign up|create an account)\b/.test(t)
   ) {
     return 'user_login';

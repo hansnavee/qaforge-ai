@@ -20,9 +20,11 @@ import { CurrentUser } from '../auth/auth.decorator';
 import { SessionAuthGuard } from '../auth/auth.guard';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
+import { parseBody } from '../common/parse-body';
 import {
   answerReviewQuestionSchema,
   createManualRequirementSchema,
+  rejectRequirementsSchema,
   updateManualRequirementSchema,
 } from '@qaforge/shared';
 import { ProjectsService } from './projects.service';
@@ -264,6 +266,22 @@ export class ProjectsCompatController {
     return this.review.approveRequirements(user, orgId, projectId);
   }
 
+  @Post(':projectId/reject-requirements')
+  async rejectRequirements(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    const parsed = parseBody(rejectRequirementsSchema, body);
+    return this.review.rejectRequirements(
+      user,
+      orgId,
+      projectId,
+      parsed.reason,
+    );
+  }
+
   @Get(':projectId/review-questions')
   async reviewQuestions(
     @CurrentUser() user: SessionUser,
@@ -352,6 +370,16 @@ export class ProjectsCompatController {
   ) {
     const orgId = await this.defaultOrgId(user.id);
     return this.projects.get(user.id, orgId, projectId);
+  }
+
+  @Post(':projectId/environment')
+  async saveEnvironment(
+    @CurrentUser() user: SessionUser,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    const orgId = await this.defaultOrgId(user.id);
+    return this.projects.saveEnvironment(user, orgId, projectId, body);
   }
 
   @Patch(':projectId')

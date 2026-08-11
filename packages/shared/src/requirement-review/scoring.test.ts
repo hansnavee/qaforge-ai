@@ -59,11 +59,12 @@ describe('requirement review scoring', () => {
     expect(reviewStatus).toBe('REVIEW_RECOMMENDED');
   });
 
-  it('is READY_FOR_TEST_DESIGN when no high gaps remain', () => {
-    const { reviewStatus } = deriveStatuses({
+  it('keeps REVIEW_RECOMMENDED when gaps are clear — Ready requires tester approval', () => {
+    const { reviewStatus, businessReadiness } = deriveStatuses({
       openQuestions: [],
       functionalCompleteness: 'COMPLETE',
     });
-    expect(reviewStatus).toBe('READY_FOR_TEST_DESIGN');
+    expect(reviewStatus).toBe('REVIEW_RECOMMENDED');
+    expect(businessReadiness).toBe('READY');
   });
 });

@@ -20,6 +20,7 @@ model User {
   accounts      Account[]
   memberships   Membership[]
   auditLogs     AuditLog[]
+  localRunners  LocalRunner[]
 }
 
 model Session {
@@ -72,13 +73,34 @@ model Organization {
   githubConnection GitHubConnection?
   usageEvents      UsageEvent[]
   auditLogs        AuditLog[]
+  caseFields       CaseField[]
+  localRunners     LocalRunner[]
+}
+
+/// Paired laptop Playwright runner for Local AI execution (no Redis/DB on the PC).
+model LocalRunner {
+  id             String       @id @default(cuid())
+  organizationId String
+  userId         String
+  name           String       @default("Local runner")
+  tokenHash      String       @unique
+  lastSeenAt     DateTime?
+  userAgent      String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@index([lastSeenAt])
 }
 
 model Membership {
   id             String       @id @default(cuid())
   organizationId String
   userId         String
-  role           String // OWNER ADMIN MEMBER VIEWER
+  role           String // OWNER ADMIN LEAD MEMBER TESTER VIEWER
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -113,11 +135,17 @@ model Project {
   framework       String                 @default("PLAYWRIGHT")
   language        String                 @default("TYPESCRIPT")
   environment     String                 @default("QA")
+  /// HEADLESS | HEADED — browser mode for execution
+  browserMode     String                 @default("HEADLESS")
   encryptedConfig String?
   requirementText String?                @db.Text
   /// Human gate after Step 2 review — required before STLC Test Planning
   requirementsApprovedAt DateTime?
   requirementsApprovedBy String?
+  /// Latest human rejection of requirements pack (cleared on Approve)
+  requirementsRejectedAt DateTime?
+  requirementsRejectedBy String?
+  requirementsRejectionReason String?    @db.Text
   /// Human gate after Stage 2 test strategy — required before Test Design
   testPlanApprovedAt DateTime?
   testPlanApprovedBy String?
@@ -170,6 +198,11 @@ model Project {
   testCases            TestCase[]
   testResults          TestResult[]
   bugs                 Bug[]
+  tcmsFolders          TcmsFolder[]
+  caseFields           CaseField[]
+  caseTemplates        CaseTemplate[]
+  automatedScripts     AutomatedScript[]
+  automationReports    AutomationReport[]
 
   @@index([organizationId])
 }
@@ -404,12 +437,15 @@ model Execution {
   /// STLC cycle index (1 = full planning→signoff; 2+ reuse design and re-exec)
   cycleNumber       Int             @default(1)
   parentExecutionId String?
+  /// { testCaseIds: string[], runKind: SPRINT | REGRESSION | SYSTEM }
+  selection         Json?
   scores            Json?
   errorSummary      String?         @db.Text
   startedAt         DateTime?
   finishedAt        DateTime?
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
+  deletedAt         DateTime?
   project           Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   parentExecution   Execution?      @relation("ExecutionCycles", fields: [parentExecutionId], references: [id], onDelete: SetNull)
   childExecutions   Execution[]     @relation("ExecutionCycles")
@@ -420,6 +456,7 @@ model Execution {
   testCases         TestCase[]
   testResults       TestResult[]
   bugs              Bug[]
+  automationReports AutomationReport[]
 
   @@index([projectId, createdAt])
   @@index([projectId, cycleNumber])
@@ -427,10 +464,33 @@ model Execution {
   @@index([parentExecutionId])
 }
 
+/// TCMS folder tree (separate from requirements FeatureGroup).
+model TcmsFolder {
+  id             String       @id @default(cuid())
+  projectId      String
+  parentId       String?
+  name           String
+  sortOrder      Int          @default(0)
+  /// Optional link to a requirements FeatureGroup key for AI-designed cases.
+  featureKey     String?
+  /// Optional link to a requirement key when this is a synced subfolder.
+  requirementKey String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  project        Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent         TcmsFolder?  @relation("TcmsFolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children       TcmsFolder[] @relation("TcmsFolderTree")
+  testCases      TestCase[]
+
+  @@index([projectId, parentId])
+  @@index([projectId, featureKey])
+}
+
 model TestCase {
   id            String       @id @default(cuid())
   projectId     String
   executionId   String?
+  folderId      String?
   externalId    String
   module        String?
   scenario      String
@@ -440,17 +500,80 @@ model TestCase {
   priority      String?
   severity      String?
   type          String?
+  /// Linked requirement key from Phase 1 (REQ-001, …)
+  requirementKey String?
+  /// Design technique: EQUIVALENCE | BOUNDARY | DECISION_TABLE | STATE_TRANSITION | NEGATIVE | ERROR_GUESSING | HAPPY_PATH
+  designTechnique String?
+  /// Feature group key from Requirements (FG-001, …)
+  featureKey    String?
+  /// GENERIC (no live URL) | UI_GROUNDED (explored against the app)
+  designMode    String?
+  /// HIGH | MEDIUM | LOW — execution order is always High then Medium then Low
+  priorityLabel String?
+  /// Human marks a case ready before AI may execute it
+  readyForExecution Boolean @default(false)
+  /// DRAFT | APPROVED | READY — Ready is the only status execution may run
+  caseStatus    String       @default("DRAFT")
   testData      Json?
+  customFields  Json?
+  templateId    String?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
+  deletedAt     DateTime?
   project       Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
   execution     Execution?   @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  folder        TcmsFolder?  @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  template      CaseTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
   results       TestResult[]
   bugs          Bug[]
+  automatedScripts AutomatedScript[]
 
   @@index([projectId])
   @@index([executionId])
+  @@index([projectId, folderId])
   @@index([projectId, externalId])
+  @@index([projectId, requirementKey])
+  @@index([projectId, featureKey])
+  @@index([projectId, readyForExecution])
+  @@index([projectId, caseStatus])
+  @@index([templateId])
+}
+
+model CaseField {
+  id             String        @id @default(cuid())
+  organizationId String
+  /// null = all projects in the org; set = that project only
+  projectId      String?
+  key            String
+  label          String
+  /// TEXT | TEXTAREA | DROPDOWN | CHECKBOX | NUMBER
+  type           String        @default("TEXT")
+  options        Json?
+  required       Boolean       @default(false)
+  sortOrder      Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project        Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+  @@index([projectId])
+}
+
+model CaseTemplate {
+  id        String     @id @default(cuid())
+  projectId String
+  name      String
+  isDefault Boolean    @default(false)
+  fieldKeys Json
+  defaults  Json?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testCases TestCase[]
+
+  @@index([projectId])
 }
 
 model TestResult {
@@ -458,10 +581,12 @@ model TestResult {
   projectId    String
   executionId  String?
   testCaseId   String
-  status       String // PASSED FAILED SKIPPED ERROR
+  status       String // PASSED FAILED BLOCKED SKIPPED ERROR
   message      String?   @db.Text
   durationMs   Int?
   evidenceKeys Json?
+  /// HUMAN | AI
+  executedBy   String?   @default("HUMAN")
   createdAt    DateTime  @default(now())
   project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   execution    Execution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
@@ -526,6 +651,46 @@ model Artifact {
 
   @@index([executionId, type])
   @@index([storageKey])
+}
+
+model AutomatedScript {
+  id         String   @id @default(cuid())
+  projectId  String
+  testCaseId String
+  path       String
+  source     String   @db.Text
+  language   String   @default("TYPESCRIPT")
+  framework  String   @default("PLAYWRIGHT")
+  lastRunId  String?
+  lastStatus String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testCase   TestCase @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, testCaseId])
+  @@index([projectId])
+}
+
+model AutomationReport {
+  id          String    @id @default(cuid())
+  projectId   String
+  executionId String
+  name        String
+  status      String
+  passed      Int       @default(0)
+  failed      Int       @default(0)
+  blocked     Int       @default(0)
+  skipped     Int       @default(0)
+  pending     Int       @default(0)
+  htmlKey     String?
+  zipKey      String?
+  createdAt   DateTime  @default(now())
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+  @@index([executionId])
 }
 
 /// Durable bytes for artifacts when R2/local disk is ephemeral (Railway).

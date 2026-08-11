@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Badge } from '@/components/Badge';
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
@@ -60,6 +61,9 @@ export function RequirementsPhaseShell({
   blockers,
   onApprove,
   approvePending,
+  onReject,
+  rejectPending,
+  rejectionReason,
   onContinuePlanning,
   children,
 }: {
@@ -73,9 +77,15 @@ export function RequirementsPhaseShell({
   blockers?: string[];
   onApprove?: () => void;
   approvePending?: boolean;
+  onReject?: (reason: string) => void;
+  rejectPending?: boolean;
+  rejectionReason?: string | null;
   onContinuePlanning?: () => void;
   children: React.ReactNode;
 }) {
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
+
   return (
     <div className="space-y-4">
       <Card className="space-y-4 border-accent/25 bg-accent/5">
@@ -96,6 +106,9 @@ export function RequirementsPhaseShell({
             <Badge>{extractedCount} extracted</Badge>
             <Badge tone="accent">Analysis: {analysisLabel}</Badge>
             {approved ? <Badge tone="success">Approved</Badge> : null}
+            {!approved && rejectionReason ? (
+              <Badge tone="warning">Rejected — re-analyze</Badge>
+            ) : null}
           </div>
         </div>
 
@@ -121,6 +134,19 @@ export function RequirementsPhaseShell({
           })}
         </nav>
       </Card>
+
+      {!approved && rejectionReason ? (
+        <Card className="space-y-2 border-warning/40 bg-warning/10">
+          <h3 className="text-sm font-medium text-warning">
+            Requirements rejected — back in the analysis loop
+          </h3>
+          <p className="text-sm text-fg whitespace-pre-wrap">{rejectionReason}</p>
+          <p className="text-xs text-muted">
+            Address the reason above, then Run Fresh Analysis. Planning stays
+            locked until you Approve again.
+          </p>
+        </Card>
+      ) : null}
 
       {step === 'source' ? (
         <Card className="space-y-4">
@@ -209,13 +235,28 @@ export function RequirementsPhaseShell({
           ) : null}
           <div className="flex flex-wrap gap-2">
             {!approved ? (
-              <Button
-                size="sm"
-                disabled={!canApprove || approvePending}
-                onClick={onApprove}
-              >
-                Approve requirements
-              </Button>
+              <>
+                <Button
+                  size="sm"
+                  disabled={!canApprove || approvePending || rejectPending}
+                  onClick={onApprove}
+                >
+                  Approve requirements
+                </Button>
+                {onReject ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={approvePending || rejectPending}
+                    onClick={() => {
+                      setRejectReason('');
+                      setRejectOpen(true);
+                    }}
+                  >
+                    Reject
+                  </Button>
+                ) : null}
+              </>
             ) : (
               <Button size="sm" onClick={onContinuePlanning}>
                 Continue to Planning →
@@ -230,6 +271,62 @@ export function RequirementsPhaseShell({
             </Button>
           </div>
         </Card>
+      ) : null}
+
+      {rejectOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/50"
+            aria-label="Close dialog"
+            onClick={() => !rejectPending && setRejectOpen(false)}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="relative z-10 w-full max-w-md rounded-xl border border-border bg-bg p-5 shadow-xl"
+          >
+            <h2 className="text-base font-semibold">Reject requirements</h2>
+            <p className="mt-2 text-sm text-muted">
+              Planning stays locked. Enter why you are rejecting, then return to
+              the analysis loop (Review → Run Fresh Analysis → Approve).
+            </p>
+            <label className="mt-4 block text-xs font-medium uppercase tracking-wide text-muted">
+              Reason (required)
+            </label>
+            <textarea
+              className="mt-1.5 min-h-[100px] w-full rounded-lg border border-border bg-bg-elevated px-3 py-2 text-sm text-fg outline-none focus:border-accent"
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              placeholder="e.g. Source is login-only but analysis included signup behavior"
+              disabled={rejectPending}
+            />
+            <div className="mt-5 flex justify-end gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setRejectOpen(false)}
+                disabled={rejectPending}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                disabled={rejectPending || !rejectReason.trim()}
+                onClick={() => {
+                  const reason = rejectReason.trim();
+                  if (!reason || !onReject) return;
+                  onReject(reason);
+                  setRejectOpen(false);
+                  setRejectReason('');
+                }}
+              >
+                {rejectPending ? 'Rejecting…' : 'Reject and return to review'}
+              </Button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {children}

@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type { Response } from 'express';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { R2ArtifactStore } from '@qaforge/agent-sdk';
 import { prisma } from '@qaforge/database';
 import {
@@ -13,13 +13,51 @@ import {
   ExecutionStatus,
   Role,
   buildPhaseDocState,
+  caseFieldWriteSchema,
+  caseTemplateWriteSchema,
   clarifyExecutionSchema,
+  createTcmsFolderSchema,
+  aiExecuteRunSchema,
+  createTcmsRunSchema,
+  cycleResultCounts,
+  deleteTcmsFolderSchema,
   evaluateRequirementsReadiness,
+  generateTestCasesSchema,
+  proposeTcmsRunSchema,
+  importTestCasesSchema,
+  isLikelyProductionUrl,
+  isUsableAppUrl,
   markPhaseAccepted,
+  normalizeCaseStatus,
+  normalizePriorityLabel,
+  normalizeStoredAppUrl,
+  priorityFromLabel,
+  readyFromCaseStatus,
+  rowsFromCsv,
+  rowsFromJson,
+  rowsFromSpreadsheetMl,
+  sortCasesByPriority,
+  suggestExecutionSelection,
+  testCaseBulkCreateSchema,
+  testCaseBulkDeleteSchema,
+  testCaseBulkUpdateSchema,
+  testCaseRestoreSchema,
+  testCaseReadySchema,
+  testCaseStatusSchema,
+  testCaseWriteSchema,
+  testResultWriteSchema,
+  updateTcmsFolderSchema,
+  updateTcmsRunSchema,
   upsertPhaseDoc,
+  type CaseStatus,
+  type DesignTechnique,
+  type ImportedCaseRow,
   type StlcPhaseDocsMap,
 } from '@qaforge/shared';
 import {
+  buildTcmsTcrHtml,
+  buildTcmsTcrPdf,
+  buildTcmsTcrWord,
   buildZipPackage,
   renderHtmlReport,
   rowsToCsv,
@@ -29,30 +67,33 @@ import {
 } from '@qaforge/report-engine';
 import { z } from 'zod';
 import { AuditService } from '../common/audit.service';
+import { decrypt, encrypt, hasEncryptionKey } from '../common/encryption';
 import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
 import { QueueService } from '../queue/queue.service';
+import { RunnersService } from '../runners/runners.service';
+import { AiGenerateCasesService } from './ai-generate-cases.service';
 import {
   isAllowedRequirementFile,
   parseRequirementFile,
 } from './parse-requirement-file';
+import {
+  buildTcrPayload,
+  cycleName,
+  descendantFolderIds,
+  ensureTcmsFolders,
+  isReadyCase,
+  isWaitingLocalRunner,
+  mapFolderDto,
+  publicSelection,
+  readSelection,
+  summarizeCycle,
+  type TcmsSelection,
+} from './tcms-support';
 
 const updateRequirementsSchema = z.object({
   requirementText: z.string().min(1),
-});
-
-const testCaseWriteSchema = z.object({
-  externalId: z.string().min(1).max(64).optional(),
-  module: z.string().max(200).nullable().optional(),
-  scenario: z.string().min(1).max(2000).optional(),
-  preconditions: z.string().max(8000).nullable().optional(),
-  steps: z.array(z.string().max(2000)).max(100).optional(),
-  expected: z.string().min(1).max(8000).optional(),
-  priority: z.string().max(40).nullable().optional(),
-  severity: z.string().max(40).nullable().optional(),
-  type: z.string().max(80).nullable().optional(),
-  testData: z.record(z.string(), z.string()).nullable().optional(),
 });
 
 const STLC_RUN_MODES = ['STLC', 'PHASE1'] as const;
@@ -63,6 +104,8 @@ export class Phase1Service {
     private readonly orgs: OrgsService,
     private readonly queue: QueueService,
     private readonly audit: AuditService,
+    private readonly aiGenerate: AiGenerateCasesService,
+    private readonly runners: RunnersService,
   ) {}
 
   private async resolveOrgId(userId: string, projectId: string) {
@@ -544,7 +587,7 @@ export class Phase1Service {
         take: 5,
       }),
       prisma.testCase.findMany({
-        where: { projectId },
+        where: { projectId, deletedAt: null },
         orderBy: { createdAt: 'desc' },
         take: 200,
       }),
@@ -849,27 +892,224 @@ export class Phase1Service {
     return this.listTestCases(userId, orgId, projectId);
   }
 
-  async listTestCases(userId: string, orgId: string, projectId: string) {
-    await this.requireProject(userId, orgId, projectId);
+  private async latestStlcExecutionId(projectId: string) {
+    const latest = await prisma.execution.findFirst({
+      where: { projectId, runMode: { in: [...STLC_RUN_MODES] } },
+      orderBy: [{ cycleNumber: 'desc' }, { createdAt: 'desc' }],
+      select: { id: true },
+    });
+    return latest?.id ?? null;
+  }
+
+  private statusFields(input: {
+    caseStatus?: CaseStatus;
+    readyForExecution?: boolean;
+  }) {
+    const caseStatus = normalizeCaseStatus(
+      input.caseStatus,
+      input.readyForExecution,
+    );
+    return {
+      caseStatus,
+      readyForExecution: readyFromCaseStatus(caseStatus),
+    };
+  }
+
+  private async decorateCases<
+    T extends {
+      featureKey: string | null;
+      requirementKey: string | null;
+      readyForExecution: boolean;
+      caseStatus?: string | null;
+      folderId?: string | null;
+      module?: string | null;
+    },
+  >(projectId: string, cases: T[]) {
+    const [features, requirements, folders] = await Promise.all([
+      prisma.featureGroup.findMany({
+        where: { projectId },
+        select: { featureKey: true, name: true },
+      }),
+      prisma.requirement.findMany({
+        where: { projectId },
+        select: { requirementKey: true, title: true },
+      }),
+      prisma.tcmsFolder.findMany({ where: { projectId } }),
+    ]);
+    const featureName = new Map(features.map((f) => [f.featureKey, f.name]));
+    const requirementTitle = new Map(
+      requirements.map((r) => [r.requirementKey, r.title]),
+    );
+    const folderById = new Map(folders.map((f) => [f.id, f]));
+    return cases.map((c) => {
+      const folder = c.folderId ? folderById.get(c.folderId) : null;
+      const parent = folder?.parentId
+        ? folderById.get(folder.parentId)
+        : null;
+      return {
+        ...c,
+        caseStatus: normalizeCaseStatus(c.caseStatus, c.readyForExecution),
+        featureName: c.featureKey ? featureName.get(c.featureKey) ?? null : null,
+        requirementTitle: c.requirementKey
+          ? requirementTitle.get(c.requirementKey) ?? null
+          : null,
+        folderId: c.folderId ?? null,
+        folderName: folder?.name ?? null,
+        parentFolderId: folder?.parentId ?? null,
+        parentFolderName: parent?.name ?? null,
+      };
+    });
+  }
+
+  private async folderPlacement(
+    projectId: string,
+    folderId: string | null | undefined,
+  ): Promise<{
+    folderId?: string | null;
+    featureKey?: string | null;
+    module?: string;
+    requirementKey?: string;
+  }> {
+    if (folderId === undefined) return {};
+    if (folderId === null) {
+      return { folderId: null as string | null };
+    }
+    const folder = await prisma.tcmsFolder.findFirst({
+      where: { id: folderId, projectId },
+    });
+    if (!folder) throw new BadRequestException('Folder not found');
+    const parent = folder.parentId
+      ? await prisma.tcmsFolder.findFirst({
+          where: { id: folder.parentId, projectId },
+        })
+      : null;
+    return {
+      folderId: folder.id,
+      featureKey: folder.featureKey ?? parent?.featureKey ?? null,
+      module: parent?.name ?? folder.name,
+      ...(folder.requirementKey
+        ? { requirementKey: folder.requirementKey }
+        : {}),
+    };
+  }
+
+  private async loadManualRun(projectId: string, executionId: string) {
+    const execution = await prisma.execution.findFirst({
+      where: { id: executionId, projectId, runMode: 'MANUAL' },
+    });
+    if (!execution) throw new NotFoundException('Run not found');
+    return execution;
+  }
+
+  private assertCycleWritable(execution: {
+    status: string;
+    runMode: string;
+  }) {
+    if (execution.runMode !== 'MANUAL') {
+      throw new BadRequestException('Not a TCMS execution cycle');
+    }
+    if (
+      execution.status !== ExecutionStatus.RUNNING &&
+      execution.status !== ExecutionStatus.PENDING
+    ) {
+      throw new BadRequestException('This cycle is locked');
+    }
+    if ('deletedAt' in execution && execution.deletedAt) {
+      throw new BadRequestException('This run is archived');
+    }
+  }
+
+  private assertResultComment(status: string, message?: string | null) {
+    if (
+      (status === 'FAILED' || status === 'BLOCKED') &&
+      !message?.trim()
+    ) {
+      throw new BadRequestException(
+        'A comment is required for Fail and Blocked',
+      );
+    }
+  }
+
+  private async resolveRunCaseIds(
+    projectId: string,
+    input: { testCaseIds: string[]; folderIds: string[] },
+  ) {
+    const fromCases = [...new Set(input.testCaseIds)];
+    const folderIds = [...new Set(input.folderIds)];
+    let fromFolders: string[] = [];
+    if (folderIds.length) {
+      const folders = await prisma.tcmsFolder.findMany({
+        where: { projectId },
+        select: { id: true, parentId: true, name: true },
+      });
+      const known = new Set(folders.map((f) => f.id));
+      const missing = folderIds.filter((id) => !known.has(id));
+      if (missing.length) {
+        throw new BadRequestException('One or more suites were not found');
+      }
+      const expanded = descendantFolderIds(folders, folderIds);
+      const inSuites = await prisma.testCase.findMany({
+        where: { projectId, folderId: { in: expanded }, deletedAt: null },
+      });
+      fromFolders = inSuites.filter((c) => isReadyCase(c)).map((c) => c.id);
+      if (!fromFolders.length && !fromCases.length) {
+        throw new BadRequestException('Those suites have no Ready cases');
+      }
+    }
+    const uniqueIds = [...new Set([...fromCases, ...fromFolders])];
+    if (!uniqueIds.length) {
+      throw new BadRequestException('Select at least one Ready test case');
+    }
     const cases = await prisma.testCase.findMany({
-      where: { projectId },
+      where: { projectId, id: { in: uniqueIds }, deletedAt: null },
+    });
+    if (cases.length !== uniqueIds.length) {
+      throw new BadRequestException('One or more test cases were not found');
+    }
+    const notReady = cases.filter((c) => !isReadyCase(c));
+    if (notReady.length) {
+      throw new BadRequestException('Only Ready cases can be added to a cycle');
+    }
+    return uniqueIds;
+  }
+
+  async listTestCases(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    includeArchived = false,
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    await ensureTcmsFolders(projectId);
+    const executionId = await this.latestStlcExecutionId(projectId);
+    const cases = await prisma.testCase.findMany({
+      where: {
+        projectId,
+        ...(includeArchived ? {} : { deletedAt: null }),
+        ...(executionId
+          ? { OR: [{ executionId }, { executionId: null }] }
+          : {}),
+      },
       orderBy: { createdAt: 'asc' },
     });
-    // Keep DESIGN phase doc aligned with persisted cases (browse/edit after Accept).
     if (cases.length) {
       void this.syncDesignDocFromCases(projectId).catch(() => undefined);
     }
-    return cases;
+    return this.decorateCases(projectId, cases);
   }
 
   private async syncDesignDocFromCases(projectId: string) {
+    const executionId = await this.latestStlcExecutionId(projectId);
     const [project, cases] = await Promise.all([
       prisma.project.findUnique({
         where: { id: projectId },
         select: { stlcPhaseDocs: true },
       }),
       prisma.testCase.findMany({
-        where: { projectId },
+        where: {
+          ...(executionId ? { executionId } : { projectId }),
+          deletedAt: null,
+        },
         orderBy: { createdAt: 'asc' },
       }),
     ]);
@@ -893,6 +1133,12 @@ export class Phase1Service {
         priority: tc.priority ?? 'P1',
         severity: tc.severity ?? 'medium',
         type: tc.type ?? 'functional',
+        requirementKey: tc.requirementKey ?? null,
+        designTechnique: tc.designTechnique ?? null,
+        featureKey: tc.featureKey ?? null,
+        designMode: tc.designMode ?? null,
+        priorityLabel: tc.priorityLabel ?? null,
+        readyForExecution: tc.readyForExecution,
         testData:
           tc.testData && typeof tc.testData === 'object'
             ? (tc.testData as Record<string, string>)
@@ -906,6 +1152,24 @@ export class Phase1Service {
         crudHints: crudOps.filter((op) => new RegExp(op, 'i').test(blob)),
       };
     });
+    const techniqueCoverage = (() => {
+      const byRequirement: Record<
+        string,
+        { techniques: string[]; caseCount: number }
+      > = {};
+      for (const c of mapped) {
+        const key = c.requirementKey?.trim() || 'UNMAPPED';
+        if (!byRequirement[key]) {
+          byRequirement[key] = { techniques: [], caseCount: 0 };
+        }
+        byRequirement[key]!.caseCount += 1;
+        const tech = (c.designTechnique ?? '').trim().toUpperCase();
+        if (tech && !byRequirement[key]!.techniques.includes(tech)) {
+          byRequirement[key]!.techniques.push(tech);
+        }
+      }
+      return { byRequirement, caseCount: mapped.length };
+    })();
     const crudMatrix = Array.from(
       new Set(mapped.map((c) => c.module || 'General')),
     ).map((feature) => {
@@ -942,6 +1206,7 @@ export class Phase1Service {
         kind: 'TEST_DESIGN',
         testCases: mapped,
         crudMatrix,
+        techniqueCoverage,
         testingLevelsCovered: [
           'SMOKE',
           'SANITY',
@@ -954,7 +1219,7 @@ export class Phase1Service {
       validation: previous?.validation ?? {
         passed: cases.length > 0,
         blockers: cases.length ? [] : ['No test cases'],
-        summary: `${cases.length} case(s) — human edited`,
+        summary: `${cases.length} technique-mapped case(s)`,
       },
       previous,
       editedByHuman: true,
@@ -981,19 +1246,39 @@ export class Phase1Service {
     const externalId =
       input.externalId?.trim() ||
       `TC-${String(count + 1).padStart(3, '0')}`;
+    const status = this.statusFields({
+      caseStatus: input.caseStatus,
+      readyForExecution: input.readyForExecution,
+    });
+    const executionId = await this.latestStlcExecutionId(projectId);
+    const placement = await this.folderPlacement(projectId, input.folderId);
     const created = await prisma.testCase.create({
       data: {
         projectId,
+        executionId,
         externalId,
-        module: input.module ?? 'General',
+        module: input.module ?? placement.module ?? 'General',
         scenario: input.scenario.trim(),
         preconditions: input.preconditions ?? '',
         steps: (input.steps ?? ['Perform the scenario steps']) as never,
         expected: input.expected.trim(),
-        priority: input.priority ?? 'P1',
+        priority:
+          input.priority ??
+          priorityFromLabel(input.priorityLabel ?? 'MEDIUM'),
         severity: input.severity ?? 'medium',
         type: input.type ?? 'functional',
+        requirementKey: input.requirementKey ?? placement.requirementKey ?? null,
+        designTechnique: input.designTechnique ?? null,
+        featureKey: input.featureKey ?? placement.featureKey ?? null,
+        folderId: placement.folderId ?? null,
+        designMode: input.designMode ?? 'GENERIC',
+        priorityLabel:
+          input.priorityLabel ??
+          normalizePriorityLabel(input.priority ?? 'P1'),
+        ...status,
         testData: (input.testData ?? null) as never,
+        customFields: (input.customFields ?? null) as never,
+        templateId: input.templateId ?? null,
       },
     });
     await this.syncDesignDocFromCases(projectId);
@@ -1013,13 +1298,43 @@ export class Phase1Service {
     });
     if (!existing) throw new NotFoundException('Test case not found');
     const input = parseBody(testCaseWriteSchema, body);
+    const contentChanged =
+      (input.scenario !== undefined &&
+        input.scenario.trim() !== existing.scenario) ||
+      (input.expected !== undefined &&
+        input.expected.trim() !== existing.expected) ||
+      (input.preconditions !== undefined &&
+        (input.preconditions ?? '') !== (existing.preconditions ?? '')) ||
+      (input.steps !== undefined &&
+        JSON.stringify(input.steps) !== JSON.stringify(existing.steps));
+    let statusPatch: {
+      caseStatus?: CaseStatus;
+      readyForExecution?: boolean;
+    } = {};
+    if (input.caseStatus !== undefined || input.readyForExecution !== undefined) {
+      statusPatch = this.statusFields({
+        caseStatus: input.caseStatus,
+        readyForExecution: input.readyForExecution,
+      });
+    } else if (
+      contentChanged &&
+      normalizeCaseStatus(existing.caseStatus, existing.readyForExecution) !==
+        'DRAFT'
+    ) {
+      statusPatch = this.statusFields({ caseStatus: 'DRAFT' });
+    }
+    const placement = await this.folderPlacement(projectId, input.folderId);
     const updated = await prisma.testCase.update({
       where: { id: testCaseId },
       data: {
         ...(input.externalId !== undefined
           ? { externalId: input.externalId }
           : {}),
-        ...(input.module !== undefined ? { module: input.module } : {}),
+        ...(input.module !== undefined
+          ? { module: input.module }
+          : placement.module
+            ? { module: placement.module }
+            : {}),
         ...(input.scenario !== undefined
           ? { scenario: input.scenario.trim() }
           : {}),
@@ -1033,8 +1348,37 @@ export class Phase1Service {
         ...(input.priority !== undefined ? { priority: input.priority } : {}),
         ...(input.severity !== undefined ? { severity: input.severity } : {}),
         ...(input.type !== undefined ? { type: input.type } : {}),
+        ...(input.requirementKey !== undefined
+          ? { requirementKey: input.requirementKey }
+          : placement.requirementKey
+            ? { requirementKey: placement.requirementKey }
+            : {}),
+        ...(input.designTechnique !== undefined
+          ? { designTechnique: input.designTechnique }
+          : {}),
+        ...(input.featureKey !== undefined
+          ? { featureKey: input.featureKey }
+          : placement.featureKey !== undefined
+            ? { featureKey: placement.featureKey }
+            : {}),
+        ...(input.folderId !== undefined
+          ? { folderId: placement.folderId ?? null }
+          : {}),
+        ...(input.designMode !== undefined ? { designMode: input.designMode } : {}),
+        ...(input.priorityLabel !== undefined
+          ? { priorityLabel: input.priorityLabel }
+          : input.priority !== undefined
+            ? { priorityLabel: normalizePriorityLabel(input.priority) }
+            : {}),
+        ...statusPatch,
         ...(input.testData !== undefined
           ? { testData: input.testData as never }
+          : {}),
+        ...(input.customFields !== undefined
+          ? { customFields: input.customFields as never }
+          : {}),
+        ...(input.templateId !== undefined
+          ? { templateId: input.templateId }
           : {}),
       },
     });
@@ -1047,15 +1391,118 @@ export class Phase1Service {
     orgId: string,
     projectId: string,
     testCaseId: string,
+    permanent = false,
   ) {
     await this.requireProject(userId, orgId, projectId, Role.MEMBER);
     const existing = await prisma.testCase.findFirst({
       where: { id: testCaseId, projectId },
     });
     if (!existing) throw new NotFoundException('Test case not found');
-    await prisma.testCase.delete({ where: { id: testCaseId } });
+    if (permanent) {
+      await prisma.testCase.delete({ where: { id: testCaseId } });
+    } else {
+      await prisma.testCase.update({
+        where: { id: testCaseId },
+        data: { deletedAt: new Date() },
+      });
+    }
+    await this.syncDesignDocFromCases(projectId);
+    return { ok: true, id: testCaseId, archived: !permanent };
+  }
+
+  async restoreTestCase(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    testCaseId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const existing = await prisma.testCase.findFirst({
+      where: { id: testCaseId, projectId },
+    });
+    if (!existing) throw new NotFoundException('Test case not found');
+    await prisma.testCase.update({
+      where: { id: testCaseId },
+      data: { deletedAt: null },
+    });
     await this.syncDesignDocFromCases(projectId);
     return { ok: true, id: testCaseId };
+  }
+
+  async markCasesReady(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(testCaseReadySchema, body);
+    if (!input.ids?.length && !input.featureKey) {
+      throw new BadRequestException('Provide ids or featureKey');
+    }
+    const executionId = await this.latestStlcExecutionId(projectId);
+    const where = {
+      projectId,
+      ...(executionId
+        ? { OR: [{ executionId }, { executionId: null }] }
+        : {}),
+      ...(input.ids?.length
+        ? { id: { in: input.ids } }
+        : input.featureKey
+          ? { featureKey: input.featureKey }
+          : {}),
+    };
+    const status = this.statusFields({
+      caseStatus: input.ready ? 'READY' : 'DRAFT',
+      readyForExecution: input.ready,
+    });
+    const result = await prisma.testCase.updateMany({
+      where,
+      data: status,
+    });
+    await this.syncDesignDocFromCases(projectId);
+    return { ok: true, updated: result.count, ready: input.ready };
+  }
+
+  async previewExecution(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    query: { runKind?: string; featureKey?: string },
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    const executionId = await this.latestStlcExecutionId(projectId);
+    const cases = await prisma.testCase.findMany({
+      where: {
+        ...(executionId ? { executionId } : { projectId }),
+        deletedAt: null,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    const runKind =
+      query.runKind === 'REGRESSION' || query.runKind === 'SYSTEM'
+        ? query.runKind
+        : 'SPRINT';
+    const suggestion = suggestExecutionSelection(cases, {
+      runKind,
+      featureKey: query.featureKey || null,
+    });
+    const ordered = sortCasesByPriority(
+      cases.filter((c) => suggestion.testCaseIds.includes(c.id)),
+    );
+    return {
+      runKind: suggestion.runKind,
+      order: 'HIGH_THEN_MEDIUM_THEN_LOW',
+      testCaseIds: ordered.map((c) => c.id),
+      cases: ordered.map((c) => ({
+        id: c.id,
+        externalId: c.externalId,
+        featureKey: c.featureKey,
+        priorityLabel: c.priorityLabel ?? normalizePriorityLabel(c.priority),
+        scenario: c.scenario,
+        readyForExecution: c.readyForExecution,
+      })),
+    };
   }
 
   async listBugsCompat(userId: string, projectId: string) {
@@ -1152,30 +1599,58 @@ export class Phase1Service {
     res: Response,
   ) {
     const cases = await this.listTestCases(userId, orgId, projectId);
+    const fields = await this.resolvedCaseFields(orgId, projectId);
+    const cfHeaders = fields.map((f) => `cf_${f.key}`);
     const headers = [
       'id',
-      'module',
+      'folder',
       'scenario',
       'preconditions',
       'steps',
       'expected',
       'priority',
+      'priorityLabel',
       'severity',
       'type',
+      'requirementKey',
+      'designTechnique',
+      'featureKey',
+      'caseStatus',
       'testData',
+      ...cfHeaders,
     ];
-    const rows: WorksheetRow[] = cases.map((c) => ({
-      id: c.externalId,
-      module: c.module,
-      scenario: c.scenario,
-      preconditions: c.preconditions,
-      steps: Array.isArray(c.steps) ? (c.steps as string[]).join(' | ') : '',
-      expected: c.expected,
-      priority: c.priority,
-      severity: c.severity,
-      type: c.type,
-      testData: c.testData ? JSON.stringify(c.testData) : '',
-    }));
+    const rows: WorksheetRow[] = cases.map((c) => {
+      const custom =
+        c.customFields && typeof c.customFields === 'object'
+          ? (c.customFields as Record<string, unknown>)
+          : {};
+      const folder =
+        [c.parentFolderName, c.folderName].filter(Boolean).join(' / ') ||
+        c.module ||
+        '';
+      const row: WorksheetRow = {
+        id: c.externalId,
+        folder,
+        scenario: c.scenario,
+        preconditions: c.preconditions,
+        steps: Array.isArray(c.steps) ? (c.steps as string[]).join(' | ') : '',
+        expected: c.expected,
+        priority: c.priority,
+        priorityLabel: c.priorityLabel,
+        severity: c.severity,
+        type: c.type,
+        requirementKey: c.requirementKey,
+        designTechnique: c.designTechnique,
+        featureKey: c.featureKey,
+        caseStatus: c.caseStatus,
+        testData: c.testData ? JSON.stringify(c.testData) : '',
+      };
+      for (const f of fields) {
+        const v = custom[f.key];
+        row[`cf_${f.key}`] = v == null ? '' : String(v);
+      }
+      return row;
+    });
     this.sendDownload(res, format, 'test-cases', headers, rows);
   }
 
@@ -1257,6 +1732,1374 @@ export class Phase1Service {
         : '',
     }));
     this.sendDownload(res, format, 'test-results', headers, rows);
+  }
+
+  async setCaseStatus(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(testCaseStatusSchema, body);
+    const status = this.statusFields({ caseStatus: input.status });
+    const result = await prisma.testCase.updateMany({
+      where: { projectId, id: { in: input.ids } },
+      data: status,
+    });
+    await this.syncDesignDocFromCases(projectId);
+    return { ok: true, updated: result.count, status: input.status };
+  }
+
+  async bulkUpdateTestCases(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(testCaseBulkUpdateSchema, body);
+    const status =
+      input.status !== undefined
+        ? this.statusFields({ caseStatus: input.status })
+        : {};
+    const placement = await this.folderPlacement(projectId, input.folderId);
+    const data = {
+      ...status,
+      ...(input.priorityLabel !== undefined
+        ? {
+            priorityLabel: input.priorityLabel,
+            priority: priorityFromLabel(input.priorityLabel),
+          }
+        : {}),
+      ...(input.type !== undefined ? { type: input.type } : {}),
+      ...(input.designTechnique !== undefined
+        ? { designTechnique: input.designTechnique }
+        : {}),
+      ...(input.featureKey !== undefined
+        ? { featureKey: input.featureKey }
+        : placement.featureKey !== undefined
+          ? { featureKey: placement.featureKey }
+          : {}),
+      ...(input.folderId !== undefined
+        ? { folderId: placement.folderId ?? null }
+        : {}),
+      ...(input.module !== undefined
+        ? { module: input.module }
+        : placement.module
+          ? { module: placement.module }
+          : {}),
+      ...(input.requirementKey !== undefined
+        ? { requirementKey: input.requirementKey }
+        : placement.requirementKey
+          ? { requirementKey: placement.requirementKey }
+          : {}),
+    };
+    const result = await prisma.testCase.updateMany({
+      where: { projectId, id: { in: input.ids } },
+      data,
+    });
+    await this.syncDesignDocFromCases(projectId);
+    return { ok: true, updated: result.count };
+  }
+
+  async bulkDeleteTestCases(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(testCaseBulkDeleteSchema, body);
+    if (input.permanent) {
+      const result = await prisma.testCase.deleteMany({
+        where: { projectId, id: { in: input.ids } },
+      });
+      await this.syncDesignDocFromCases(projectId);
+      return { ok: true, deleted: result.count };
+    }
+    const result = await prisma.testCase.updateMany({
+      where: { projectId, id: { in: input.ids } },
+      data: { deletedAt: new Date() },
+    });
+    await this.syncDesignDocFromCases(projectId);
+    return { ok: true, archived: result.count };
+  }
+
+  async bulkRestoreTestCases(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(testCaseRestoreSchema, body);
+    const result = await prisma.testCase.updateMany({
+      where: { projectId, id: { in: input.ids } },
+      data: { deletedAt: null },
+    });
+    await this.syncDesignDocFromCases(projectId);
+    return { ok: true, restored: result.count };
+  }
+
+  async duplicateTestCase(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    testCaseId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const existing = await prisma.testCase.findFirst({
+      where: { id: testCaseId, projectId },
+    });
+    if (!existing) throw new NotFoundException('Test case not found');
+    const count = await prisma.testCase.count({ where: { projectId } });
+    const created = await prisma.testCase.create({
+      data: {
+        projectId,
+        executionId:
+          existing.executionId ?? (await this.latestStlcExecutionId(projectId)),
+        externalId: `TC-${String(count + 1).padStart(3, '0')}`,
+        module: existing.module,
+        scenario: `${existing.scenario} (copy)`,
+        preconditions: existing.preconditions,
+        steps: existing.steps as never,
+        expected: existing.expected,
+        priority: existing.priority,
+        severity: existing.severity,
+        type: existing.type,
+        requirementKey: existing.requirementKey,
+        designTechnique: existing.designTechnique,
+        featureKey: existing.featureKey,
+        folderId: existing.folderId,
+        designMode: existing.designMode,
+        priorityLabel: existing.priorityLabel,
+        caseStatus: 'DRAFT',
+        readyForExecution: false,
+        testData: existing.testData as never,
+        customFields: existing.customFields as never,
+        templateId: existing.templateId,
+      },
+    });
+    await this.syncDesignDocFromCases(projectId);
+    return created;
+  }
+
+  async createFeatureFolder(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    return this.createTcmsFolder(userId, orgId, projectId, body);
+  }
+
+  async listTcmsFolders(userId: string, orgId: string, projectId: string) {
+    await this.requireProject(userId, orgId, projectId);
+    const folders = await ensureTcmsFolders(projectId);
+    return folders.map(mapFolderDto);
+  }
+
+  async createTcmsFolder(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(createTcmsFolderSchema, body);
+    let parentId: string | null = input.parentId ?? null;
+    if (parentId) {
+      const parent = await prisma.tcmsFolder.findFirst({
+        where: { id: parentId, projectId },
+      });
+      if (!parent) throw new BadRequestException('Parent folder not found');
+      if (parent.parentId) {
+        throw new BadRequestException('Subfolders cannot have children');
+      }
+    }
+    const siblings = await prisma.tcmsFolder.count({
+      where: { projectId, parentId },
+    });
+    const created = await prisma.tcmsFolder.create({
+      data: {
+        projectId,
+        parentId,
+        name: input.name,
+        sortOrder: siblings,
+        featureKey: parentId
+          ? (
+              await prisma.tcmsFolder.findFirst({
+                where: { id: parentId },
+                select: { featureKey: true },
+              })
+            )?.featureKey ?? null
+          : null,
+      },
+    });
+    return mapFolderDto(created);
+  }
+
+  async updateTcmsFolder(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    folderId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const folder = await prisma.tcmsFolder.findFirst({
+      where: { id: folderId, projectId },
+    });
+    if (!folder) throw new NotFoundException('Folder not found');
+    const input = parseBody(updateTcmsFolderSchema, body);
+    let parentId = folder.parentId;
+    if (input.parentId !== undefined) {
+      parentId = input.parentId;
+      if (parentId === folderId) {
+        throw new BadRequestException('Folder cannot be its own parent');
+      }
+      if (parentId) {
+        const parent = await prisma.tcmsFolder.findFirst({
+          where: { id: parentId, projectId },
+        });
+        if (!parent) throw new BadRequestException('Parent folder not found');
+        if (parent.parentId) {
+          throw new BadRequestException('Subfolders cannot have children');
+        }
+        const hasChildren = await prisma.tcmsFolder.count({
+          where: { parentId: folderId },
+        });
+        if (hasChildren) {
+          throw new BadRequestException('Move child folders first');
+        }
+      }
+    }
+    const updated = await prisma.tcmsFolder.update({
+      where: { id: folderId },
+      data: {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.parentId !== undefined ? { parentId } : {}),
+        ...(input.sortOrder !== undefined ? { sortOrder: input.sortOrder } : {}),
+      },
+    });
+    return mapFolderDto(updated);
+  }
+
+  async deleteTcmsFolder(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    folderId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const folder = await prisma.tcmsFolder.findFirst({
+      where: { id: folderId, projectId },
+    });
+    if (!folder) throw new NotFoundException('Folder not found');
+    const input = parseBody(
+      deleteTcmsFolderSchema,
+      body && typeof body === 'object' ? body : {},
+    );
+    const descendants = await prisma.tcmsFolder.findMany({
+      where: { projectId, OR: [{ id: folderId }, { parentId: folderId }] },
+      select: { id: true },
+    });
+    const ids = descendants.map((d) => d.id);
+    if (input.deleteCases) {
+      await prisma.testCase.updateMany({
+        where: { projectId, folderId: { in: ids } },
+        data: { deletedAt: new Date() },
+      });
+    } else {
+      await prisma.testCase.updateMany({
+        where: { projectId, folderId: { in: ids } },
+        data: { folderId: folder.parentId },
+      });
+    }
+    await prisma.tcmsFolder.deleteMany({
+      where: { id: { in: ids } },
+    });
+    await this.syncDesignDocFromCases(projectId);
+    return { ok: true, id: folderId, deletedCases: Boolean(input.deleteCases) };
+  }
+
+  async createTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(createTcmsRunSchema, body);
+    const uniqueIds = await this.resolveRunCaseIds(projectId, {
+      testCaseIds: input.testCaseIds ?? [],
+      folderIds: input.folderIds ?? [],
+    });
+    const browserMode = input.browserMode ?? 'HEADLESS';
+    const runKind = input.runKind ?? 'MANUAL';
+    const status =
+      input.status === 'PENDING'
+        ? ExecutionStatus.PENDING
+        : ExecutionStatus.RUNNING;
+    const startedAt = status === ExecutionStatus.RUNNING ? new Date() : null;
+    const selection: TcmsSelection = {
+      name: input.name.trim(),
+      description: input.description ?? null,
+      testCaseIds: uniqueIds,
+      folderIds: input.folderIds?.length ? [...new Set(input.folderIds)] : [],
+      runKind,
+      browserMode,
+      featureKey: input.featureKey ?? null,
+      folderId: input.folderId ?? input.folderIds?.[0] ?? null,
+    };
+    const execution = await prisma.execution.create({
+      data: {
+        projectId,
+        status,
+        phase: 'EXECUTION',
+        runMode: 'MANUAL',
+        startedAt,
+        selection: selection as never,
+      },
+    });
+    return {
+      ...execution,
+      name: selection.name,
+      locked: false,
+      counts: summarizeCycle(uniqueIds, []),
+    };
+  }
+
+  async proposeTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+    file?: Express.Multer.File,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(
+      proposeTcmsRunSchema,
+      coerceGenerateBody(body),
+    );
+    let sourceText = input.prompt?.trim() ?? '';
+    if (file?.buffer?.length) {
+      if (!isAllowedRequirementFile(file.originalname, file.mimetype)) {
+        throw new BadRequestException(
+          'Upload a .pdf, .docx, .txt, or .md requirements file',
+        );
+      }
+      sourceText = (
+        await parseRequirementFile(file.buffer, file.originalname, file.mimetype)
+      ).trim();
+    }
+    const cases = await prisma.testCase.findMany({
+      where: { projectId, deletedAt: null },
+      orderBy: { createdAt: 'asc' },
+    });
+    const ready = cases.filter(
+      (c) =>
+        normalizeCaseStatus(c.caseStatus, c.readyForExecution) === 'READY',
+    );
+    if (!ready.length) {
+      throw new BadRequestException(
+        'No Ready cases to select. Mark cases Ready first.',
+      );
+    }
+    const decorated = await this.decorateCases(projectId, ready);
+    const proposed = await this.aiGenerate.proposeRunCases({
+      sourceText,
+      cases: decorated.map((c) => ({
+        id: c.id,
+        externalId: c.externalId,
+        scenario: c.scenario,
+        priorityLabel: normalizePriorityLabel(c.priorityLabel ?? c.priority),
+        folderName: c.folderName ?? c.module ?? '',
+      })),
+    });
+    const picked = new Set(proposed.selectedIds);
+    const ordered = sortCasesByPriority(
+      decorated.filter((c) => picked.has(c.id)),
+    );
+    return {
+      name:
+        input.name?.trim() ||
+        `AI cycle ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+      tokensUsed: proposed.tokensUsed,
+      readyCount: ready.length,
+      cases: ordered.map((c) => ({
+        ...c,
+        why: proposed.reasons[c.id] ?? 'Matches requirements',
+      })),
+    };
+  }
+
+  async startTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    const execution = await this.loadManualRun(projectId, executionId);
+    this.assertCycleWritable(execution);
+    if (execution.status === ExecutionStatus.PENDING) {
+      const waiting = isWaitingLocalRunner(
+        readSelection(execution.selection),
+        execution.status,
+      );
+      if (!waiting) {
+        await prisma.execution.update({
+          where: { id: executionId },
+          data: {
+            status: ExecutionStatus.RUNNING,
+            startedAt: execution.startedAt ?? new Date(),
+          },
+        });
+      }
+    }
+    return this.getTcmsRun(userId, orgId, projectId, executionId);
+  }
+
+  async pauseTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    const execution = await this.loadManualRun(projectId, executionId);
+    if (execution.status !== ExecutionStatus.RUNNING) {
+      throw new BadRequestException('Only a running cycle can be paused');
+    }
+    await this.queue.publishPause(executionId);
+    return { ok: true, paused: true, executionId };
+  }
+
+  async resumeTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    const execution = await this.loadManualRun(projectId, executionId);
+    this.assertCycleWritable(execution);
+    await this.queue.clearPause(executionId);
+    return { ok: true, paused: false, executionId };
+  }
+
+  async aiExecuteTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    const execution = await this.loadManualRun(projectId, executionId);
+    this.assertCycleWritable(execution);
+    const input = parseBody(aiExecuteRunSchema, body);
+    if (input.target === 'CLOUD') {
+      throw new BadRequestException('Cloud execution is coming soon');
+    }
+    const creds = await this.saveAiEnvironment(projectId, input);
+    const selection = readSelection(execution.selection);
+    const caseIds = input.testCaseIds?.length
+      ? input.testCaseIds
+      : selection.testCaseIds ?? [];
+    if (!caseIds.length) {
+      throw new BadRequestException('No cases in this cycle');
+    }
+    const browserMode =
+      input.browserMode ??
+      (input.target === 'LOCAL' ? 'HEADED' : 'HEADLESS');
+    if (!hasEncryptionKey()) {
+      throw new BadRequestException(
+        'ENCRYPTION_KEY is not configured — cannot hand credentials to the local runner',
+      );
+    }
+    await this.runners.assertUserRunnerOnline(orgId, userId);
+    const nextSelection: TcmsSelection = {
+      ...selection,
+      testCaseIds: caseIds,
+      runKind: 'AUTOMATION',
+      browserMode,
+      browser: input.browser ?? 'chromium',
+      runnerTarget: 'LOCAL',
+      runnerUserId: userId,
+      localQueuedAt: new Date().toISOString(),
+      claimedByRunnerId: null,
+      localCreds: this.runners.encryptLocalCreds({
+        appUrl: creds.appUrl,
+        loginUrl: creds.loginUrl,
+        username: creds.username,
+        password: creds.password,
+      }),
+    };
+    await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.PENDING,
+        startedAt: null,
+        finishedAt: null,
+        errorSummary: 'Waiting for local runner',
+        selection: nextSelection as never,
+      },
+    });
+    await this.queue.clearPause(executionId);
+    return this.getTcmsRun(userId, orgId, projectId, executionId);
+  }
+
+  async listAutomatedScripts(
+    userId: string,
+    orgId: string,
+    projectId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    const scripts = await prisma.automatedScript.findMany({
+      where: { projectId },
+      include: {
+        testCase: {
+          select: {
+            id: true,
+            externalId: true,
+            scenario: true,
+            priority: true,
+            priorityLabel: true,
+            folderId: true,
+            deletedAt: true,
+            featureKey: true,
+            requirementKey: true,
+            readyForExecution: true,
+            caseStatus: true,
+            module: true,
+          },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+    const cases = scripts
+      .filter((s) => s.testCase && !s.testCase.deletedAt)
+      .map((s) => s.testCase);
+    const decorated = await this.decorateCases(projectId, cases);
+    const byId = new Map(decorated.map((c) => [c.id, c]));
+    return scripts
+      .filter((s) => s.testCase && !s.testCase.deletedAt)
+      .map((s) => {
+        const tc = byId.get(s.testCaseId);
+        return {
+          id: s.id,
+          testCaseId: s.testCaseId,
+          path: s.path,
+          language: s.language,
+          framework: s.framework,
+          lastRunId: s.lastRunId,
+          lastStatus: s.lastStatus,
+          updatedAt: s.updatedAt,
+          externalId: tc?.externalId ?? s.testCase.externalId,
+          scenario: tc?.scenario ?? s.testCase.scenario,
+          priorityLabel: normalizePriorityLabel(
+            tc?.priorityLabel ?? s.testCase.priorityLabel ?? s.testCase.priority,
+          ),
+          folderName: tc?.folderName ?? null,
+        };
+      });
+  }
+
+  async executeAutomatedScripts(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    const input = parseBody(aiExecuteRunSchema, body);
+    if (input.target === 'CLOUD') {
+      throw new BadRequestException('Cloud execution is coming soon');
+    }
+    const scripts = await prisma.automatedScript.findMany({
+      where: { projectId },
+      select: { testCaseId: true },
+    });
+    const allowed = new Set(scripts.map((s) => s.testCaseId));
+    const testCaseIds = (input.testCaseIds?.length
+      ? input.testCaseIds
+      : [...allowed]
+    ).filter((id) => allowed.has(id));
+    if (!testCaseIds.length) {
+      throw new BadRequestException('No automated scripts to execute');
+    }
+    const creds = await this.saveAiEnvironment(projectId, input);
+    const name = `Automation ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
+    const created = await this.createTcmsRun(userId, orgId, projectId, {
+      name,
+      testCaseIds,
+      runKind: 'AUTOMATION',
+      browserMode: input.browserMode ?? 'HEADLESS',
+      status: 'PENDING',
+    });
+    return this.aiExecuteTcmsRun(
+      userId,
+      orgId,
+      projectId,
+      created.id,
+      {
+        ...input,
+        appUrl: creds.appUrl,
+        loginUrl: creds.loginUrl,
+        testCaseIds,
+      },
+    );
+  }
+
+  async pauseProjectAutomation(
+    userId: string,
+    orgId: string,
+    projectId: string,
+  ) {
+    const running = await this.latestRunningManual(projectId);
+    if (!running) {
+      throw new BadRequestException('No running AI execution');
+    }
+    return this.pauseTcmsRun(userId, orgId, projectId, running.id);
+  }
+
+  async stopProjectAutomation(
+    userId: string,
+    orgId: string,
+    projectId: string,
+  ) {
+    const running = await this.latestRunningManual(projectId);
+    if (!running) {
+      throw new BadRequestException('No running AI execution');
+    }
+    return this.stopTcmsRun(userId, orgId, projectId, running.id);
+  }
+
+  async listAutomationReports(
+    userId: string,
+    orgId: string,
+    projectId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    const reports = await prisma.automationReport.findMany({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      include: {
+        execution: { select: { id: true, selection: true, createdAt: true } },
+      },
+    });
+    return reports.map((r) => ({
+      id: r.id,
+      name: r.name,
+      status: r.status,
+      passed: r.passed,
+      failed: r.failed,
+      blocked: r.blocked,
+      skipped: r.skipped,
+      pending: r.pending,
+      htmlKey: r.htmlKey,
+      zipKey: r.zipKey,
+      executionId: r.executionId,
+      runName: cycleName(
+        readSelection(r.execution.selection),
+        r.execution.createdAt,
+      ),
+      createdAt: r.createdAt,
+    }));
+  }
+
+  async downloadAutomationReport(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    reportId: string,
+    kind: 'html' | 'zip',
+    res: Response,
+    disposition: 'inline' | 'attachment' = 'inline',
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    const report = await prisma.automationReport.findFirst({
+      where: { id: reportId, projectId },
+    });
+    if (!report) throw new NotFoundException('Report not found');
+    const key = kind === 'zip' ? report.zipKey : report.htmlKey;
+    if (!key) throw new NotFoundException('Report file not found');
+    const buf = await this.artifactBody(key);
+    if (!buf) throw new NotFoundException('Report file missing');
+    const filename =
+      kind === 'zip'
+        ? `${report.name.replace(/[^\w.-]+/g, '_')}.zip`
+        : `${report.name.replace(/[^\w.-]+/g, '_')}.html`;
+    res.setHeader(
+      'Content-Type',
+      kind === 'zip' ? 'application/zip' : 'text/html; charset=utf-8',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `${disposition}; filename="${filename}"`,
+    );
+    res.send(buf);
+  }
+
+  private async latestRunningManual(projectId: string) {
+    const rows = await prisma.execution.findMany({
+      where: {
+        projectId,
+        runMode: 'MANUAL',
+        deletedAt: null,
+        status: {
+          in: [ExecutionStatus.RUNNING, ExecutionStatus.PENDING],
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 12,
+    });
+    return (
+      rows.find(
+        (row) =>
+          row.status === ExecutionStatus.RUNNING ||
+          isWaitingLocalRunner(readSelection(row.selection), row.status),
+      ) ?? null
+    );
+  }
+
+  private async artifactBody(storageKey: string): Promise<Buffer | null> {
+    try {
+      const store = new R2ArtifactStore({
+        fallbackRootDir: `${process.cwd()}/.artifacts`,
+      });
+      return await store.get(storageKey);
+    } catch {
+      /* try DB */
+    }
+    const blob = await prisma.artifactBlob.findUnique({
+      where: { storageKey },
+    });
+    return blob ? Buffer.from(blob.body) : null;
+  }
+
+  private async saveAiEnvironment(
+    projectId: string,
+    input: {
+      appUrl: string;
+      loginUrl?: string;
+      username?: string;
+      password?: string;
+      browserMode?: 'HEADLESS' | 'HEADED';
+      confirmProduction?: boolean;
+    },
+  ) {
+    const existing = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: {
+        appUrl: true,
+        loginUrl: true,
+        encryptedConfig: true,
+        browserMode: true,
+      },
+    });
+    const appUrl =
+      normalizeStoredAppUrl(input.appUrl) ??
+      normalizeStoredAppUrl(existing?.appUrl);
+    if (!appUrl || !isUsableAppUrl(appUrl)) {
+      throw new BadRequestException('A valid environment URL is required');
+    }
+    if (isLikelyProductionUrl(appUrl) && !input.confirmProduction) {
+      throw new BadRequestException(
+        'This URL looks like production. Use a QA/UAT/staging URL, or set confirmProduction=true to proceed.',
+      );
+    }
+    const loginUrl =
+      normalizeStoredAppUrl(input.loginUrl) ??
+      existing?.loginUrl ??
+      appUrl;
+    let username = input.username?.trim() || '';
+    let password = input.password || '';
+    if ((!username || !password) && existing?.encryptedConfig) {
+      try {
+        const parsed = JSON.parse(decrypt(existing.encryptedConfig)) as {
+          username?: string;
+          password?: string;
+        };
+        if (!username) username = parsed.username ?? '';
+        if (!password) password = parsed.password ?? '';
+      } catch {
+        /* ignore */
+      }
+    }
+    let encryptedConfig: string | undefined;
+    if (username || password) {
+      if (!hasEncryptionKey()) {
+        throw new BadRequestException(
+          'ENCRYPTION_KEY is not configured — cannot store credentials',
+        );
+      }
+      encryptedConfig = encrypt(
+        JSON.stringify({
+          username,
+          password,
+          environment: 'non-prod',
+        }),
+      );
+    }
+    await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        appUrl,
+        loginUrl,
+        browserMode: input.browserMode ?? existing?.browserMode ?? 'HEADLESS',
+        ...(encryptedConfig ? { encryptedConfig } : {}),
+      },
+    });
+    return {
+      appUrl,
+      loginUrl: loginUrl ?? undefined,
+      username,
+      password,
+    };
+  }
+
+  async listTcmsRuns(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    includeArchived = false,
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    await this.runners.expireWaitingLocalJobs();
+    const runs = await prisma.execution.findMany({
+      where: {
+        projectId,
+        runMode: 'MANUAL',
+        ...(includeArchived ? {} : { deletedAt: null }),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    const ids = runs.map((r) => r.id);
+    const results = ids.length
+      ? await prisma.testResult.findMany({
+          where: { executionId: { in: ids } },
+          select: { executionId: true, testCaseId: true, status: true },
+        })
+      : [];
+    return runs.map((run) => {
+      const sel = readSelection(run.selection);
+      const caseIds = sel.testCaseIds ?? [];
+      const mine = results.filter((r) => r.executionId === run.id);
+      return {
+        ...run,
+        selection: publicSelection(sel) as never,
+        name: cycleName(sel, run.createdAt),
+        description: sel.description ?? null,
+        waitingForRunner: isWaitingLocalRunner(sel, run.status),
+        locked:
+          run.status === ExecutionStatus.COMPLETED ||
+          run.status === ExecutionStatus.CANCELLED,
+        counts: summarizeCycle(caseIds, mine),
+      };
+    });
+  }
+
+  async getTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    await this.runners.expireWaitingLocalJobs();
+    const execution = await this.loadManualRun(projectId, executionId);
+    const selection = readSelection(execution.selection);
+    const ids = selection.testCaseIds ?? [];
+    const [cases, results] = await Promise.all([
+      ids.length
+        ? prisma.testCase.findMany({
+            where: { id: { in: ids } },
+            orderBy: { createdAt: 'asc' },
+          })
+        : Promise.resolve([]),
+      prisma.testResult.findMany({
+        where: { executionId },
+        orderBy: { createdAt: 'asc' },
+      }),
+    ]);
+    const decorated = await this.decorateCases(projectId, cases);
+    const byCase = new Map(results.map((r) => [r.testCaseId, r]));
+    const withResults = decorated.map((c) => ({
+      ...c,
+      result: byCase.get(c.id) ?? null,
+    }));
+    return {
+      ...execution,
+      selection: publicSelection(selection) as never,
+      name: cycleName(selection, execution.createdAt),
+      description: selection.description ?? null,
+      waitingForRunner: isWaitingLocalRunner(selection, execution.status),
+      locked:
+        execution.status === ExecutionStatus.COMPLETED ||
+        execution.status === ExecutionStatus.CANCELLED,
+      counts: cycleResultCounts(withResults),
+      cases: withResults,
+    };
+  }
+
+  async updateTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const execution = await this.loadManualRun(projectId, executionId);
+    this.assertCycleWritable(execution);
+    const input = parseBody(updateTcmsRunSchema, body);
+    const selection = readSelection(execution.selection);
+    let testCaseIds = [...(selection.testCaseIds ?? [])];
+    if (input.testCaseIds) {
+      testCaseIds = [...new Set(input.testCaseIds)];
+    }
+    if (input.addTestCaseIds?.length) {
+      testCaseIds = [...new Set([...testCaseIds, ...input.addTestCaseIds])];
+    }
+    if (input.removeTestCaseIds?.length) {
+      const drop = new Set(input.removeTestCaseIds);
+      testCaseIds = testCaseIds.filter((id) => !drop.has(id));
+    }
+    if (!testCaseIds.length) {
+      throw new BadRequestException('A cycle must keep at least one test case');
+    }
+    const rosterChanged =
+      JSON.stringify(testCaseIds) !==
+      JSON.stringify(selection.testCaseIds ?? []);
+    if (rosterChanged) {
+      const cases = await prisma.testCase.findMany({
+        where: { projectId, id: { in: testCaseIds }, deletedAt: null },
+      });
+      if (cases.length !== testCaseIds.length) {
+        throw new BadRequestException('One or more test cases were not found');
+      }
+      const notReady = cases.filter((c) => !isReadyCase(c));
+      if (notReady.length) {
+        throw new BadRequestException(
+          'Only Ready cases can be added to a cycle',
+        );
+      }
+      if (input.removeTestCaseIds?.length) {
+        await prisma.testResult.deleteMany({
+          where: {
+            executionId,
+            testCaseId: { in: input.removeTestCaseIds },
+          },
+        });
+      }
+    }
+    const next: TcmsSelection = {
+      ...selection,
+      testCaseIds,
+      name: input.name?.trim() || selection.name,
+      description:
+        input.description !== undefined
+          ? input.description
+          : selection.description,
+    };
+    return prisma.execution.update({
+      where: { id: executionId },
+      data: { selection: next as never },
+    });
+  }
+
+  async deleteTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+    permanent = false,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    await this.loadManualRun(projectId, executionId);
+    if (permanent) {
+      await prisma.testResult.deleteMany({ where: { executionId } });
+      await prisma.execution.delete({ where: { id: executionId } });
+      return { ok: true, id: executionId };
+    }
+    await prisma.execution.update({
+      where: { id: executionId },
+      data: { deletedAt: new Date() },
+    });
+    return { ok: true, id: executionId, archived: true };
+  }
+
+  async restoreTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    await this.loadManualRun(projectId, executionId);
+    await prisma.execution.update({
+      where: { id: executionId },
+      data: { deletedAt: null },
+    });
+    return { ok: true, id: executionId };
+  }
+
+  async stopTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    const execution = await this.loadManualRun(projectId, executionId);
+    if (
+      execution.status === ExecutionStatus.COMPLETED ||
+      execution.status === ExecutionStatus.CANCELLED
+    ) {
+      throw new BadRequestException('This cycle is locked');
+    }
+    await this.queue.publishCancel(executionId);
+    return prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.CANCELLED,
+        finishedAt: new Date(),
+        errorSummary: 'Stopped by user',
+      },
+    });
+  }
+
+  async completeTcmsRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    executionId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const execution = await this.loadManualRun(projectId, executionId);
+    if (execution.status !== ExecutionStatus.RUNNING) {
+      throw new BadRequestException('Only a running cycle can be completed');
+    }
+    return prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: ExecutionStatus.COMPLETED,
+        finishedAt: new Date(),
+      },
+    });
+  }
+
+  async upsertTestResult(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    const input = parseBody(testResultWriteSchema, body);
+    if (!input.testCaseId || !input.executionId) {
+      throw new BadRequestException('testCaseId and executionId are required');
+    }
+    const execution = await this.loadManualRun(projectId, input.executionId);
+    this.assertCycleWritable(execution);
+    if (execution.status === ExecutionStatus.PENDING) {
+      await prisma.execution.update({
+        where: { id: input.executionId },
+        data: {
+          status: ExecutionStatus.RUNNING,
+          startedAt: execution.startedAt ?? new Date(),
+        },
+      });
+    }
+    const ids = readSelection(execution.selection).testCaseIds ?? [];
+    if (!ids.includes(input.testCaseId)) {
+      throw new BadRequestException('Case is not in this cycle');
+    }
+    this.assertResultComment(input.status, input.message);
+    const existing = await prisma.testResult.findFirst({
+      where: { executionId: input.executionId, testCaseId: input.testCaseId },
+      orderBy: { createdAt: 'desc' },
+    });
+    const data = {
+      status: input.status,
+      message: input.message ?? null,
+      executedBy: 'HUMAN',
+      ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
+    };
+    if (existing) {
+      return prisma.testResult.update({
+        where: { id: existing.id },
+        data,
+      });
+    }
+    return prisma.testResult.create({
+      data: {
+        projectId,
+        executionId: input.executionId,
+        testCaseId: input.testCaseId,
+        ...data,
+      },
+    });
+  }
+
+  async patchTestResult(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    resultId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    const existing = await prisma.testResult.findFirst({
+      where: { id: resultId, projectId },
+    });
+    if (!existing) throw new NotFoundException('Result not found');
+    if (!existing.executionId) {
+      throw new BadRequestException('Result is not attached to a run');
+    }
+    const execution = await this.loadManualRun(
+      projectId,
+      existing.executionId,
+    );
+    this.assertCycleWritable(execution);
+    const input = parseBody(testResultWriteSchema, body);
+    this.assertResultComment(
+      input.status,
+      input.message !== undefined ? input.message : existing.message,
+    );
+    return prisma.testResult.update({
+      where: { id: resultId },
+      data: {
+        status: input.status,
+        ...(input.message !== undefined ? { message: input.message } : {}),
+        ...(input.durationMs !== undefined
+          ? { durationMs: input.durationMs }
+          : {}),
+        executedBy: existing.executedBy ?? 'HUMAN',
+      },
+    });
+  }
+
+  async attachResultScreenshot(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    resultId: string,
+    file: Express.Multer.File | undefined,
+  ) {
+    return this.attachResultEvidence(userId, orgId, projectId, resultId, file);
+  }
+
+  async attachResultEvidence(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    resultId: string,
+    file: Express.Multer.File | undefined,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    if (!file?.buffer?.length) {
+      throw new BadRequestException('Evidence file is required');
+    }
+    const result = await prisma.testResult.findFirst({
+      where: { id: resultId, projectId },
+    });
+    if (!result) throw new NotFoundException('Result not found');
+    if (!result.executionId) {
+      throw new BadRequestException('Result is not attached to a run');
+    }
+    const execution = await this.loadManualRun(projectId, result.executionId);
+    this.assertCycleWritable(execution);
+    const mime = file.mimetype || 'application/octet-stream';
+    const isVideo = mime.startsWith('video/');
+    if (isVideo && file.buffer.length > 50 * 1024 * 1024) {
+      throw new BadRequestException('Video must be 50MB or smaller');
+    }
+    if (!isVideo && file.buffer.length > 8 * 1024 * 1024) {
+      throw new BadRequestException('Screenshot must be 8MB or smaller');
+    }
+    if (!isVideo && !mime.startsWith('image/')) {
+      throw new BadRequestException('Attach an image or video file');
+    }
+    const ext = isVideo
+      ? mime.includes('webm')
+        ? 'webm'
+        : mime.includes('mp4')
+          ? 'mp4'
+          : 'webm'
+      : mime.includes('jpeg') || mime.includes('jpg')
+        ? 'jpg'
+        : mime.includes('webp')
+          ? 'webp'
+          : mime.includes('gif')
+            ? 'gif'
+            : 'png';
+    const folder = isVideo ? 'videos' : 'screenshots';
+    const key = `${result.executionId}/${folder}/${result.testCaseId}-${Date.now()}.${ext}`;
+    const checksum = createHash('sha256').update(file.buffer).digest('hex');
+    await prisma.artifact.create({
+      data: {
+        executionId: result.executionId,
+        type: isVideo ? ArtifactType.VIDEO : ArtifactType.SCREENSHOT,
+        storageKey: key,
+        mime,
+        size: file.buffer.length,
+        checksum,
+      },
+    });
+    await prisma.artifactBlob.upsert({
+      where: { storageKey: key },
+      create: {
+        storageKey: key,
+        mime,
+        size: file.buffer.length,
+        body: file.buffer as never,
+      },
+      update: {
+        mime,
+        size: file.buffer.length,
+        body: file.buffer as never,
+      },
+    });
+    const keys = Array.isArray(result.evidenceKeys)
+      ? [...(result.evidenceKeys as string[]), key]
+      : [key];
+    return prisma.testResult.update({
+      where: { id: result.id },
+      data: { evidenceKeys: keys as never },
+    });
+  }
+
+  async downloadTcmsTcr(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    format: string,
+    res: Response,
+    executionId?: string,
+  ) {
+    const project = await this.requireProject(userId, orgId, projectId);
+    const report = await buildTcrPayload(
+      projectId,
+      project.name,
+      executionId ? [executionId] : undefined,
+    );
+    const fmt = (format || 'html').toLowerCase();
+    const pack =
+      fmt === 'docx' || fmt === 'doc' || fmt === 'word'
+        ? buildTcmsTcrWord(report)
+        : fmt === 'pdf'
+          ? buildTcmsTcrPdf(report)
+          : buildTcmsTcrHtml(report);
+    res.setHeader('Content-Type', pack.contentType);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${pack.filename}"`,
+    );
+    res.send(pack.body);
+  }
+
+  async listTcmsAutomation(
+    userId: string,
+    orgId: string,
+    projectId: string,
+  ) {
+    const project = await this.requireProject(userId, orgId, projectId);
+    const executionId = await this.latestStlcExecutionId(projectId);
+    const cases = await prisma.testCase.findMany({
+      where: {
+        projectId,
+        deletedAt: null,
+        ...(executionId
+          ? { OR: [{ executionId }, { executionId: null }] }
+          : {}),
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    const ready = cases.filter(
+      (c) =>
+        normalizeCaseStatus(c.caseStatus, c.readyForExecution) === 'READY',
+    );
+    const decorated = await this.decorateCases(projectId, ready);
+    const language = project.language || 'TYPESCRIPT';
+    const framework = project.framework || 'PLAYWRIGHT';
+    const ext =
+      language === 'JAVA'
+        ? 'java'
+        : language === 'PYTHON'
+          ? 'py'
+          : language === 'CSHARP'
+            ? 'cs'
+            : 'spec.ts';
+    const files = decorated.map((c) => ({
+      testCaseId: c.id,
+      externalId: c.externalId,
+      scenario: c.scenario,
+      path: `tests/${c.externalId}.${ext}`,
+      placeholder: true,
+    }));
+    return {
+      language,
+      framework,
+      browserMode: project.browserMode || 'HEADLESS',
+      files,
+      readyCount: ready.length,
+    };
+  }
+
+  async saveAutomationStack(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(
+      z.object({
+        language: z.enum(['TYPESCRIPT', 'JAVA', 'PYTHON', 'CSHARP']),
+        framework: z.enum([
+          'PLAYWRIGHT',
+          'SELENIUM',
+          'SELENIUM_JAVA',
+          'CYPRESS',
+        ]),
+      }),
+      body,
+    );
+    return prisma.project.update({
+      where: { id: projectId },
+      data: { language: input.language, framework: input.framework },
+      select: { id: true, language: true, framework: true },
+    });
+  }
+
+  async downloadAutomationPack(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    res: Response,
+  ) {
+    const pack = await this.listTcmsAutomation(userId, orgId, projectId);
+    const files: Record<string, string> = {
+      'README.md': `# Automation pack\n\nLanguage: ${pack.language}\nFramework: ${pack.framework}\n\nScripts will be generated per Ready case. Placeholders:\n\n${pack.files.map((f) => `- ${f.path} — ${f.externalId} ${f.scenario}`).join('\n')}\n`,
+    };
+    for (const f of pack.files) {
+      files[f.path] = `// Placeholder for ${f.externalId}: ${f.scenario}\n// Generate with AI in a later pass.\n`;
+    }
+    const buf = await buildZipPackage({ files });
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="automation-${projectId}.zip"`,
+    );
+    res.send(buf);
   }
 
   async listAutomationForOrg(userId: string, orgId: string) {
@@ -1470,4 +3313,523 @@ export class Phase1Service {
       executionId,
     };
   }
+
+  async generateTestCases(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+    file?: Express.Multer.File,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(
+      generateTestCasesSchema,
+      coerceGenerateBody(body),
+    );
+    let sourceText = input.prompt?.trim() ?? '';
+    let documentName = 'prompt';
+    if (file?.buffer?.length) {
+      if (!isAllowedRequirementFile(file.originalname, file.mimetype)) {
+        throw new BadRequestException(
+          'Upload a .pdf, .docx, .txt, or .md requirements file',
+        );
+      }
+      sourceText = (
+        await parseRequirementFile(file.buffer, file.originalname, file.mimetype)
+      ).trim();
+      documentName = file.originalname;
+    }
+    const generated = await this.aiGenerate.generate({
+      sourceText,
+      documentName,
+      techniques: (input.techniques?.length
+        ? input.techniques
+        : (['HAPPY_PATH'] as DesignTechnique[])),
+      type: input.type,
+      priorityLabel: input.priorityLabel,
+    });
+    return {
+      ...generated,
+      folderId: input.folderId ?? null,
+    };
+  }
+
+  async bulkCreateTestCases(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(testCaseBulkCreateSchema, body);
+    const created = [];
+    let count = await prisma.testCase.count({ where: { projectId } });
+    const template = input.templateId
+      ? await prisma.caseTemplate.findFirst({
+          where: { id: input.templateId, projectId },
+        })
+      : await prisma.caseTemplate.findFirst({
+          where: { projectId, isDefault: true },
+        });
+    const templateDefaults =
+      template?.defaults && typeof template.defaults === 'object'
+        ? (template.defaults as Record<string, string>)
+        : {};
+    for (const row of input.cases) {
+      if (!row.scenario?.trim() || !row.expected?.trim()) continue;
+      count += 1;
+      const folderId =
+        row.folderId !== undefined ? row.folderId : input.folderId;
+      const placement = await this.folderPlacement(projectId, folderId);
+      const status = this.statusFields({ caseStatus: 'DRAFT' });
+      const record = await prisma.testCase.create({
+        data: {
+          projectId,
+          executionId: null,
+          externalId:
+            row.externalId?.trim() ||
+            `TC-${String(count).padStart(3, '0')}`,
+          module: row.module ?? placement.module ?? 'General',
+          scenario: row.scenario.trim(),
+          preconditions:
+            row.preconditions ?? templateDefaults.preconditions ?? '',
+          steps: (row.steps ?? ['Perform the scenario steps']) as never,
+          expected: row.expected.trim(),
+          priority:
+            row.priority ??
+            priorityFromLabel(
+              row.priorityLabel ??
+                (templateDefaults.priorityLabel as 'HIGH' | 'MEDIUM' | 'LOW') ??
+                'MEDIUM',
+            ),
+          severity: row.severity ?? 'medium',
+          type: row.type ?? templateDefaults.type ?? 'functional',
+          requirementKey:
+            row.requirementKey ?? placement.requirementKey ?? null,
+          designTechnique:
+            row.designTechnique ??
+            templateDefaults.designTechnique ??
+            null,
+          featureKey: row.featureKey ?? placement.featureKey ?? null,
+          folderId: placement.folderId ?? null,
+          designMode: 'GENERIC',
+          priorityLabel:
+            row.priorityLabel ??
+            normalizePriorityLabel(row.priority ?? 'P1'),
+          ...status,
+          testData: (row.testData ?? null) as never,
+          customFields: (row.customFields ?? null) as never,
+          templateId: input.templateId ?? template?.id ?? null,
+        },
+      });
+      created.push(record);
+    }
+    if (!created.length) {
+      throw new BadRequestException('No valid cases to add');
+    }
+    await this.syncDesignDocFromCases(projectId);
+    return { created: created.length, cases: created };
+  }
+
+  async importTestCases(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+    file?: Express.Multer.File,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    if (!file?.buffer?.length) {
+      throw new BadRequestException('Upload a CSV, JSON, or XLS file');
+    }
+    const input = parseBody(importTestCasesSchema, coerceImportBody(body));
+    const parsed = parseImportBuffer(file);
+    const folders = await prisma.tcmsFolder.findMany({ where: { projectId } });
+    let count = await prisma.testCase.count({ where: { projectId } });
+    let created = 0;
+    let updated = 0;
+    const errors = [...parsed.errors];
+    for (const row of parsed.rows) {
+      try {
+        const folderId = resolveImportFolder(
+          folders,
+          row.folder,
+          input.folderId,
+        );
+        const placement = await this.folderPlacement(projectId, folderId);
+        const payload = {
+          module: placement.module ?? row.folder ?? 'General',
+          scenario: row.scenario,
+          preconditions: row.preconditions ?? '',
+          steps: (row.steps?.length
+            ? row.steps
+            : ['Perform the scenario steps']) as never,
+          expected: row.expected,
+          priority: row.priority ?? priorityFromLabel('MEDIUM'),
+          severity: row.severity ?? 'medium',
+          type: row.type ?? 'functional',
+          requirementKey: row.requirementKey ?? placement.requirementKey ?? null,
+          designTechnique: row.designTechnique ?? null,
+          featureKey: row.featureKey ?? placement.featureKey ?? null,
+          folderId: placement.folderId ?? null,
+          designMode: 'GENERIC' as const,
+          priorityLabel: (['HIGH', 'MEDIUM', 'LOW'].includes(
+            (row.priorityLabel ?? '').toUpperCase(),
+          )
+            ? row.priorityLabel!.toUpperCase()
+            : normalizePriorityLabel(row.priority ?? 'P1')) as
+            | 'HIGH'
+            | 'MEDIUM'
+            | 'LOW',
+          caseStatus: 'DRAFT' as const,
+          readyForExecution: false,
+          testData: (row.testData ?? null) as never,
+          customFields: (row.customFields ?? null) as never,
+          templateId: input.templateId ?? null,
+        };
+        const existing = row.externalId
+          ? await prisma.testCase.findFirst({
+              where: { projectId, externalId: row.externalId },
+            })
+          : null;
+        if (existing && input.updateExisting) {
+          await prisma.testCase.update({
+            where: { id: existing.id },
+            data: payload,
+          });
+          updated += 1;
+        } else {
+          count += 1;
+          await prisma.testCase.create({
+            data: {
+              projectId,
+              executionId: null,
+              externalId:
+                row.externalId?.trim() ||
+                `TC-${String(count).padStart(3, '0')}`,
+              ...payload,
+            },
+          });
+          created += 1;
+        }
+      } catch (err) {
+        errors.push({
+          line: created + updated + errors.length + 1,
+          message: err instanceof Error ? err.message : 'Import row failed',
+        });
+      }
+    }
+    await this.syncDesignDocFromCases(projectId);
+    return { created, updated, skipped: errors.length, errors };
+  }
+
+  private async backfillCaseFieldOrgs() {
+    await prisma.$executeRaw`
+      UPDATE "CaseField" AS f
+      SET "organizationId" = p."organizationId"
+      FROM "Project" AS p
+      WHERE f."projectId" = p."id"
+        AND (f."organizationId" IS NULL OR f."organizationId" = '')
+    `;
+  }
+
+  private resolvedCaseFields(orgId: string, projectId: string) {
+    return prisma.caseField.findMany({
+      where: {
+        organizationId: orgId,
+        OR: [{ projectId: null }, { projectId }],
+      },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+    });
+  }
+
+  async listCaseFields(userId: string, orgId: string, projectId: string) {
+    await this.requireProject(userId, orgId, projectId);
+    await this.backfillCaseFieldOrgs();
+    return this.resolvedCaseFields(orgId, projectId);
+  }
+
+  async listOrgCaseFields(userId: string, orgId: string) {
+    await this.orgs.requireMembership(userId, orgId, Role.VIEWER);
+    await this.backfillCaseFieldOrgs();
+    return prisma.caseField.findMany({
+      where: { organizationId: orgId },
+      include: { project: { select: { id: true, name: true } } },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+    });
+  }
+
+  private async assertFieldProject(orgId: string, projectId: string | null) {
+    if (!projectId) return null;
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, organizationId: orgId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!project) throw new BadRequestException('Project not found in this organization');
+    return project.id;
+  }
+
+  async createOrgCaseField(userId: string, orgId: string, body: unknown) {
+    await this.orgs.requireMembership(userId, orgId, Role.MEMBER);
+    const input = parseBody(caseFieldWriteSchema, body);
+    const projectId = await this.assertFieldProject(
+      orgId,
+      input.projectId === undefined ? null : input.projectId,
+    );
+    const key = (input.key?.trim() || slugFieldKey(input.label)).toLowerCase();
+    const existing = await prisma.caseField.findFirst({
+      where: { organizationId: orgId, key },
+    });
+    if (existing) throw new BadRequestException('A field with this key exists');
+    const count = await prisma.caseField.count({ where: { organizationId: orgId } });
+    return prisma.caseField.create({
+      data: {
+        organizationId: orgId,
+        projectId,
+        key,
+        label: input.label.trim(),
+        type: input.type ?? 'TEXT',
+        options: (input.options ?? null) as never,
+        required: input.required ?? false,
+        sortOrder: input.sortOrder ?? count,
+      },
+      include: { project: { select: { id: true, name: true } } },
+    });
+  }
+
+  async updateOrgCaseField(
+    userId: string,
+    orgId: string,
+    fieldId: string,
+    body: unknown,
+  ) {
+    await this.orgs.requireMembership(userId, orgId, Role.MEMBER);
+    const existing = await prisma.caseField.findFirst({
+      where: { id: fieldId, organizationId: orgId },
+    });
+    if (!existing) throw new NotFoundException('Field not found');
+    const input = parseBody(caseFieldWriteSchema, body);
+    const key = input.key?.trim()
+      ? input.key.trim().toLowerCase()
+      : existing.key;
+    if (key !== existing.key) {
+      const clash = await prisma.caseField.findFirst({
+        where: { organizationId: orgId, key },
+      });
+      if (clash) throw new BadRequestException('A field with this key exists');
+    }
+    const projectId =
+      input.projectId === undefined
+        ? existing.projectId
+        : await this.assertFieldProject(orgId, input.projectId);
+    return prisma.caseField.update({
+      where: { id: fieldId },
+      data: {
+        key,
+        label: input.label.trim(),
+        projectId,
+        ...(input.type !== undefined ? { type: input.type } : {}),
+        ...(input.options !== undefined
+          ? { options: input.options as never }
+          : {}),
+        ...(input.required !== undefined ? { required: input.required } : {}),
+        ...(input.sortOrder !== undefined ? { sortOrder: input.sortOrder } : {}),
+      },
+      include: { project: { select: { id: true, name: true } } },
+    });
+  }
+
+  async deleteOrgCaseField(userId: string, orgId: string, fieldId: string) {
+    await this.orgs.requireMembership(userId, orgId, Role.MEMBER);
+    const existing = await prisma.caseField.findFirst({
+      where: { id: fieldId, organizationId: orgId },
+    });
+    if (!existing) throw new NotFoundException('Field not found');
+    await prisma.caseField.delete({ where: { id: fieldId } });
+    return { ok: true, id: fieldId };
+  }
+
+  async listCaseTemplates(userId: string, orgId: string, projectId: string) {
+    await this.requireProject(userId, orgId, projectId);
+    return prisma.caseTemplate.findMany({
+      where: { projectId },
+      orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
+    });
+  }
+
+  async createCaseTemplate(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(caseTemplateWriteSchema, body);
+    if (input.isDefault) {
+      await prisma.caseTemplate.updateMany({
+        where: { projectId, isDefault: true },
+        data: { isDefault: false },
+      });
+    }
+    return prisma.caseTemplate.create({
+      data: {
+        projectId,
+        name: input.name.trim(),
+        isDefault: input.isDefault ?? false,
+        fieldKeys: (input.fieldKeys ?? []) as never,
+        defaults: (input.defaults ?? null) as never,
+      },
+    });
+  }
+
+  async updateCaseTemplate(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    templateId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const existing = await prisma.caseTemplate.findFirst({
+      where: { id: templateId, projectId },
+    });
+    if (!existing) throw new NotFoundException('Template not found');
+    const input = parseBody(caseTemplateWriteSchema, body);
+    if (input.isDefault) {
+      await prisma.caseTemplate.updateMany({
+        where: { projectId, isDefault: true, NOT: { id: templateId } },
+        data: { isDefault: false },
+      });
+    }
+    return prisma.caseTemplate.update({
+      where: { id: templateId },
+      data: {
+        name: input.name.trim(),
+        ...(input.isDefault !== undefined ? { isDefault: input.isDefault } : {}),
+        ...(input.fieldKeys !== undefined
+          ? { fieldKeys: input.fieldKeys as never }
+          : {}),
+        ...(input.defaults !== undefined
+          ? { defaults: input.defaults as never }
+          : {}),
+      },
+    });
+  }
+
+  async deleteCaseTemplate(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    templateId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const existing = await prisma.caseTemplate.findFirst({
+      where: { id: templateId, projectId },
+    });
+    if (!existing) throw new NotFoundException('Template not found');
+    await prisma.caseTemplate.delete({ where: { id: templateId } });
+    return { ok: true, id: templateId };
+  }
+}
+
+function coerceGenerateBody(body: unknown): unknown {
+  if (!body || typeof body !== 'object') return {};
+  const raw = { ...(body as Record<string, unknown>) };
+  if (raw.folderId === '') raw.folderId = null;
+  if (typeof raw.techniques === 'string') {
+    try {
+      raw.techniques = JSON.parse(raw.techniques);
+    } catch {
+      raw.techniques = String(raw.techniques)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+  }
+  return raw;
+}
+
+function coerceImportBody(body: unknown): unknown {
+  if (!body || typeof body !== 'object') return {};
+  const raw = { ...(body as Record<string, unknown>) };
+  if (raw.folderId === '') raw.folderId = null;
+  if (typeof raw.updateExisting === 'string') {
+    raw.updateExisting =
+      raw.updateExisting === '1' || raw.updateExisting === 'true';
+  }
+  if (raw.templateId === '') raw.templateId = null;
+  return raw;
+}
+
+function slugFieldKey(label: string): string {
+  const slug = label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 40);
+  return slug || 'field';
+}
+
+function parseImportBuffer(file: Express.Multer.File): {
+  rows: ImportedCaseRow[];
+  errors: Array<{ line: number; message: string }>;
+} {
+  const name = file.originalname.toLowerCase();
+  const text = file.buffer.toString('utf8');
+  if (name.endsWith('.json') || file.mimetype.includes('json')) {
+    try {
+      return rowsFromJson(JSON.parse(text));
+    } catch {
+      return {
+        rows: [],
+        errors: [{ line: 1, message: 'Invalid JSON' }],
+      };
+    }
+  }
+  if (
+    name.endsWith('.xls') ||
+    name.endsWith('.xlsx') ||
+    text.includes('<Workbook') ||
+    text.includes('ss:Workbook')
+  ) {
+    if (file.buffer[0] === 0x50 && file.buffer[1] === 0x4b) {
+      return {
+        rows: [],
+        errors: [
+          {
+            line: 1,
+            message: 'Use CSV or the XLS export from this app (not xlsx zip)',
+          },
+        ],
+      };
+    }
+    return rowsFromSpreadsheetMl(text);
+  }
+  return rowsFromCsv(text);
+}
+
+function resolveImportFolder(
+  folders: Array<{ id: string; name: string; parentId: string | null }>,
+  path: string | undefined,
+  fallback: string | null | undefined,
+): string | null | undefined {
+  if (!path?.trim()) return fallback ?? undefined;
+  const parts = path.split('/').map((p) => p.trim()).filter(Boolean);
+  if (!parts.length) return fallback ?? undefined;
+  if (parts.length === 1) {
+    const hit = folders.find(
+      (f) => f.name.toLowerCase() === parts[0]!.toLowerCase(),
+    );
+    return hit?.id ?? fallback ?? undefined;
+  }
+  const parent = folders.find(
+    (f) =>
+      !f.parentId && f.name.toLowerCase() === parts[0]!.toLowerCase(),
+  );
+  const child = folders.find(
+    (f) =>
+      f.parentId === parent?.id &&
+      f.name.toLowerCase() === parts[1]!.toLowerCase(),
+  );
+  return child?.id ?? parent?.id ?? fallback ?? undefined;
 }

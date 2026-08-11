@@ -6,6 +6,7 @@ import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
 import { Progress } from '@/components/Progress';
 import { api, ApiError, API_URL } from '@/lib/api';
+import { useOrgCaps } from '@/lib/use-org';
 
 type Billing = {
   plan?: string;
@@ -15,6 +16,7 @@ type Billing = {
 };
 
 export default function BillingPage() {
+  const { caps } = useOrgCaps();
   const { data } = useQuery({
     queryKey: ['billing'],
     queryFn: async () => {
@@ -61,12 +63,18 @@ export default function BillingPage() {
           </div>
           <Progress value={pct} />
         </div>
-        <a
-          href={data?.portalUrl ?? `${API_URL}/api/v1/billing/portal`}
-          className="mt-6 inline-block"
-        >
-          <Button variant="secondary">Open customer portal</Button>
-        </a>
+        {caps.canManageBilling ? (
+          <a
+            href={data?.portalUrl ?? `${API_URL}/api/v1/billing/portal`}
+            className="mt-6 inline-block"
+          >
+            <Button variant="secondary">Open customer portal</Button>
+          </a>
+        ) : (
+          <p className="mt-6 text-sm text-muted">
+            Only the organization owner can change the plan.
+          </p>
+        )}
       </Card>
     </div>
   );

@@ -190,6 +190,16 @@ export type AnswerReviewQuestionInput = z.infer<
   typeof answerReviewQuestionSchema
 >;
 
+export const rejectRequirementsSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(1, 'Rejection reason is required')
+    .max(4000),
+});
+
+export type RejectRequirementsInput = z.infer<typeof rejectRequirementsSchema>;
+
 export const reviewFactStatusSchema = z.enum([
   'CONFIRMED',
   'INFERRED',
@@ -297,3 +307,245 @@ export const reviewDashboardSummarySchema = z.object({
 export type ReviewDashboardSummary = z.infer<
   typeof reviewDashboardSummarySchema
 >;
+
+export const saveEnvironmentSchema = z.object({
+  appUrl: z.string().max(2000).optional().default(''),
+  loginUrl: z.string().max(2000).optional(),
+  username: z.string().max(200).optional(),
+  password: z.string().max(500).optional(),
+  browserMode: z.enum(['HEADLESS', 'HEADED']).optional(),
+  confirmProduction: z.boolean().optional(),
+});
+
+export type SaveEnvironmentInput = z.infer<typeof saveEnvironmentSchema>;
+
+export const executionSelectionSchema = z.object({
+  testCaseIds: z.array(z.string().min(1)).max(500).optional(),
+  runKind: z.enum(['SPRINT', 'REGRESSION', 'SYSTEM']).optional(),
+  featureKey: z.string().max(64).nullable().optional(),
+  browserMode: z.enum(['HEADLESS', 'HEADED']).optional(),
+});
+
+export type ExecutionSelectionInput = z.infer<typeof executionSelectionSchema>;
+
+export const testCaseReadySchema = z.object({
+  ready: z.boolean(),
+  ids: z.array(z.string().min(1)).max(500).optional(),
+  featureKey: z.string().max(64).optional(),
+});
+
+export type TestCaseReadyInput = z.infer<typeof testCaseReadySchema>;
+
+export const caseStatusSchema = z.enum(['DRAFT', 'APPROVED', 'READY']);
+
+export const testCaseWriteSchema = z.object({
+  externalId: z.string().min(1).max(64).optional(),
+  module: z.string().max(200).nullable().optional(),
+  scenario: z.string().min(1).max(2000).optional(),
+  preconditions: z.string().max(8000).nullable().optional(),
+  steps: z.array(z.string().max(2000)).max(100).optional(),
+  expected: z.string().min(1).max(8000).optional(),
+  priority: z.string().max(40).nullable().optional(),
+  severity: z.string().max(40).nullable().optional(),
+  type: z.string().max(80).nullable().optional(),
+  requirementKey: z.string().max(64).nullable().optional(),
+  designTechnique: z.string().max(64).nullable().optional(),
+  featureKey: z.string().max(64).nullable().optional(),
+  folderId: z.string().min(1).nullable().optional(),
+  designMode: z.enum(['GENERIC', 'UI_GROUNDED']).nullable().optional(),
+  priorityLabel: z.enum(['HIGH', 'MEDIUM', 'LOW']).nullable().optional(),
+  readyForExecution: z.boolean().optional(),
+  caseStatus: caseStatusSchema.optional(),
+  testData: z.record(z.string(), z.string()).nullable().optional(),
+  customFields: z
+    .record(z.string(), z.union([z.string(), z.boolean(), z.number()]))
+    .nullable()
+    .optional(),
+  templateId: z.string().min(1).nullable().optional(),
+});
+
+export type TestCaseWriteInput = z.infer<typeof testCaseWriteSchema>;
+
+export const generateTestCasesSchema = z.object({
+  prompt: z.string().max(100_000).optional(),
+  folderId: z.string().min(1).nullable().optional(),
+  techniques: z
+    .array(
+      z.enum([
+        'HAPPY_PATH',
+        'EQUIVALENCE',
+        'BOUNDARY',
+        'DECISION_TABLE',
+        'STATE_TRANSITION',
+        'NEGATIVE',
+        'ERROR_GUESSING',
+      ]),
+    )
+    .min(1)
+    .max(7)
+    .optional(),
+  type: z.string().max(80).optional(),
+  priorityLabel: z.enum(['HIGH', 'MEDIUM', 'LOW']).optional(),
+});
+
+export type GenerateTestCasesInput = z.infer<typeof generateTestCasesSchema>;
+
+export const testCaseBulkCreateSchema = z.object({
+  folderId: z.string().min(1).nullable().optional(),
+  templateId: z.string().min(1).nullable().optional(),
+  cases: z.array(testCaseWriteSchema).min(1).max(200),
+});
+
+export type TestCaseBulkCreateInput = z.infer<typeof testCaseBulkCreateSchema>;
+
+export const importTestCasesSchema = z.object({
+  folderId: z.string().min(1).nullable().optional(),
+  templateId: z.string().min(1).nullable().optional(),
+  updateExisting: z.boolean().optional(),
+});
+
+export type ImportTestCasesInput = z.infer<typeof importTestCasesSchema>;
+
+export const caseFieldTypeSchema = z.enum([
+  'TEXT',
+  'TEXTAREA',
+  'DROPDOWN',
+  'CHECKBOX',
+  'NUMBER',
+]);
+
+export const caseFieldWriteSchema = z.object({
+  key: z
+    .string()
+    .trim()
+    .min(1)
+    .max(40)
+    .regex(/^[a-z][a-z0-9_]*$/i, 'key must be alphanumeric')
+    .optional(),
+  label: z.string().trim().min(1).max(80),
+  type: caseFieldTypeSchema.optional(),
+  options: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
+  required: z.boolean().optional(),
+  sortOrder: z.number().int().min(0).max(999).optional(),
+  projectId: z.string().min(1).nullable().optional(),
+});
+
+export type CaseFieldWriteInput = z.infer<typeof caseFieldWriteSchema>;
+
+export const caseTemplateWriteSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  isDefault: z.boolean().optional(),
+  fieldKeys: z.array(z.string().min(1).max(40)).max(50).optional(),
+  defaults: z
+    .object({
+      type: z.string().max(80).optional(),
+      priorityLabel: z.enum(['HIGH', 'MEDIUM', 'LOW']).optional(),
+      preconditions: z.string().max(8000).optional(),
+      designTechnique: z.string().max(64).optional(),
+    })
+    .optional(),
+});
+
+export type CaseTemplateWriteInput = z.infer<typeof caseTemplateWriteSchema>;
+
+export const testCaseStatusSchema = z.object({
+  status: caseStatusSchema,
+  ids: z.array(z.string().min(1)).max(500),
+});
+
+export type TestCaseStatusInput = z.infer<typeof testCaseStatusSchema>;
+
+export const testCaseBulkUpdateSchema = z.object({
+  ids: z.array(z.string().min(1)).max(500),
+  status: caseStatusSchema.optional(),
+  priorityLabel: z.enum(['HIGH', 'MEDIUM', 'LOW']).optional(),
+  type: z.string().max(80).optional(),
+  designTechnique: z.string().max(64).nullable().optional(),
+  featureKey: z.string().max(64).nullable().optional(),
+  folderId: z.string().min(1).nullable().optional(),
+  module: z.string().max(200).nullable().optional(),
+  requirementKey: z.string().max(64).nullable().optional(),
+});
+
+export type TestCaseBulkUpdateInput = z.infer<typeof testCaseBulkUpdateSchema>;
+
+export const testCaseBulkDeleteSchema = z.object({
+  ids: z.array(z.string().min(1)).max(500),
+  permanent: z.boolean().optional(),
+});
+
+export const testCaseRestoreSchema = z.object({
+  ids: z.array(z.string().min(1)).max(500),
+});
+
+export const createFeatureFolderSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  parentId: z.string().min(1).nullable().optional(),
+});
+
+export const createTcmsFolderSchema = createFeatureFolderSchema;
+
+export const updateTcmsFolderSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  parentId: z.string().min(1).nullable().optional(),
+  sortOrder: z.number().int().min(0).optional(),
+});
+
+export const deleteTcmsFolderSchema = z.object({
+  deleteCases: z.boolean().optional(),
+});
+
+export const createTcmsRunSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(2000).nullable().optional(),
+  testCaseIds: z.array(z.string().min(1)).max(500).optional().default([]),
+  folderIds: z.array(z.string().min(1)).max(100).optional().default([]),
+  runKind: z.enum(['MANUAL', 'AUTOMATION']).optional(),
+  browserMode: z.enum(['HEADLESS', 'HEADED']).optional(),
+  featureKey: z.string().max(64).nullable().optional(),
+  folderId: z.string().min(1).nullable().optional(),
+  status: z.enum(['PENDING', 'RUNNING']).optional(),
+});
+
+export const proposeTcmsRunSchema = z.object({
+  prompt: z.string().max(100_000).optional(),
+  name: z.string().trim().min(1).max(120).optional(),
+});
+
+export type ProposeTcmsRunInput = z.infer<typeof proposeTcmsRunSchema>;
+
+export const aiExecuteRunSchema = z.object({
+  appUrl: z.string().max(2000).optional().default(''),
+  loginUrl: z.string().max(2000).optional(),
+  username: z.string().max(200).optional(),
+  password: z.string().max(500).optional(),
+  browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
+  browserMode: z.enum(['HEADLESS', 'HEADED']).optional(),
+  target: z.enum(['LOCAL', 'CLOUD']).optional(),
+  confirmProduction: z.boolean().optional(),
+  testCaseIds: z.array(z.string().min(1)).max(500).optional(),
+});
+
+export type AiExecuteRunInput = z.infer<typeof aiExecuteRunSchema>;
+
+export type CreateTcmsRunInput = z.infer<typeof createTcmsRunSchema>;
+
+export const updateTcmsRunSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  description: z.string().max(2000).nullable().optional(),
+  addTestCaseIds: z.array(z.string().min(1)).max(500).optional(),
+  removeTestCaseIds: z.array(z.string().min(1)).max(500).optional(),
+  testCaseIds: z.array(z.string().min(1)).max(500).optional(),
+});
+
+export type UpdateTcmsRunInput = z.infer<typeof updateTcmsRunSchema>;
+
+export const testResultWriteSchema = z.object({
+  status: z.enum(['PASSED', 'FAILED', 'BLOCKED', 'SKIPPED', 'ERROR']),
+  message: z.string().max(8000).nullable().optional(),
+  testCaseId: z.string().min(1).optional(),
+  executionId: z.string().min(1).optional(),
+  durationMs: z.number().int().min(0).max(86_400_000).optional(),
+});
+
+export type TestResultWriteInput = z.infer<typeof testResultWriteSchema>;

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -9,6 +10,8 @@ import {
   PLAN_LIMITS,
   Role,
   clarifyExecutionSchema,
+  executionSelectionSchema,
+  isUsableAppUrl,
   type PlanId,
 } from '@qaforge/shared';
 import { AuditService } from '../common/audit.service';
@@ -429,6 +432,7 @@ export class ExecutionsService {
     user: SessionUser,
     orgId: string,
     executionId: string,
+    body: unknown = {},
   ) {
     await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
     const execution = await this.get(user.id, orgId, executionId);
@@ -437,6 +441,24 @@ export class ExecutionsService {
       throw new ForbiddenException(
         `Cannot approve test data from status ${execution.status}`,
       );
+    }
+
+    const env = await prisma.project.findUniqueOrThrow({
+      where: { id: execution.projectId },
+      select: { appUrl: true, loginUrl: true },
+    });
+    if (!isUsableAppUrl(env.appUrl) && !isUsableAppUrl(env.loginUrl)) {
+      throw new BadRequestException(
+        'Save a real QA/UAT URL, wait for cases to update, review Ready, then Accept.',
+      );
+    }
+
+    const selection = parseBody(executionSelectionSchema, body ?? {});
+    if (selection.browserMode) {
+      await prisma.project.update({
+        where: { id: execution.projectId },
+        data: { browserMode: selection.browserMode },
+      });
     }
 
     const approvedAt = new Date();
@@ -454,6 +476,11 @@ export class ExecutionsService {
       data: {
         status: ExecutionStatus.RUNNING,
         phase: 'AUTHENTICATION',
+        selection: {
+          testCaseIds: selection.testCaseIds ?? [],
+          runKind: selection.runKind ?? 'SPRINT',
+          featureKey: selection.featureKey ?? null,
+        } as never,
       },
     });
 

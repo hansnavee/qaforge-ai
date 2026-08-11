@@ -1,4 +1,6 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
+export const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
+const API_URL = API_BASE_URL;
 
 export class ApiError extends Error {
   constructor(
@@ -33,6 +35,13 @@ function apiUrl(path: string): string {
   return `${API_URL.replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
+export async function apiForm<T = unknown>(
+  path: string,
+  form: FormData,
+): Promise<T> {
+  return api<T>(path, { method: 'POST', body: form, headers: {} });
+}
+
 export async function api<T = unknown>(
   path: string,
   init?: RequestInit,
@@ -45,7 +54,9 @@ export async function api<T = unknown>(
       ...init,
       credentials: 'include',
       headers: {
-        'Content-Type': 'application/json',
+        ...(init?.body instanceof FormData
+          ? {}
+          : { 'Content-Type': 'application/json' }),
         ...(init?.headers ?? {}),
       },
     });
@@ -140,6 +151,28 @@ export async function downloadAuthenticated(
   a.click();
   a.remove();
   URL.revokeObjectURL(objectUrl);
+}
+
+/** Authenticated HTML/blob open in a new tab (cookies). */
+export async function openAuthenticated(
+  path: string,
+  mime = 'text/html',
+): Promise<void> {
+  const url = apiUrl(path);
+  let res: Response;
+  try {
+    res = await fetch(url, { credentials: 'include' });
+  } catch {
+    throw new ApiError('API unreachable', 0);
+  }
+  if (!res.ok) {
+    throw new ApiError(res.statusText || 'Open failed', res.status);
+  }
+  const buf = await res.arrayBuffer();
+  const contentType = res.headers.get('content-type') ?? mime;
+  const blob = new Blob([buf], { type: contentType });
+  const objectUrl = URL.createObjectURL(blob);
+  window.open(objectUrl, '_blank', 'noopener,noreferrer');
 }
 
 export { API_URL };

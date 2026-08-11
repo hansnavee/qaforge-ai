@@ -8,6 +8,7 @@ type AuthInput = {
   startUrl: string;
   loginUrl?: string;
   appUrl: string;
+  headless?: boolean;
   waitForContinueSignal: () => Promise<void>;
   onSessionLaunched?: (sessionId: string) => void;
 };
@@ -29,11 +30,15 @@ export const authenticationAgent: AgentHandler<
 
   async run(ctx, input) {
     const { browserManager } = input;
-    const headless = process.env.BROWSER_HEADLESS !== 'false';
+    const headless =
+      typeof input.headless === 'boolean'
+        ? input.headless
+        : process.env.BROWSER_HEADLESS !== 'false';
 
     const launched = await browserManager.launch({
       executionId: ctx.executionId,
       startUrl: input.startUrl,
+      headless,
     });
 
     ctx.browserSessionId = launched.sessionId;

@@ -104,7 +104,7 @@ export const STLC_PHASES: StlcPhaseDefinition[] = [
     approveAction: 'approve-test-design',
     downloads: ['json', 'csv', 'md', 'html'],
     description:
-      'Documented cases for human review — edit/delete anytime, including after Accept',
+      'Technique-based cases (EP, BVA, decision table, state, negative). Optional QA URL now; otherwise generic steps until Environment',
   },
   {
     index: 4,
@@ -117,7 +117,7 @@ export const STLC_PHASES: StlcPhaseDefinition[] = [
     approveAction: 'approve-environment',
     downloads: ['json', 'md', 'html'],
     description:
-      'Senior QA verifies browsers, URL, credentials readiness, and data access',
+      'Human provides a non-prod URL, credentials, and headless/headed mode; AI then grounds generic cases on the live UI',
   },
   {
     index: 5,
@@ -129,7 +129,8 @@ export const STLC_PHASES: StlcPhaseDefinition[] = [
     nextStage: StlcPhaseId.EXECUTION,
     approveAction: 'approve-test-data',
     downloads: ['json', 'csv', 'md'],
-    description: 'Senior QA prepares datasets for positive/negative/boundary',
+    description:
+      'Confirm where to run (URL / creds / headless), pick ready cases, then AI rewrites generic steps onto the live UI',
   },
   {
     index: 6,

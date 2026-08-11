@@ -9,6 +9,11 @@ import { Button } from '@/components/Button';
 import { cn } from '@/lib/cn';
 import { DesignCasesPanel } from './design-cases-panel';
 import { DefectsPanel } from './defects-panel';
+import { EnvironmentPanel } from './environment-panel';
+import { ExecutionPickerPanel } from './execution-picker-panel';
+import { TcmsRunsPanel } from './tcms-runs-panel';
+import { TcmsResultsPanel } from './tcms-results-panel';
+import { TcmsAutomationPanel } from './tcms-automation-panel';
 
 type PhaseSummary = {
   id: string;
@@ -98,6 +103,11 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
   const [draft, setDraft] = useState('');
   const [dirty, setDirty] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
+  const [execSel, setExecSel] = useState<{
+    testCaseIds: string[];
+    runKind: 'SPRINT' | 'REGRESSION' | 'SYSTEM';
+    featureKey: string | null;
+  }>({ testCaseIds: [], runKind: 'SPRINT', featureKey: null });
 
   const phasesQuery = useQuery({
     queryKey: ['stlc-phases', projectId],
@@ -125,10 +135,13 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
       const active = phases.find((p) => p.id === currentPhaseId);
       if (active) return active;
     }
+    const running = phases.find((p) => p.status === 'RUNNING');
+    if (running) return running;
+    const requirements = phases.find((p) => p.id === 'REQUIREMENTS');
+    if (requirements && requirements.status !== 'ACCEPTED') return requirements;
     const yourTurn = phases.find((p) => p.status === 'READY_FOR_REVIEW');
     if (yourTurn) return yourTurn;
     return (
-      phases.find((p) => p.status === 'RUNNING') ??
       phases.find((p) => p.status === 'FAILED') ??
       [...phases].reverse().find((p) => p.status === 'ACCEPTED') ??
       phases[0] ??
@@ -137,13 +150,13 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
   }, [phases, currentPhaseId]);
 
   /**
-   * Allow browsing ACCEPTED/READY prior steps (e.g. Design cases while the
-   * gate is Environment). Only bounce away from LOCKED / unknown phases.
+   * Free navigation across all STLC phases (including ahead of the gate).
+   * Accept / edit permissions still come from the phase detail API.
    */
   const viewingPhase = useMemo(() => {
     if (phaseParam) {
       const requested = phases.find((p) => p.id === phaseParam);
-      if (requested && requested.status !== 'LOCKED') return requested;
+      if (requested) return requested;
     }
     return gatePhase;
   }, [phaseParam, phases, gatePhase]);
@@ -152,13 +165,8 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     if (!phases.length || !gatePhase) return;
-    const requested = phaseParam
-      ? phases.find((p) => p.id === phaseParam)
-      : null;
-    if (!phaseParam || !requested || requested.status === 'LOCKED') {
-      if (phaseParam !== gatePhase.id) {
-        router.replace(`?tab=stlc&phase=${gatePhase.id}`, { scroll: false });
-      }
+    if (!phaseParam) {
+      router.replace(`?tab=stlc&phase=${gatePhase.id}`, { scroll: false });
     }
   }, [phases, gatePhase, phaseParam, router]);
 
@@ -211,7 +219,12 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
       const orgId = await getDefaultOrgId();
       return api(
         `/api/v1/orgs/${orgId}/projects/${projectId}/stlc/phases/${selected}/accept`,
-        { method: 'POST', body: '{}' },
+        {
+          method: 'POST',
+          body: JSON.stringify(
+            selected === 'DATA' || selected === 'EXECUTION' ? execSel : {},
+          ),
+        },
       );
     },
     onSuccess: async () => {
@@ -258,8 +271,15 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
   const prevPhase = phases.find((p) => p.index === stepNum - 1);
   const nextPhase = phases.find((p) => p.index === stepNum + 1);
   const latestExecutionId = phasesQuery.data?.latestExecutionId ?? null;
-  const browsingPastGate =
+  const browsingOtherStep =
     Boolean(gatePhase && viewingPhase && gatePhase.id !== viewingPhase.id);
+  const browsingAhead =
+    Boolean(
+      browsingOtherStep &&
+        viewingPhase &&
+        gatePhase &&
+        viewingPhase.index > gatePhase.index,
+    );
   const awaitingAi = detail?.status === 'RUNNING';
   const waitingToStart =
     (selected === 'PLANNING' || selected === 'DESIGN') &&
@@ -293,22 +313,28 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
   }
 
   function goPrev() {
-    if (!prevPhase || prevPhase.status === 'LOCKED') return;
+    if (!prevPhase) return;
     setDirty(false);
     router.replace(`?tab=stlc&phase=${prevPhase.id}`, { scroll: false });
   }
 
-  if (!gatePhase && !viewingPhase) {
+  if (!gatePhase && !viewingPhase && !phases.length) {
     return (
       <p className="text-sm text-muted">
-        No QA step available yet. Approve requirements first, then start Test
-        Planning.
+        No STLC phases yet. Complete requirement analysis, then open any phase
+        tab to browse.
       </p>
     );
   }
 
+  const wideBoard =
+    selected === 'DESIGN' ||
+    selected === 'EXECUTION' ||
+    selected === 'REPORTING' ||
+    selected === 'AUTOMATION';
+
   return (
-    <div className="mx-auto max-w-3xl space-y-5">
+    <div className={cn('mx-auto space-y-5', wideBoard ? 'max-w-6xl' : 'max-w-3xl')}>
       {/* Progress + phase ticks */}
       <div className="space-y-2">
         <div className="flex items-center justify-between text-sm">
@@ -331,9 +357,7 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
               <button
                 type="button"
                 title={`${p.label}: ${p.status}`}
-                disabled={p.status === 'LOCKED'}
                 onClick={() => {
-                  if (p.status === 'LOCKED') return;
                   setDirty(false);
                   router.replace(`?tab=stlc&phase=${p.id}`, { scroll: false });
                 }}
@@ -344,7 +368,7 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
                     : p.status === 'ACCEPTED'
                       ? 'border-success/30 bg-success/10 text-success'
                       : p.status === 'LOCKED'
-                        ? 'border-border text-muted opacity-50'
+                        ? 'border-border text-muted hover:bg-panel'
                         : 'border-border text-muted hover:bg-panel',
                 )}
               >
@@ -356,10 +380,12 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
         </ol>
       </div>
 
-      {browsingPastGate && gatePhase ? (
+      {browsingOtherStep && gatePhase ? (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-sm">
           <p className="text-muted">
-            Viewing past step. Your turn now:{' '}
+            {browsingAhead
+              ? 'Browsing ahead. Accept stays on:'
+              : 'Viewing a completed step. Your turn now:'}{' '}
             <span className="font-medium text-fg">{gatePhase.label}</span>
           </p>
           <Button
@@ -378,7 +404,11 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
 
       <section className="rounded-xl border border-border bg-surface p-5 sm:p-6">
         <p className="text-xs font-medium uppercase tracking-wide text-muted">
-          {browsingPastGate ? 'Browsing completed step' : 'Your turn'}
+          {browsingAhead
+            ? 'Browsing ahead'
+            : browsingOtherStep
+              ? 'Browsing completed step'
+              : 'Your turn'}
         </p>
         <h3 className="mt-1 text-2xl font-semibold text-fg">
           {viewingPhase?.label ?? selected}
@@ -395,8 +425,9 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
             <p className="font-medium text-fg">Ready to start Test Planning</p>
             <p className="mt-1 text-muted">
               Click <span className="text-fg">Continue to Test Planning</span>{' '}
-              above. AI will generate the strategy and design test cases, then
-              unlock Test Design for edit/delete review.
+              above. AI will generate the strategy, then expand each requirement
+              with test design techniques (happy path, EP, BVA, decision table,
+              state, negative). You can already open any STLC tab.
             </p>
           </div>
         ) : awaitingAi ? (
@@ -408,8 +439,9 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
                     AI is generating the test strategy and designing test cases
                   </p>
                   <p className="mt-1 text-muted">
-                    Stay on this page — Design unlocks automatically when cases
-                    are ready for your review.
+                    Stay on this page or browse other tabs — Design is ready
+                    when cases appear for review. Accept still waits on this
+                    step.
                   </p>
                 </>
               ) : (
@@ -444,11 +476,74 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
             ) : null}
 
             {selected === 'DESIGN' ? (
-              <DesignCasesPanel
+              <>
+                <EnvironmentPanel
+                  projectId={projectId}
+                  variant="design"
+                  canEdit={Boolean(
+                    detail.permissions.canManageCases ||
+                      detail.permissions.canEdit ||
+                      detail.permissions.canAccept,
+                  )}
+                />
+                <DesignCasesPanel
+                  projectId={projectId}
+                  canEdit={Boolean(
+                    detail.permissions.canManageCases ||
+                      detail.permissions.canEdit ||
+                      detail.status === 'ACCEPTED',
+                  )}
+                />
+              </>
+            ) : selected === 'ENVIRONMENT' ? (
+              <EnvironmentPanel
+                projectId={projectId}
+                variant="environment"
+                canEdit={Boolean(
+                  detail.permissions.canEdit || detail.permissions.canAccept,
+                )}
+              />
+            ) : selected === 'DATA' ? (
+              <>
+                <EnvironmentPanel
+                  projectId={projectId}
+                  variant="pre-exec"
+                  canEdit={Boolean(
+                    detail.permissions.canEdit || detail.permissions.canAccept,
+                  )}
+                />
+                <ExecutionPickerPanel
+                  key={
+                    (phasesQuery.data?.currentCycle ?? 1) > 1
+                      ? 'SYSTEM'
+                      : 'SPRINT'
+                  }
+                  projectId={projectId}
+                  canSelect={Boolean(detail.permissions.canAccept)}
+                  defaultRunKind={
+                    (phasesQuery.data?.currentCycle ?? 1) > 1
+                      ? 'SYSTEM'
+                      : 'SPRINT'
+                  }
+                  onSelectionChange={setExecSel}
+                />
+              </>
+            ) : selected === 'EXECUTION' ? (
+              <TcmsRunsPanel
                 projectId={projectId}
                 canEdit={Boolean(
-                  detail.permissions.canManageCases ||
-                    detail.permissions.canEdit ||
+                  detail.permissions.canEdit ||
+                    detail.permissions.canAccept ||
+                    detail.permissions.canManageCases ||
+                    detail.status === 'ACCEPTED',
+                )}
+              />
+            ) : selected === 'REPORTING' ? (
+              <TcmsResultsPanel
+                projectId={projectId}
+                canEdit={Boolean(
+                  detail.permissions.canEdit ||
+                    detail.permissions.canAccept ||
                     detail.status === 'ACCEPTED',
                 )}
               />
@@ -456,6 +551,18 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
               <DefectsPanel
                 projectId={projectId}
                 executionId={latestExecutionId}
+              />
+            ) : selected === 'AUTOMATION' ? (
+              <TcmsAutomationPanel
+                projectId={projectId}
+                canEdit={Boolean(
+                  detail.permissions.canEdit ||
+                    detail.permissions.canAccept ||
+                    detail.status === 'ACCEPTED',
+                )}
+                onRun={() =>
+                  router.replace('?tab=stlc&phase=EXECUTION', { scroll: false })
+                }
               />
             ) : (
               <div className="mt-5 rounded-lg border border-border bg-panel/40 p-4">
@@ -465,20 +572,6 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
                     <li key={line}>{line}</li>
                   ))}
                 </ul>
-                {selected === 'AUTOMATION' &&
-                Array.isArray(
-                  (detail.document.generation as { files?: string[] } | undefined)
-                    ?.files,
-                ) ? (
-                  <ul className="mt-3 max-h-40 space-y-1 overflow-auto font-mono text-xs text-muted">
-                    {(
-                      (detail.document.generation as { files: string[] }).files ??
-                      []
-                    ).map((f) => (
-                      <li key={f}>{f}</li>
-                    ))}
-                  </ul>
-                ) : null}
               </div>
             )}
 
@@ -606,16 +699,14 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
         <Button
           type="button"
           variant="secondary"
-          disabled={!prevPhase || prevPhase.status === 'LOCKED'}
+          disabled={!prevPhase}
           onClick={goPrev}
         >
           ← Previous
         </Button>
 
         <div className="flex flex-wrap gap-2">
-          {detail?.status === 'ACCEPTED' &&
-          nextPhase &&
-          nextPhase.status !== 'LOCKED' ? (
+          {nextPhase ? (
             <Button
               type="button"
               onClick={() =>
@@ -626,44 +717,45 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
             >
               Next step →
             </Button>
-          ) : (
-            <Button
-              type="button"
-              size="lg"
-              disabled={
-                !detail?.permissions.canAccept ||
-                dirty ||
-                acceptMutation.isPending ||
-                detail?.status === 'RUNNING' ||
-                detail?.status === 'ACCEPTED'
-              }
-              onClick={() => acceptMutation.mutate()}
-            >
-              {acceptMutation.isPending
-                ? 'Saving…'
-                : detail?.status === 'ACCEPTED'
-                  ? 'Accepted'
-                  : selected === 'DESIGN'
-                    ? 'Accept design & continue →'
-                    : 'Accept & next →'}
-            </Button>
-          )}
+          ) : null}
+          <Button
+            type="button"
+            size="lg"
+            disabled={
+              !detail?.permissions.canAccept ||
+              dirty ||
+              acceptMutation.isPending ||
+              detail?.status === 'RUNNING' ||
+              detail?.status === 'ACCEPTED'
+            }
+            onClick={() => acceptMutation.mutate()}
+          >
+            {acceptMutation.isPending
+              ? 'Saving…'
+              : detail?.status === 'ACCEPTED'
+                ? 'Accepted'
+                : selected === 'DESIGN'
+                  ? 'Accept design & continue →'
+                  : 'Accept & next →'}
+          </Button>
         </div>
       </div>
 
       <p className="text-center text-xs text-muted">
         {selected === 'DESIGN'
           ? 'Test cases stay editable anytime — even after Design was accepted.'
-          : browsingPastGate
-            ? 'You can revisit completed steps. Accept only applies on your current turn.'
-            : 'After Accept, we take you to the next phase automatically.'}
+          : browsingOtherStep
+            ? 'You can browse any STLC tab. Accept only applies on your current turn.'
+            : 'After Accept, we take you to the next phase automatically. Tabs stay unlocked.'}
       </p>
 
       {phasesQuery.data?.canStartNextCycle ? (
         <div className="rounded-lg border border-border bg-panel/40 p-4 text-center">
           <p className="text-sm text-fg">
-            Cycle {phasesQuery.data.currentCycle ?? 1} complete — start the next
-            post-fix cycle (reuses Design / Env / Data).
+            Cycle {phasesQuery.data.currentCycle ?? 1} complete — start Cycle{' '}
+            {(phasesQuery.data.currentCycle ?? 1) + 1} system / post-fix testing
+            (reuses Design / Env / Data). Pick ready cases again; run order is
+            still High → Medium → Low.
           </p>
           <Button
             type="button"
@@ -673,7 +765,7 @@ export function StlcDocsPanel({ projectId }: { projectId: string }) {
           >
             {nextCycleMutation.isPending
               ? 'Starting…'
-              : `Start Cycle ${(phasesQuery.data.currentCycle ?? 1) + 1} (post-fix)`}
+              : `Start Cycle ${(phasesQuery.data.currentCycle ?? 1) + 1} (system test)`}
           </Button>
           {nextCycleMutation.isError ? (
             <p className="mt-2 text-sm text-danger">

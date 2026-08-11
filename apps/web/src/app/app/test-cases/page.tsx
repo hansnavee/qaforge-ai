@@ -21,8 +21,7 @@ export default function TestCasesRedirectPage() {
     <div className="mx-auto max-w-lg space-y-4">
       <h1 className="text-2xl font-semibold tracking-tight">Test Board</h1>
       <p className="text-sm text-muted">
-        Test cases are scoped to each project. Open a project and use the Test
-        Board tab.
+        Test cases are scoped to each project. Open a project to manage cases.
       </p>
       <Card className="space-y-2">
         {isLoading ? <p className="text-sm text-muted">Loading…</p> : null}
@@ -34,7 +33,7 @@ export default function TestCasesRedirectPage() {
         {projects.map((p) => (
           <Link
             key={p.id}
-            href={`/app/projects/${p.id}?tab=stlc&phase=DESIGN`}
+            href={`/app/projects/${p.id}?tab=cases`}
             className="block rounded-lg border border-border px-3 py-2 text-sm hover:border-accent/40"
           >
             {p.name}

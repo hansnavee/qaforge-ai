@@ -1,12 +1,20 @@
 import {
+  BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { prisma, type Prisma } from '@qaforge/database';
-import { Role, createOrganizationSchema } from '@qaforge/shared';
+import {
+  Role,
+  addOrgMemberSchema,
+  createOrganizationSchema,
+  roleRank,
+  updateOrgMemberSchema,
+} from '@qaforge/shared';
 import { AuditService } from '../common/audit.service';
-import { assertRole, isValidRole } from '../common/rbac';
+import { assertRole } from '../common/rbac';
 import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
 
@@ -112,20 +120,20 @@ export class OrgsService {
     return { ...org, role: membership.role };
   }
 
-  async addMember(
-    actor: SessionUser,
-    orgId: string,
-    body: { email: string; role: string },
-  ) {
-    await this.requireMembership(actor.id, orgId, Role.ADMIN);
-
-    if (!isValidRole(body.role) || body.role === Role.OWNER) {
-      throw new ConflictException('Invalid role');
+  async addMember(actor: SessionUser, orgId: string, body: unknown) {
+    const actorMem = await this.requireMembership(actor.id, orgId, Role.ADMIN);
+    const input = parseBody(addOrgMemberSchema, body);
+    if (roleRank(input.role) > roleRank(actorMem.role)) {
+      throw new ForbiddenException('Cannot assign a role above your own');
     }
 
-    const target = await prisma.user.findUnique({ where: { email: body.email } });
+    const target = await prisma.user.findUnique({
+      where: { email: input.email.toLowerCase() },
+    });
     if (!target) {
-      throw new NotFoundException(`No user with email ${body.email}`);
+      throw new NotFoundException(
+        `No user with email ${input.email}. They must sign up first.`,
+      );
     }
 
     const existing = await prisma.membership.findUnique({
@@ -141,7 +149,7 @@ export class OrgsService {
       data: {
         organizationId: orgId,
         userId: target.id,
-        role: body.role,
+        role: input.role,
       },
       include: {
         user: { select: { id: true, email: true, name: true } },
@@ -154,10 +162,95 @@ export class OrgsService {
       action: 'org.member.add',
       resource: 'membership',
       resourceId: membership.id,
-      metadata: { email: body.email, role: body.role },
+      metadata: { email: input.email, role: input.role },
     });
 
     return membership;
+  }
+
+  async updateMember(
+    actor: SessionUser,
+    orgId: string,
+    membershipId: string,
+    body: unknown,
+  ) {
+    const actorMem = await this.requireMembership(actor.id, orgId, Role.ADMIN);
+    const input = parseBody(updateOrgMemberSchema, body);
+    if (roleRank(input.role) > roleRank(actorMem.role)) {
+      throw new ForbiddenException('Cannot assign a role above your own');
+    }
+
+    const target = await prisma.membership.findFirst({
+      where: { id: membershipId, organizationId: orgId },
+    });
+    if (!target) throw new NotFoundException('Member not found');
+    if (target.role === Role.OWNER && actorMem.role !== Role.OWNER) {
+      throw new ForbiddenException('Only an owner can change an owner');
+    }
+    if (target.role === Role.OWNER) {
+      const owners = await prisma.membership.count({
+        where: { organizationId: orgId, role: Role.OWNER },
+      });
+      if (owners <= 1) {
+        throw new BadRequestException('The organization needs at least one owner');
+      }
+    }
+
+    const membership = await prisma.membership.update({
+      where: { id: target.id },
+      data: { role: input.role },
+      include: {
+        user: { select: { id: true, email: true, name: true } },
+      },
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: actor.id,
+      action: 'org.member.update',
+      resource: 'membership',
+      resourceId: membership.id,
+      metadata: { role: input.role },
+    });
+
+    return membership;
+  }
+
+  async removeMember(
+    actor: SessionUser,
+    orgId: string,
+    membershipId: string,
+  ) {
+    const actorMem = await this.requireMembership(actor.id, orgId, Role.ADMIN);
+    const target = await prisma.membership.findFirst({
+      where: { id: membershipId, organizationId: orgId },
+    });
+    if (!target) throw new NotFoundException('Member not found');
+    if (target.role === Role.OWNER) {
+      const owners = await prisma.membership.count({
+        where: { organizationId: orgId, role: Role.OWNER },
+      });
+      if (owners <= 1) {
+        throw new BadRequestException('Cannot remove the last owner');
+      }
+      if (actorMem.role !== Role.OWNER) {
+        throw new ForbiddenException('Only an owner can remove an owner');
+      }
+    }
+    if (roleRank(target.role) > roleRank(actorMem.role)) {
+      throw new ForbiddenException('Cannot remove a member above your role');
+    }
+
+    await prisma.membership.delete({ where: { id: target.id } });
+    await this.audit.log({
+      organizationId: orgId,
+      userId: actor.id,
+      action: 'org.member.remove',
+      resource: 'membership',
+      resourceId: target.id,
+      metadata: { userId: target.userId },
+    });
+    return { ok: true, id: membershipId };
   }
 
   async requireMembership(userId: string, orgId: string, minRole: Role) {

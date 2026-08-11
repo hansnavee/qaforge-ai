@@ -18,8 +18,8 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'QAForge AI',
-  description: 'Multi-agent QA orchestration for modern software teams',
+  title: 'QAForge',
+  description: 'Test case management for QA teams',
 };
 
 export default function RootLayout({

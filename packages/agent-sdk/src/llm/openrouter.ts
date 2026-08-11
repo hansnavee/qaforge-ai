@@ -189,6 +189,39 @@ function mockAiRequirementIntelligenceFromPrompt(prompt: string): unknown {
   }
 }
 
+function mockSeniorQaCasesFromPrompt(prompt: string): unknown {
+  try {
+    const jsonMatch = prompt.match(/Requirements JSON:\s*(\[[\s\S]*\])/i);
+    const packed = jsonMatch
+      ? (JSON.parse(jsonMatch[1]!) as Array<Record<string, unknown>>)
+      : [];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const shared = require('@qaforge/shared') as typeof import('@qaforge/shared');
+    const source = packed
+      .map((r) => `${r.title ?? ''} ${r.text ?? ''}`)
+      .join('\n');
+    const assembled = shared.assembleGeneratedCases({
+      sourceText: source || prompt.slice(0, 4000),
+      llmCases: { cases: [] },
+    });
+    return {
+      cases: assembled.cases.map((c) => ({
+        scenario: c.scenario,
+        preconditions: c.preconditions,
+        steps: c.steps,
+        expected: c.expected,
+        type: c.type,
+        designTechnique: c.designTechnique,
+        requirementKey: c.requirementKey,
+        priorityLabel: c.priorityLabel,
+        testData: c.testData ?? {},
+      })),
+    };
+  } catch {
+    return { cases: [] };
+  }
+}
+
 function mockJsonForPrompt(haystack: string, prompt = ''): unknown {
   // Step 2.6 AI review intelligence — feature grouping
   if (
@@ -298,6 +331,14 @@ function mockJsonForPrompt(haystack: string, prompt = ''): unknown {
         },
       ],
     };
+  }
+
+  if (
+    haystack.includes('senior qa') ||
+    haystack.includes('qa manager') ||
+    haystack.includes('requested design technique')
+  ) {
+    return mockSeniorQaCasesFromPrompt(prompt);
   }
 
   if (

@@ -12,6 +12,42 @@ import { classifyRequirementTypes, computeBusinessImpact } from './classify.js';
 import { questionBucket, dedupeQuestionsAgainstExisting } from './question-utils.js';
 
 describe('business-driven feature grouping', () => {
+  it('keeps login-only requirements under User Login, not Registration', () => {
+    const groups = groupRequirementsIntoFeatures([
+      {
+        requirementKey: 'REQ-001',
+        title: 'User Login',
+        description:
+          'The user should be able to log in using their email and password.',
+        sourceSection: 'Feature: User Login',
+      },
+      {
+        requirementKey: 'REQ-002',
+        title: 'Invalid Login Error',
+        description:
+          'If the credentials are invalid, an error message should be displayed.',
+        sourceSection: 'Feature: User Login',
+      },
+      {
+        requirementKey: 'REQ-003',
+        title: 'Post-Login Redirect',
+        description:
+          'After successful login, the user should be redirected to the dashboard.',
+        sourceSection: 'Feature: User Login',
+      },
+    ]);
+    expect(groups.map((g) => g.name).sort()).toEqual(['User Login']);
+    expect(groups[0]?.requirementKeys).toHaveLength(3);
+    expect(matchFeature(groups[0] ? {
+      requirementKey: 'REQ-003',
+      title: 'Post-Login Redirect',
+      description:
+        'After successful login, the user should be redirected to the dashboard.',
+    } : { requirementKey: 'x', title: '', description: '' })?.name).toBe(
+      'User Login',
+    );
+  });
+
   it('groups product search under Product Management, not Purchase', () => {
     const groups = groupRequirementsIntoFeatures([
       {

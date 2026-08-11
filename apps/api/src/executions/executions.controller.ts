@@ -86,8 +86,9 @@ export class ExecutionsController {
     @CurrentUser() user: SessionUser,
     @Param('orgId') orgId: string,
     @Param('executionId') executionId: string,
+    @Body() body: unknown,
   ) {
-    return this.executions.approveTestData(user, orgId, executionId);
+    return this.executions.approveTestData(user, orgId, executionId, body);
   }
 
   @Post('orgs/:orgId/executions/:executionId/approve-test-execution')

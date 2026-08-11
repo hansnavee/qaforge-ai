@@ -12,7 +12,9 @@ import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Input } from '@/components/Input';
 import { api, ApiError, downloadAuthenticated } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import { SHOW_AI_STLC_UI } from '@/lib/product-flags';
 import { StlcDocsPanel } from './stlc-docs-panel';
+import { TcmsWorkspace } from './tcms-workspace';
 import {
   RequirementDetailView,
   RequirementsFeaturesView,
@@ -166,6 +168,8 @@ type StlcHandoff = {
   canApprove: boolean;
   canStartPlanning: boolean;
   approved: boolean;
+  rejected?: boolean;
+  rejectionReason?: string | null;
   blockers: string[];
   checklist?: Array<{ id: string; label: string; done: boolean }>;
   counts: {
@@ -223,6 +227,9 @@ type ReviewSummary = {
   };
   requirementsApprovedAt?: string | null;
   requirementsApprovedBy?: string | null;
+  requirementsRejectedAt?: string | null;
+  requirementsRejectedBy?: string | null;
+  requirementsRejectionReason?: string | null;
   stlcStage?: string | null;
   stlcHandoff?: StlcHandoff;
 };
@@ -414,6 +421,9 @@ type ProjectDetail = {
   analysisEngine?: string | null;
   requirementsApprovedAt?: string | null;
   requirementsApprovedBy?: string | null;
+  requirementsRejectedAt?: string | null;
+  requirementsRejectedBy?: string | null;
+  requirementsRejectionReason?: string | null;
   qaSignedOffAt?: string | null;
   stlcStage?: string | null;
   staleRequirementCount?: number;
@@ -574,7 +584,7 @@ function reviewStatusLabel(status?: string | null) {
   if (!status) return 'Not reviewed';
   if (status === 'READY_FOR_TEST_DESIGN') return 'Ready for test design';
   if (status === 'NEEDS_CLARIFICATION') return 'Needs clarification';
-  if (status === 'REVIEW_RECOMMENDED') return 'Review recommended';
+  if (status === 'REVIEW_RECOMMENDED') return 'Needs tester review';
   if (status === 'BLOCKED') return 'Blocked';
   return status;
 }
@@ -658,6 +668,13 @@ function FactList({
 }
 
 export default function ProjectWorkspacePage() {
+  if (!SHOW_AI_STLC_UI) {
+    return <TcmsWorkspace />;
+  }
+  return <AiStlcWorkspace />;
+}
+
+function AiStlcWorkspace() {
   const params = useParams<{ projectId: string }>();
   const projectId = params.projectId;
   const router = useRouter();
@@ -1077,6 +1094,19 @@ export default function ProjectWorkspacePage() {
     },
   });
 
+  const rejectRequirementsMutation = useMutation({
+    mutationFn: async (reason: string) => {
+      return api(`/api/v1/projects/${projectId}/reject-requirements`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      });
+    },
+    onSuccess: async () => {
+      await invalidateReviewQueries();
+      setView('features');
+    },
+  });
+
   const startPlanningMutation = useMutation({
     mutationFn: async () => {
       return api<{ id: string; status?: string; phase?: string }>(
@@ -1191,6 +1221,12 @@ export default function ProjectWorkspacePage() {
       reviewSummaryQuery.data?.requirementsApprovedAt ||
       project.requirementsApprovedAt,
   );
+  const rejectionReason =
+    (!requirementsApproved &&
+      (stlcHandoff?.rejectionReason ||
+        reviewSummaryQuery.data?.requirementsRejectionReason ||
+        project.requirementsRejectionReason)) ||
+    null;
   const workflowSteps = buildWorkflow({
     requirementsApproved,
     stlcStage:
@@ -1299,8 +1335,6 @@ export default function ProjectWorkspacePage() {
             const activeStep =
               workflowSteps.find((s) => s.state === 'active') ??
               workflowSteps[0];
-            const onRequirements =
-              !requirementsApproved || activeStep?.id === 'requirements';
             return (
               <>
                 <Button
@@ -1323,7 +1357,6 @@ export default function ProjectWorkspacePage() {
                 <Button
                   variant={tab === 'stlc' ? 'primary' : 'secondary'}
                   size="sm"
-                  disabled={onRequirements && !requirementsApproved}
                   onClick={() =>
                     router.replace(
                       `?tab=stlc&phase=${(activeStep?.id === 'requirements' ? 'planning' : activeStep?.id ?? 'planning').toUpperCase()}`,
@@ -1370,7 +1403,7 @@ export default function ProjectWorkspacePage() {
                 {isComplete
                   ? 'Open executions to download reports.'
                   : !requirementsApproved
-                    ? 'Review requirements on this page, then Approve. Next phases open one by one.'
+                    ? 'Review requirements on this page, then Approve. You can browse every STLC tab; Accept stays on the current step.'
                     : 'Open the current phase, wait for AI if needed, review, then Accept to move forward.'}
               </p>
 
@@ -1485,7 +1518,7 @@ export default function ProjectWorkspacePage() {
                           project.stlcStage ??
                           ''
                         ).toUpperCase() === 'REQUIREMENTS'
-                      ? 'Continues AI Test Planning: generates the strategy, designs documented test cases, then unlocks Test Design for review.'
+                      ? 'Continues AI Test Planning: generates the strategy, then designs technique-based test cases (not one case per requirement).'
                       : 'Open your current STLC step to Accept, or Review test cases to edit Design anytime.'}
                 </p>
               ) : null}
@@ -1772,6 +1805,9 @@ export default function ProjectWorkspacePage() {
           blockers={handoffBlockers}
           approvePending={approveRequirementsMutation.isPending}
           onApprove={() => approveRequirementsMutation.mutate()}
+          rejectPending={rejectRequirementsMutation.isPending}
+          onReject={(reason) => rejectRequirementsMutation.mutate(reason)}
+          rejectionReason={rejectionReason}
           onContinuePlanning={() => startPlanningMutation.mutate()}
         >
         <Card className="sticky top-0 z-10 space-y-3 border-accent/30 bg-bg/95 backdrop-blur">

@@ -1,8 +1,10 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -35,8 +37,27 @@ export class OrgsController {
   addMember(
     @CurrentUser() user: SessionUser,
     @Param('orgId') orgId: string,
-    @Body() body: { email: string; role: string },
+    @Body() body: unknown,
   ) {
     return this.orgs.addMember(user, orgId, body);
+  }
+
+  @Patch(':orgId/members/:membershipId')
+  updateMember(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('membershipId') membershipId: string,
+    @Body() body: unknown,
+  ) {
+    return this.orgs.updateMember(user, orgId, membershipId, body);
+  }
+
+  @Delete(':orgId/members/:membershipId')
+  removeMember(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('membershipId') membershipId: string,
+  ) {
+    return this.orgs.removeMember(user, orgId, membershipId);
   }
 }

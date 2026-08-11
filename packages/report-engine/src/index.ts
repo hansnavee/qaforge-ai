@@ -18,3 +18,12 @@ export {
   type RequirementExportItem,
   type RequirementsExportMeta,
 } from './requirements-export.js';
+export {
+  buildTcmsTcrHtml,
+  buildTcmsTcrWord,
+  buildTcmsTcrPdf,
+  type TcrReport,
+  type TcrCycle,
+  type TcrCase,
+  type TcrBug,
+} from './tcms-tcr.js';

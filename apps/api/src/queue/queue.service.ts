@@ -4,6 +4,8 @@ import IORedis from 'ioredis';
 
 export const EXECUTIONS_QUEUE = 'executions';
 export const RUN_EXECUTION_JOB = 'run-execution';
+export const GROUND_CASES_JOB = 'ground-cases';
+export const AI_EXECUTE_JOB = 'ai-execute-run';
 
 @Injectable()
 export class QueueService implements OnModuleInit {
@@ -53,6 +55,67 @@ export class QueueService implements OnModuleInit {
         removeOnComplete: 100,
         removeOnFail: 200,
         attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+      },
+    );
+  }
+
+  async enqueueAiExecute(opts: {
+    executionId: string;
+    testCaseIds?: string[];
+    browser?: string;
+    headless?: boolean;
+    username?: string;
+    password?: string;
+    appUrl?: string;
+    loginUrl?: string;
+  }) {
+    if (!this.queue) {
+      this.logger.warn(
+        `Queue unavailable; AI execute for ${opts.executionId} not enqueued`,
+      );
+      return null;
+    }
+    return this.queue.add(
+      AI_EXECUTE_JOB,
+      opts,
+      {
+        jobId: `ai-exec-${opts.executionId}-${Date.now()}`,
+        removeOnComplete: 50,
+        removeOnFail: 50,
+        attempts: 1,
+      },
+    );
+  }
+
+  async publishPause(executionId: string) {
+    if (!this.pub) return;
+    await this.pub.set(
+      `execution:${executionId}:pause-flag`,
+      '1',
+      'EX',
+      60 * 60,
+    );
+  }
+
+  async clearPause(executionId: string) {
+    if (!this.pub) return;
+    await this.pub.del(`execution:${executionId}:pause-flag`);
+  }
+
+  async enqueueGroundCases(projectId: string, executionId: string) {
+    if (!this.queue) {
+      this.logger.warn(`Queue unavailable; ground-cases for ${projectId} skipped`);
+      return null;
+    }
+    return this.queue.add(
+      GROUND_CASES_JOB,
+      { projectId, executionId },
+      {
+        jobId: `ground-${executionId}-${Date.now()}`,
+        removeOnComplete: 50,
+        removeOnFail: 50,
+        attempts: 2,
         backoff: { type: 'exponential', delay: 2000 },
       },
     );

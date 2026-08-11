@@ -27,7 +27,7 @@ export default function LandingPage() {
 
       <header className="relative z-10 mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-5">
         <div className="text-sm font-semibold tracking-tight">
-          QAForge <span className="text-accent">AI</span>
+          QAForge
         </div>
         <div className="flex items-center gap-2">
           <ThemeToggle />
@@ -41,7 +41,7 @@ export default function LandingPage() {
 
       <section className="relative z-10 mx-auto flex min-h-[calc(100vh-5rem)] w-full max-w-6xl flex-col justify-center px-6 pb-24 pt-10">
         <p className="mb-4 text-xs font-medium uppercase tracking-[0.22em] text-accent">
-          QAForge AI
+          QAForge
         </p>
         <h1 className="max-w-3xl text-balance text-4xl font-semibold tracking-tight text-fg sm:text-6xl">
           Ship with confidence. Let agents forge your QA.

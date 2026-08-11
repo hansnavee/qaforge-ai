@@ -770,6 +770,8 @@ export class RequirementReviewService {
       analysisStatus: project.analysisStatus,
       staleRequirementCount: project.staleRequirementCount,
       requirementsApprovedAt: project.requirementsApprovedAt,
+      requirementsRejectedAt: project.requirementsRejectedAt,
+      requirementsRejectionReason: project.requirementsRejectionReason,
       requirements: requirements.map((r) => ({
         requirementKey: r.requirementKey,
         title: r.title,
@@ -812,6 +814,9 @@ export class RequirementReviewService {
       },
       requirementsApprovedAt: project.requirementsApprovedAt ?? null,
       requirementsApprovedBy: project.requirementsApprovedBy ?? null,
+      requirementsRejectedAt: project.requirementsRejectedAt ?? null,
+      requirementsRejectedBy: project.requirementsRejectedBy ?? null,
+      requirementsRejectionReason: project.requirementsRejectionReason ?? null,
       stlcStage: project.stlcStage ?? 'REQUIREMENTS',
       stlcHandoff,
     };
@@ -823,6 +828,9 @@ export class RequirementReviewService {
       stlcStage: summary.stlcStage,
       requirementsApprovedAt: summary.requirementsApprovedAt,
       requirementsApprovedBy: summary.requirementsApprovedBy,
+      requirementsRejectedAt: summary.requirementsRejectedAt,
+      requirementsRejectedBy: summary.requirementsRejectedBy,
+      requirementsRejectionReason: summary.requirementsRejectionReason,
       ...summary.stlcHandoff,
     };
   }
@@ -953,11 +961,29 @@ export class RequirementReviewService {
     }
 
     const approvedAt = new Date();
+    // Tester approval is the only gate that marks requirements Ready for design
+    await prisma.requirement.updateMany({
+      where: {
+        projectId,
+        reviewStatus: {
+          notIn: ['BLOCKED', 'NEEDS_CLARIFICATION'],
+        },
+      },
+      data: {
+        reviewStatus: 'READY_FOR_TEST_DESIGN',
+        businessReadiness: 'READY',
+      },
+    });
+
     const updated = await prisma.project.update({
       where: { id: projectId },
       data: {
         requirementsApprovedAt: approvedAt,
         requirementsApprovedBy: user.id,
+        // Clear latest rejection once tester approves
+        requirementsRejectedAt: null,
+        requirementsRejectedBy: null,
+        requirementsRejectionReason: null,
         // Unlock Test Planning in workflow / STLC Docs after Stage 1 Accept
         stlcStage: 'PLANNING',
         status: 'REQUIREMENTS_APPROVED',
@@ -995,10 +1021,131 @@ export class RequirementReviewService {
         analysisStatus: updated.analysisStatus,
         staleRequirementCount: updated.staleRequirementCount,
         requirementsApprovedAt: updated.requirementsApprovedAt,
+        requirementsRejectedAt: updated.requirementsRejectedAt,
+        requirementsRejectionReason: updated.requirementsRejectionReason,
         requirements,
         openQuestions,
         openConflicts,
       }),
+    };
+  }
+
+  async rejectRequirements(
+    user: SessionUser,
+    orgId: string,
+    projectId: string,
+    reason: string,
+  ) {
+    const project = await this.requireProject(
+      user.id,
+      orgId,
+      projectId,
+      Role.MEMBER,
+    );
+
+    const trimmed = reason.trim();
+    if (!trimmed) {
+      throw new BadRequestException('Rejection reason is required');
+    }
+
+    const rejectedAt = new Date();
+    const updated = await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        requirementsApprovedAt: null,
+        requirementsApprovedBy: null,
+        requirementsRejectedAt: rejectedAt,
+        requirementsRejectedBy: user.id,
+        requirementsRejectionReason: trimmed,
+        analysisStatus: 'STALE',
+        staleRequirementCount: Math.max(project.staleRequirementCount ?? 0, 1),
+        status: 'DRAFT',
+        stlcStage: 'REQUIREMENTS',
+        // Invalidate later-phase approvals — same as fresh analysis
+        testPlanApprovedAt: null,
+        testPlanApprovedBy: null,
+        testDesignApprovedAt: null,
+        testDesignApprovedBy: null,
+        testDataApprovedAt: null,
+        testDataApprovedBy: null,
+        testExecutionApprovedAt: null,
+        testExecutionApprovedBy: null,
+        defectsApprovedAt: null,
+        defectsApprovedBy: null,
+        regressionApprovedAt: null,
+        regressionApprovedBy: null,
+        automationApprovedAt: null,
+        automationApprovedBy: null,
+        reportApprovedAt: null,
+        reportApprovedBy: null,
+        qaSignedOffAt: null,
+        qaSignedOffBy: null,
+      },
+    });
+
+    // Attach a HIGH blocking question so Approve cannot pass until re-analysis
+    const firstReq = await prisma.requirement.findFirst({
+      where: { projectId },
+      orderBy: { requirementKey: 'asc' },
+      select: { id: true },
+    });
+    const lastQ = await prisma.requirementQuestion.findFirst({
+      where: { projectId },
+      orderBy: { questionKey: 'desc' },
+      select: { questionKey: true },
+    });
+    let seq = 1;
+    if (lastQ?.questionKey) {
+      const m = lastQ.questionKey.match(/^Q(\d+)$/i);
+      if (m) seq = Number(m[1]) + 1;
+    }
+    const questionKey = `Q${String(seq).padStart(3, '0')}`;
+    await prisma.requirementQuestion.create({
+      data: {
+        projectId,
+        requirementId: firstReq?.id ?? null,
+        scope: firstReq ? 'REQUIREMENT' : 'FEATURE',
+        questionKey,
+        category: 'BUSINESS_RULE',
+        priority: 'HIGH',
+        blocking: true,
+        question:
+          'Requirements were rejected by the tester. Address the rejection reason, then run fresh analysis before Approve.',
+        reason: trimmed,
+        fingerprint: `human-reject:${rejectedAt.toISOString()}`,
+        status: 'OPEN',
+      },
+    });
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId: user.id,
+      action: 'stlc.requirements.reject',
+      resource: 'project',
+      resourceId: projectId,
+      metadata: {
+        reason: trimmed,
+        analysisId: project.analysisId,
+      },
+    });
+
+    const summaryAfter = await this.getSummary(user.id, orgId, projectId);
+    await this.persistRequirementsPhaseDoc(
+      projectId,
+      project.name,
+      summaryAfter,
+      { status: 'READY_FOR_REVIEW' },
+    );
+
+    return {
+      ok: true,
+      projectId,
+      requirementsRejectedAt: updated.requirementsRejectedAt,
+      requirementsRejectedBy: updated.requirementsRejectedBy,
+      requirementsRejectionReason: updated.requirementsRejectionReason,
+      analysisStatus: updated.analysisStatus,
+      stlcStage: updated.stlcStage,
+      stlcHandoff: summaryAfter.stlcHandoff,
     };
   }
 

@@ -59,12 +59,12 @@ export async function createAgentContext(opts: {
         storageKey: stored.key,
         mime: 'application/json',
         size: buf.length,
-        body: buf,
+        body: buf as never,
       },
       update: {
         mime: 'application/json',
         size: buf.length,
-        body: buf,
+        body: buf as never,
       },
     });
     return stored.key;
@@ -143,12 +143,12 @@ export async function putBinaryArtifact(opts: {
       storageKey: stored.key,
       mime: opts.mime,
       size: buf.length,
-      body: buf,
+      body: buf as never,
     },
     update: {
       mime: opts.mime,
       size: buf.length,
-      body: buf,
+      body: buf as never,
     },
   });
   return stored.key;
