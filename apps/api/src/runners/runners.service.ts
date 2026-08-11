@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -159,8 +160,23 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
     return row!;
   }
 
-  async createToken(userId: string, orgId: string, name?: string) {
+  async createToken(
+    userId: string,
+    orgId: string,
+    name?: string,
+    force = false,
+  ) {
     await this.orgs.requireMembership(userId, orgId, Role.TESTER);
+    const existing = await prisma.localRunner.findUnique({
+      where: {
+        organizationId_userId: { organizationId: orgId, userId },
+      },
+    });
+    if (existing && this.isOnline(existing.lastSeenAt) && !force) {
+      throw new ConflictException(
+        'Local runner is already Online. Do not create a new token — that disconnects this PC. Start AI Executor instead.',
+      );
+    }
     const token = `qf_live_${randomBytes(24).toString('base64url')}`;
     const tokenHash = hashToken(token);
     const runnerName = name?.trim() || 'Local runner';

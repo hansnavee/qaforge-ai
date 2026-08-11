@@ -18,8 +18,13 @@ export class RunnersController {
   create(
     @CurrentUser() user: SessionUser,
     @Param('orgId') orgId: string,
-    @Body() body: { name?: string },
+    @Body() body: { name?: string; force?: boolean },
   ) {
-    return this.runners.createToken(user.id, orgId, body?.name);
+    return this.runners.createToken(
+      user.id,
+      orgId,
+      body?.name,
+      Boolean(body?.force),
+    );
   }
 }

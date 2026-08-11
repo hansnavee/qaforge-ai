@@ -197,7 +197,13 @@ async function main() {
     await dialog.getByRole('heading', { name: 'AI Executor' }).waitFor();
     await page.screenshot({ path: path.join(OUT, '03-executor.png') });
 
-    await dialog.getByRole('button', { name: /create token|new token/i }).click();
+    const replace = dialog.getByRole('button', { name: /replace token/i });
+    if (await replace.isVisible().catch(() => false)) {
+      page.once('dialog', (d) => d.accept());
+      await replace.click();
+    } else {
+      await dialog.getByRole('button', { name: /create token/i }).click();
+    }
     await dialog.locator('pre').waitFor({ timeout: 15_000 });
     const command = (await dialog.locator('pre').innerText()).trim();
     const token = command.match(/--token\s+(\S+)/)?.[1];

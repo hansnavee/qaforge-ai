@@ -131,14 +131,17 @@ export function TcmsAiExecutorModal({
     };
   }, [open]);
 
-  async function createToken() {
+  async function createToken(force = false) {
     setError(null);
     setCreatingToken(true);
     try {
       const orgId = await getDefaultOrgId();
       const created = await api<RunnerToken>(
         `/api/v1/orgs/${orgId}/runners`,
-        { method: 'POST', body: JSON.stringify({ name: 'Windows' }) },
+        {
+          method: 'POST',
+          body: JSON.stringify({ name: 'Windows', force }),
+        },
       );
       setPair(created);
       setCopied(false);
@@ -155,6 +158,17 @@ export function TcmsAiExecutorModal({
     } finally {
       setCreatingToken(false);
     }
+  }
+
+  function replaceToken() {
+    if (
+      !window.confirm(
+        'Replace token disconnects the runner that is Online. You must run the new command in a terminal. Continue?',
+      )
+    ) {
+      return;
+    }
+    void createToken(true);
   }
 
   async function copyCommand() {
@@ -242,10 +256,10 @@ export function TcmsAiExecutorModal({
     >
       <div className="space-y-3">
         <p className="text-xs text-muted">
-          Local opens Chromium on <strong>this PC</strong>. Create a token, keep
-          the runner command running in a terminal, wait until the runner is
-          connected, then Start Headed. Closing the terminal or clicking New
-          token stops the runner.
+          Local opens Chromium on <strong>this PC</strong>. Create a token once,
+          keep that terminal running, wait until the runner is connected, then
+          Start Headed. If status already says Online, do not create another
+          token — that would disconnect this machine.
         </p>
         <div className="rounded-lg border border-border bg-surface p-3 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -260,24 +274,38 @@ export function TcmsAiExecutorModal({
                   : 'Offline'}
               </span>
             </p>
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              disabled={creatingToken}
-              onClick={() => void createToken()}
-            >
-              {creatingToken
-                ? 'Creating…'
-                : pair
-                  ? 'New token (restarts runner)'
-                  : 'Create token'}
-            </Button>
+            {online ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={creatingToken}
+                onClick={() => replaceToken()}
+              >
+                {creatingToken ? 'Creating…' : 'Replace token…'}
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={creatingToken}
+                onClick={() => void createToken()}
+              >
+                {creatingToken ? 'Creating…' : 'Create token'}
+              </Button>
+            )}
           </div>
+          {online ? (
+            <p className="text-[11px] text-success">
+              Connected. Leave the terminal as-is and click Start AI Executor.
+            </p>
+          ) : null}
           {pair ? (
             <>
               <p className="text-[11px] text-muted">
-                Keep this terminal open. New token invalidates the previous one.
+                Keep this terminal open. Replace token only if you lost the
+                process or switched machines.
               </p>
               <pre className="overflow-x-auto rounded-md border border-border bg-surface px-2 py-2 text-[11px] leading-snug">
                 {pair.command}
@@ -293,7 +321,7 @@ export function TcmsAiExecutorModal({
                 </Button>
               </div>
             </>
-          ) : (
+          ) : online ? null : (
             <p className="text-[11px] text-muted">
               Create a token, then run{' '}
               <code>pnpm --filter @qaforge/worker local-runner --api {apiUrl} --token …</code>{' '}
