@@ -94,6 +94,7 @@ export function TcmsAiExecutorModal({
   const [copied, setCopied] = useState(false);
   const [creatingToken, setCreatingToken] = useState(false);
   const [repoDir, setRepoDir] = useState(DEFAULT_REPO);
+  const [browserstackConfigured, setBrowserstackConfigured] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -121,12 +122,50 @@ export function TcmsAiExecutorModal({
         `/api/v1/orgs/${orgId}/projects/${projectId}`,
       );
       if (cancelled) return;
-      setAppUrl(project.appUrl || '');
-      setLoginUrl(project.loginUrl || '');
-      const url = project.appUrl || '';
-      if (/saucedemo/i.test(url)) {
-        setUsername((u) => u || 'standard_user');
+      try {
+        const org = await api<{ browserstackConfigured?: boolean }>(
+          `/api/v1/orgs/${orgId}`,
+        );
+        if (!cancelled) {
+          setBrowserstackConfigured(Boolean(org.browserstackConfigured));
+        }
+      } catch {
+        /* Cloud Start stays disabled until Settings keys load */
       }
+      let nextUrl = '';
+      let nextLogin = '';
+      let nextUser = '';
+      if (runId) {
+        const run = await api<{
+          cases?: Array<{
+            id: string;
+            testData?: Record<string, string> | null;
+            steps?: unknown;
+          }>;
+        }>(`/api/v1/orgs/${orgId}/projects/${projectId}/tcms/runs/${runId}`);
+        const wanted = testCaseIds?.length
+          ? (run.cases ?? []).filter((c) => testCaseIds.includes(c.id))
+          : (run.cases ?? []);
+        for (const c of wanted) {
+          const data = c.testData ?? {};
+          if (!nextUrl && data.appUrl) nextUrl = data.appUrl;
+          if (!nextLogin && data.loginUrl) nextLogin = data.loginUrl;
+          if (!nextUser && data.username) nextUser = data.username;
+          const steps = Array.isArray(c.steps) ? c.steps.map(String) : [];
+          for (const step of steps) {
+            const url = step.match(/https?:\/\/[^\s"'<>]+/i)?.[0];
+            if (!nextUrl && url) nextUrl = url;
+            const user = step.match(/username\s+"([^"]+)"/i)?.[1];
+            if (!nextUser && user && !/^a valid /i.test(user)) nextUser = user;
+          }
+        }
+      }
+      if (!nextUrl) nextUrl = project.appUrl || '';
+      if (!nextLogin) nextLogin = project.loginUrl || '';
+      if (cancelled) return;
+      setAppUrl(nextUrl);
+      setLoginUrl(nextLogin);
+      setUsername(nextUser);
     })().catch((err) => {
       if (!cancelled) {
         setError(err instanceof Error ? err.message : 'Could not load project');
@@ -135,7 +174,7 @@ export function TcmsAiExecutorModal({
     return () => {
       cancelled = true;
     };
-  }, [open, projectId]);
+  }, [open, projectId, runId, testCaseIds]);
 
   useEffect(() => {
     if (!open) return;
@@ -148,9 +187,6 @@ export function TcmsAiExecutorModal({
         );
         if (cancelled) return;
         setRunner(status);
-        if (status.online) {
-          setBrowserMode((mode) => (mode === 'HEADLESS' ? 'HEADED' : mode));
-        }
       } catch {
         /* keep last known status */
       }
@@ -234,12 +270,12 @@ export function TcmsAiExecutorModal({
       setError('Environment URL is required');
       return;
     }
-    if (target === 'CLOUD') {
-      setError('Cloud execution is coming soon. Use Local for now.');
+    if (target === 'LOCAL' && !runner?.online) {
+      setError('Start the local runner on your PC, then retry');
       return;
     }
-    if (!runner?.online) {
-      setError('Start the local runner on your PC, then retry');
+    if (target === 'CLOUD' && !browserstackConfigured) {
+      setError('Add BrowserStack keys in Settings, then retry Cloud');
       return;
     }
     setBusy(true);
@@ -252,7 +288,7 @@ export function TcmsAiExecutorModal({
         password: password || undefined,
         browser,
         browserMode,
-        target: 'LOCAL' as const,
+        target,
         confirmProduction,
         testCaseIds: testCaseIds?.length ? testCaseIds : undefined,
       };
@@ -288,11 +324,17 @@ export function TcmsAiExecutorModal({
           <Button
             type="button"
             size="sm"
-            disabled={busy || !online}
+            disabled={
+              busy ||
+              (target === 'LOCAL' && !online) ||
+              (target === 'CLOUD' && !browserstackConfigured)
+            }
             title={
-              online
-                ? undefined
-                : 'Local runner is offline until you run the token command on this PC'
+              target === 'LOCAL' && !online
+                ? 'Local runner is offline until you run the token command on this PC'
+                : target === 'CLOUD' && !browserstackConfigured
+                  ? 'Add BrowserStack keys in Settings'
+                  : undefined
             }
             onClick={() => void submit()}
           >
@@ -444,7 +486,7 @@ export function TcmsAiExecutorModal({
             <select
               className={`${fieldClass} mt-1`}
               value={browserMode}
-              disabled={!online}
+              disabled={target === 'LOCAL' && !online}
               onChange={(e) =>
                 setBrowserMode(e.target.value as 'HEADLESS' | 'HEADED')
               }
@@ -464,9 +506,13 @@ export function TcmsAiExecutorModal({
             />
             Local (this computer)
           </label>
-          <label className="flex items-center gap-2 opacity-60">
-            <input type="radio" disabled checked={false} readOnly />
-            Cloud (coming soon)
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              checked={target === 'CLOUD'}
+              onChange={() => setTarget('CLOUD')}
+            />
+            Cloud (BrowserStack)
           </label>
         </fieldset>
         {isLikelyProductionUrl(appUrl) ? (
@@ -483,10 +529,17 @@ export function TcmsAiExecutorModal({
           />
           This URL is production and I want to proceed
         </label>
-        {!online ? (
+        {target === 'LOCAL' && !online ? (
           <p className="text-xs text-danger">
             Runner is Offline. Create a token and run the command in this repo
             before Start.
+          </p>
+        ) : null}
+        {target === 'CLOUD' ? (
+          <p className="text-[11px] text-muted">
+            {browserstackConfigured
+              ? 'Cloud uses BrowserStack keys from Settings. Local runner is not required.'
+              : 'Add BrowserStack username and access key in Settings before Cloud Start.'}
           </p>
         ) : null}
         {error ? <p className="text-sm text-danger">{error}</p> : null}

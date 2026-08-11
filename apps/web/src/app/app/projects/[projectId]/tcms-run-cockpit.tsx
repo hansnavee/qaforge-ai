@@ -53,6 +53,7 @@ export function TcmsRunCockpit({
   const [search, setSearch] = useState('');
   const [confirm, setConfirm] = useState<'complete' | 'stop' | null>(null);
   const [executorOpen, setExecutorOpen] = useState(false);
+  const [retestCaseIds, setRetestCaseIds] = useState<string[] | undefined>();
   const [now, setNow] = useState(() => Date.now());
 
   const projectQuery = useQuery({
@@ -207,7 +208,10 @@ export function TcmsRunCockpit({
                 <Button
                   type="button"
                   size="sm"
-                  onClick={() => setExecutorOpen(true)}
+                  onClick={() => {
+                    setRetestCaseIds(undefined);
+                    setExecutorOpen(true);
+                  }}
                 >
                   AI Executor
                 </Button>
@@ -411,6 +415,17 @@ export function TcmsRunCockpit({
                       onClick: () =>
                         router.push(caseHref(projectId, runId, c.id)),
                     },
+                    ...(!locked && caps.canExecute
+                      ? [
+                          {
+                            label: 'Retest',
+                            onClick: () => {
+                              setRetestCaseIds([c.id]);
+                              setExecutorOpen(true);
+                            },
+                          },
+                        ]
+                      : []),
                   ]}
                 />
               </div>
@@ -460,7 +475,11 @@ export function TcmsRunCockpit({
         open={executorOpen}
         projectId={projectId}
         runId={runId}
-        onClose={() => setExecutorOpen(false)}
+        testCaseIds={retestCaseIds}
+        onClose={() => {
+          setExecutorOpen(false);
+          setRetestCaseIds(undefined);
+        }}
         onStarted={() => {
           void qc.invalidateQueries({ queryKey: ['tcms-run', projectId, runId] });
           void qc.invalidateQueries({ queryKey: ['tcms-runs', projectId] });

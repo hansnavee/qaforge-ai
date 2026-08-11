@@ -16,6 +16,8 @@ export type TcmsSelection = {
   runnerUserId?: string;
   localQueuedAt?: string;
   claimedByRunnerId?: string | null;
+  /// Subset to run now; roster stays in testCaseIds.
+  aiExecuteCaseIds?: string[] | null;
   /// AES blob with { username, password, appUrl, loginUrl } — strip before API responses.
   localCreds?: string;
 };

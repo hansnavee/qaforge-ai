@@ -369,6 +369,8 @@ export type TestCaseWriteInput = z.infer<typeof testCaseWriteSchema>;
 export const generateTestCasesSchema = z.object({
   prompt: z.string().max(100_000).optional(),
   folderId: z.string().min(1).nullable().optional(),
+  includeProjectRequirements: z.boolean().optional(),
+  reviewApplication: z.boolean().optional(),
   techniques: z
     .array(
       z.enum([

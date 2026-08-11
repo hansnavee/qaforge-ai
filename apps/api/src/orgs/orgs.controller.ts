@@ -33,6 +33,15 @@ export class OrgsController {
     return this.orgs.getById(user.id, orgId);
   }
 
+  @Patch(':orgId/browserstack')
+  saveBrowserstack(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Body() body: { username?: string; accessKey?: string },
+  ) {
+    return this.orgs.saveBrowserstack(user.id, orgId, body);
+  }
+
   @Post(':orgId/members')
   addMember(
     @CurrentUser() user: SessionUser,

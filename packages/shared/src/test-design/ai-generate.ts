@@ -1,9 +1,5 @@
 import { finalizeExtraction } from '../requirement-extraction/finalize-extraction.js';
 import {
-  extractPromptFacts,
-  loginCaseFromFacts,
-} from './prompt-facts.js';
-import {
   DESIGN_TECHNIQUES,
   type DesignTechnique,
 } from './techniques.js';
@@ -13,6 +9,9 @@ import {
   type DesignedTestCase,
   type TechniqueCoverageReport,
 } from './expand-coverage.js';
+import { normalizePriorityLabel } from './priority.js';
+import type { AppPageMap } from './review-app.js';
+import { formatPageMapForLlm } from './review-app.js';
 
 const SOURCE_CHAR_CAP = 12_000;
 const MAX_CASES = 80;
@@ -26,21 +25,28 @@ const INVENTED_APPS = [
   'swag labs',
 ];
 
-export const SENIOR_QA_GENERATE_SYSTEM = `You are a Senior QA / QA Manager writing test cases for THIS product only.
+export const DEFAULT_GENERATE_TECHNIQUES: DesignTechnique[] = [
+  'HAPPY_PATH',
+  'NEGATIVE',
+  'BOUNDARY',
+];
+
+export const SENIOR_QA_GENERATE_SYSTEM = `You are a Senior QA writing executable test cases for THIS product only.
 
 Do:
-- Copy every concrete detail from the requirements into the case: URL, username, password, button names, and the stated expected result.
-- Write numbered, executable steps (Open URL, Enter field, Click button, Verify outcome). Preconditions must be explicit.
+- Write MANY cases. One observable behavior per case, but cover every requested technique and every feature in the prompt, stored requirements, and observed UI.
+- For login, include at least: valid credentials, invalid password, and blank username/password — plus any other flows the UI or requirements show (logout, inventory, errors).
+- Copy URL, username, password, button labels, and expected text into steps AND testData. Never use placeholders like "a valid username".
 - Trace every case to a requirementKey from the input (REQ-001, …).
-- Keep the author's meaning. One observable behavior per case.
+- Steps must be concrete: Open URL, Enter field, Click button, Verify outcome.
 
 Don't:
-- Do not drop URLs, credentials, or expected results that appear in the source.
-- Do not invent a different product than the one named in the requirements.
-- Do not add signup or extra features unless the requirements describe them.
+- Do not invent a different product than the one named in the prompt, requirements, or page map.
+- Do not emit only a single happy-path login case when the user asked for login tests or the UI has more than a login form.
+- Do not drop URLs or credentials that appear in the source.
 
 Return JSON only:
-{"cases":[{"scenario":"","preconditions":"","steps":[""],"expected":"","type":"functional","designTechnique":"HAPPY_PATH","requirementKey":"REQ-001","priorityLabel":"HIGH","testData":{"username":"","password":"","appUrl":""}}]}`;
+{"cases":[{"scenario":"","preconditions":"","steps":[""],"expected":"","type":"functional","designTechnique":"HAPPY_PATH","requirementKey":"REQ-001","priorityLabel":"HIGH","module":"Login","testData":{"username":"","password":"","appUrl":""}}]}`;
 
 export type GeneratedCasePreview = {
   scenario: string;
@@ -276,6 +282,71 @@ export function toPreviewCase(tc: DesignedTestCase): GeneratedCasePreview {
   };
 }
 
+export type StoredRequirementForLlm = {
+  requirementKey: string;
+  title: string;
+  description: string;
+  acceptanceCriteria?: string[];
+};
+
+export function buildLlmGeneratePrompt(opts: {
+  userPrompt: string;
+  projectName?: string;
+  appUrl?: string | null;
+  loginUrl?: string | null;
+  username?: string;
+  password?: string;
+  storedRequirements?: StoredRequirementForLlm[];
+  pageMap?: AppPageMap | null;
+  techniques: DesignTechnique[];
+}): string {
+  const parts = [
+    opts.projectName ? `Project: ${opts.projectName}` : '',
+    opts.appUrl ? `Environment URL: ${opts.appUrl}` : '',
+    opts.loginUrl ? `Login URL: ${opts.loginUrl}` : '',
+    opts.username ? `Username: ${opts.username}` : '',
+    opts.password ? `Password: ${opts.password}` : '',
+    `Requested design techniques: ${opts.techniques.join(', ')}`,
+    '',
+    'Author prompt:',
+    opts.userPrompt.trim() || '(none — use stored requirements and observed UI)',
+  ];
+  if (opts.storedRequirements?.length) {
+    parts.push('', 'Stored project requirements:');
+    for (const r of opts.storedRequirements.slice(0, 80)) {
+      const ac = (r.acceptanceCriteria ?? []).slice(0, 8).join('; ');
+      parts.push(
+        `${r.requirementKey}: ${r.title}\n${r.description}${ac ? `\nAC: ${ac}` : ''}`,
+      );
+    }
+  }
+  if (opts.pageMap) {
+    parts.push('', 'Observed application UI:', formatPageMapForLlm(opts.pageMap));
+  }
+  parts.push(
+    '',
+    'Write JSON test cases for this application only. Copy URL and credentials into every relevant case.',
+  );
+  return parts.filter((p, i) => p !== '' || parts[i - 1] !== '').join('\n');
+}
+
+function attachRequirementKey(
+  row: { scenario: string; expected: string; requirementKey?: string | null },
+  requirements: DesignRequirement[],
+): string {
+  const given = row.requirementKey?.trim();
+  if (given && requirements.some((r) => r.id === given)) return given;
+  const blob = `${row.scenario} ${row.expected}`.toLowerCase();
+  for (const req of requirements) {
+    const words = req.title
+      .toLowerCase()
+      .split(/\W+/)
+      .filter((w) => w.length > 4);
+    if (words.length && words.every((w) => blob.includes(w))) return req.id;
+  }
+  return requirements[0]?.id ?? 'REQ-001';
+}
+
 export function assembleGeneratedCases(opts: {
   sourceText: string;
   llmCases?: unknown;
@@ -288,55 +359,69 @@ export function assembleGeneratedCases(opts: {
   coverage: TechniqueCoverageReport;
 } {
   const requirements = requirementsFromSource(opts.sourceText);
-  const facts = extractPromptFacts(opts.sourceText);
   const techniques = (opts.techniques?.length
     ? opts.techniques
-    : ['HAPPY_PATH']) as DesignTechnique[];
+    : DEFAULT_GENERATE_TECHNIQUES) as DesignTechnique[];
   const llmParsed = parseLlmGeneratedCases(opts.llmCases);
-  const seeded = loginCaseFromFacts(
-    facts,
-    requirements[0]?.id ?? 'REQ-001',
-  );
-  const existing = [
-    ...(seeded ? [seeded] : []),
-    ...llmParsed,
-  ];
-  const expanded = expandTechniqueCoverage({
-    requirements,
-    existingCases: existing,
-    appUrl: facts.appUrl,
-    techniques,
-    fillMissing: existing.length === 0,
-  });
-  let kept = dropInventedCases(
-    expanded.testCases,
-    opts.sourceText,
-    requirements,
-  );
-  if (!kept.length && seeded) {
-    kept = expandTechniqueCoverage({
-      requirements,
-      existingCases: [seeded],
-      appUrl: facts.appUrl,
-      techniques: ['HAPPY_PATH'],
-      fillMissing: false,
-    }).testCases;
+  const seen = new Set<string>();
+  const previews: GeneratedCasePreview[] = [];
+  for (const row of llmParsed) {
+    if (!row.scenario || !row.expected || !(row.steps?.length)) continue;
+    const key = row.scenario.toLowerCase().replace(/\s+/g, ' ');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const requirementKey = attachRequirementKey(row, requirements);
+    const technique = (DESIGN_TECHNIQUES as readonly string[]).includes(
+      String(row.designTechnique ?? '').toUpperCase(),
+    )
+      ? (String(row.designTechnique).toUpperCase() as DesignTechnique)
+      : 'HAPPY_PATH';
+    previews.push({
+      scenario: row.scenario,
+      preconditions: row.preconditions ?? '',
+      steps: row.steps ?? [],
+      expected: row.expected,
+      type: opts.type || row.type || 'functional',
+      designTechnique: technique,
+      requirementKey,
+      priorityLabel:
+        opts.priorityLabel ??
+        normalizePriorityLabel(row.priorityLabel ?? row.priority),
+      testData: row.testData ?? null,
+      module: row.module || 'General',
+    });
   }
-  if (kept.length > MAX_CASES) kept = kept.slice(0, MAX_CASES);
-  const cases = kept.map((tc) => {
-    const preview = toPreviewCase(tc);
-    if (opts.type) preview.type = opts.type;
-    if (opts.priorityLabel) preview.priorityLabel = opts.priorityLabel;
-    return preview;
+  const sourceBlob = [
+    opts.sourceText,
+    ...requirements.map((r) => `${r.title} ${r.description}`),
+  ].join('\n');
+  let cases = previews.filter((c) => {
+    const blob = `${c.scenario} ${c.preconditions} ${c.steps.join(' ')} ${c.expected}`;
+    return !mentionsInventedApp(blob, sourceBlob);
   });
+  if (cases.length > MAX_CASES) cases = cases.slice(0, MAX_CASES);
+  const asExisting = cases.map((c, i) => ({
+    id: `gen-${i}`,
+    scenario: c.scenario,
+    preconditions: c.preconditions,
+    steps: c.steps,
+    expected: c.expected,
+    type: c.type,
+    designTechnique: c.designTechnique,
+    requirementKey: c.requirementKey,
+    priorityLabel: c.priorityLabel,
+    testData: c.testData ?? undefined,
+    module: c.module,
+  }));
   return {
     requirements,
     cases,
     coverage: expandTechniqueCoverage({
       requirements,
-      existingCases: kept,
+      existingCases: asExisting,
       appUrl: null,
       techniques,
+      fillMissing: false,
     }).coverage,
   };
 }

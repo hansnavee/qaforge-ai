@@ -47,7 +47,7 @@ const caseEventSchema = z.object({
   durationMs: z.number().int().nonnegative().optional(),
   spec: z.string().max(200_000).optional(),
   screenshotBase64: z.string().max(2_500_000).optional(),
-  videoBase64: z.string().max(8_000_000).optional(),
+  videoBase64: z.string().max(16_000_000).optional(),
 });
 
 const completeSchema = z.object({
@@ -56,6 +56,7 @@ const completeSchema = z.object({
   passed: z.number().int().nonnegative().optional(),
   failed: z.number().int().nonnegative().optional(),
   html: z.string().max(2_000_000).optional(),
+  sessionVideoBase64: z.string().max(16_000_000).optional(),
 });
 
 const heartbeatSchema = z.object({
@@ -426,7 +427,22 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
 
     const selection = readSelection(execution.selection);
     const { localCreds: _drop, ...rest } = selection;
-    const cleaned: TcmsSelection = { ...rest, claimedByRunnerId: runner.id };
+    const cleaned: TcmsSelection = {
+      ...rest,
+      claimedByRunnerId: runner.id,
+      aiExecuteCaseIds: null,
+    };
+
+    const sessionVideo = fromBase64(input.sessionVideoBase64);
+    if (sessionVideo) {
+      await this.putBinary({
+        executionId,
+        type: ArtifactType.VIDEO,
+        key: `${executionId}/videos/session.webm`,
+        body: sessionVideo,
+        mime: 'video/webm',
+      });
+    }
 
     let htmlKey: string | null = null;
     let zipKey: string | null = null;
@@ -492,16 +508,19 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
     const status =
       input.status === 'CANCELLED'
         ? ExecutionStatus.CANCELLED
-        : input.status === 'FAILED'
-          ? ExecutionStatus.FAILED
-          : ExecutionStatus.COMPLETED;
+        : ExecutionStatus.RUNNING;
 
     await prisma.execution.update({
       where: { id: executionId },
       data: {
         status,
-        finishedAt: new Date(),
-        errorSummary: input.errorSummary ?? null,
+        finishedAt: input.status === 'CANCELLED' ? new Date() : null,
+        errorSummary:
+          input.status === 'CANCELLED'
+            ? input.errorSummary ?? 'Stopped by user'
+            : input.status === 'FAILED'
+              ? input.errorSummary ?? 'AI Executor hit an error — retest or continue'
+              : null,
         selection: cleaned as never,
       },
     });
@@ -531,9 +550,9 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
       await prisma.execution.updateMany({
         where: { id: row.id, status: ExecutionStatus.PENDING },
         data: {
-          status: ExecutionStatus.FAILED,
-          finishedAt: new Date(),
-          errorSummary: 'Start the local runner on your PC, then retry',
+          status: ExecutionStatus.PENDING,
+          errorSummary:
+            'Local runner did not claim this job in time. Start the runner on your PC, then Start AI Executor again.',
         },
       });
     }
@@ -569,7 +588,10 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
     selection: TcmsSelection,
   ): Promise<LocalJobPayload> {
     const creds = this.decryptLocalCreds(selection.localCreds);
-    const caseIds = selection.testCaseIds ?? [];
+    const caseIds =
+      selection.aiExecuteCaseIds?.length
+        ? selection.aiExecuteCaseIds
+        : selection.testCaseIds ?? [];
     const cases = caseIds.length
       ? await prisma.testCase.findMany({
           where: { id: { in: caseIds }, deletedAt: null },

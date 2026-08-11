@@ -1,18 +1,22 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { OpenRouterLlmClient } from '@qaforge/agent-sdk';
 import {
+  DEFAULT_GENERATE_TECHNIQUES,
   SENIOR_QA_GENERATE_SYSTEM,
   assembleGeneratedCases,
-  packRequirementsForLlm,
+  buildLlmGeneratePrompt,
   parseJsonFromLlm,
   requirementsFromSource,
+  type AppPageMap,
   type DesignTechnique,
   type GeneratedCasePreview,
+  type StoredRequirementForLlm,
   type TechniqueCoverageReport,
 } from '@qaforge/shared';
 
 @Injectable()
 export class AiGenerateCasesService {
+  private readonly logger = new Logger(AiGenerateCasesService.name);
   private readonly llm = new OpenRouterLlmClient();
 
   async generate(opts: {
@@ -21,6 +25,13 @@ export class AiGenerateCasesService {
     techniques?: DesignTechnique[];
     type?: string;
     priorityLabel?: 'HIGH' | 'MEDIUM' | 'LOW';
+    projectName?: string;
+    appUrl?: string | null;
+    loginUrl?: string | null;
+    username?: string;
+    password?: string;
+    storedRequirements?: StoredRequirementForLlm[];
+    pageMap?: AppPageMap | null;
   }): Promise<{
     cases: GeneratedCasePreview[];
     coverage: TechniqueCoverageReport;
@@ -28,14 +39,22 @@ export class AiGenerateCasesService {
     requirementCount: number;
   }> {
     const sourceText = opts.sourceText.trim();
-    if (!sourceText) {
+    const stored = opts.storedRequirements ?? [];
+    if (!sourceText && !stored.length && !opts.pageMap) {
       throw new BadRequestException('Requirements are required');
     }
     const techniques = (opts.techniques?.length
       ? opts.techniques
-      : (['HAPPY_PATH'] as DesignTechnique[]));
-    const requirements = requirementsFromSource(
+      : DEFAULT_GENERATE_TECHNIQUES) as DesignTechnique[];
+    const combinedSource = [
       sourceText,
+      ...stored.map((r) => `${r.requirementKey}: ${r.title}\n${r.description}`),
+      opts.appUrl ?? '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    const requirements = requirementsFromSource(
+      combinedSource || 'Generate tests for the observed application.',
       opts.documentName ?? 'prompt',
     );
     if (!requirements.length) {
@@ -44,31 +63,42 @@ export class AiGenerateCasesService {
       );
     }
 
+    const userPrompt = buildLlmGeneratePrompt({
+      userPrompt: sourceText,
+      projectName: opts.projectName,
+      appUrl: opts.appUrl,
+      loginUrl: opts.loginUrl,
+      username: opts.username,
+      password: opts.password,
+      storedRequirements: stored,
+      pageMap: opts.pageMap,
+      techniques,
+    });
+
     let llmCases: unknown = { cases: [] };
     let tokensUsed = 0;
     try {
-      const packed = packRequirementsForLlm(requirements);
       const result = await this.llm.complete({
         system: SENIOR_QA_GENERATE_SYSTEM,
-        prompt: `Requested design techniques: ${techniques.join(', ')}
-
-Requirements JSON:
-${packed}
-
-Write test cases for these requirements only. Do not invent a different application.`,
+        prompt: userPrompt,
         json: true,
         model: 'reasoning',
-        maxTokens: 3500,
-        temperature: 0.1,
+        maxTokens: 8000,
+        temperature: 0.2,
       });
       tokensUsed = result.tokensUsed;
       llmCases = parseJsonFromLlm(result.text);
-    } catch {
-      llmCases = { cases: [] };
+    } catch (err) {
+      this.logger.warn(
+        `LLM generate failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new BadRequestException(
+        'AI could not generate test cases. Check the prompt and try again.',
+      );
     }
 
     const assembled = assembleGeneratedCases({
-      sourceText,
+      sourceText: combinedSource,
       llmCases,
       techniques,
       type: opts.type,
@@ -76,7 +106,7 @@ Write test cases for these requirements only. Do not invent a different applicat
     });
     if (!assembled.cases.length) {
       throw new BadRequestException(
-        'No valid test cases could be generated from these requirements',
+        'AI returned no valid test cases. Add more detail (URL, credentials, expected result) and retry.',
       );
     }
     return {
@@ -96,7 +126,11 @@ Write test cases for these requirements only. Do not invent a different applicat
       priorityLabel: string;
       folderName: string;
     }>;
-  }): Promise<{ selectedIds: string[]; reasons: Record<string, string>; tokensUsed: number }> {
+  }): Promise<{
+    selectedIds: string[];
+    reasons: Record<string, string>;
+    tokensUsed: number;
+  }> {
     const sourceText = opts.sourceText.trim();
     if (!sourceText) {
       throw new BadRequestException('Requirements are required');

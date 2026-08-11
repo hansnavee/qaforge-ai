@@ -69,6 +69,8 @@ export class QueueService implements OnModuleInit {
     password?: string;
     appUrl?: string;
     loginUrl?: string;
+    browserstackUsername?: string;
+    browserstackAccessKey?: string;
   }) {
     if (!this.queue) {
       this.logger.warn(

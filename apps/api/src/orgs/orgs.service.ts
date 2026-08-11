@@ -14,6 +14,7 @@ import {
   updateOrgMemberSchema,
 } from '@qaforge/shared';
 import { AuditService } from '../common/audit.service';
+import { decrypt, encrypt, hasEncryptionKey } from '../common/encryption';
 import { assertRole } from '../common/rbac';
 import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
@@ -117,7 +118,62 @@ export class OrgsService {
       },
     });
     if (!org) throw new NotFoundException('Organization not found');
-    return { ...org, role: membership.role };
+    const { browserstackEncrypted, ...rest } = org;
+    return {
+      ...rest,
+      role: membership.role,
+      browserstackConfigured: Boolean(browserstackEncrypted),
+    };
+  }
+
+  async saveBrowserstack(
+    userId: string,
+    orgId: string,
+    body: { username?: string; accessKey?: string },
+  ) {
+    await this.requireMembership(userId, orgId, Role.ADMIN);
+    if (!hasEncryptionKey()) {
+      throw new BadRequestException('ENCRYPTION_KEY is not configured');
+    }
+    const username = body.username?.trim() ?? '';
+    const accessKey = body.accessKey?.trim() ?? '';
+    if (!username || !accessKey) {
+      throw new BadRequestException('BrowserStack username and access key are required');
+    }
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: {
+        browserstackEncrypted: encrypt(JSON.stringify({ username, accessKey })),
+      },
+    });
+    return { ok: true, browserstackConfigured: true };
+  }
+
+  async readBrowserstackKeys(orgId: string): Promise<{
+    username: string;
+    accessKey: string;
+  }> {
+    const org = await prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { browserstackEncrypted: true },
+    });
+    if (!org?.browserstackEncrypted) {
+      throw new BadRequestException(
+        'Add BrowserStack username and access key in Settings, then retry Cloud.',
+      );
+    }
+    try {
+      const parsed = JSON.parse(decrypt(org.browserstackEncrypted)) as {
+        username?: string;
+        accessKey?: string;
+      };
+      if (!parsed.username || !parsed.accessKey) {
+        throw new Error('incomplete');
+      }
+      return { username: parsed.username, accessKey: parsed.accessKey };
+    } catch {
+      throw new BadRequestException('BrowserStack keys could not be decrypted');
+    }
   }
 
   async addMember(actor: SessionUser, orgId: string, body: unknown) {

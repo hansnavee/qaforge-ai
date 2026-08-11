@@ -190,36 +190,72 @@ function mockAiRequirementIntelligenceFromPrompt(prompt: string): unknown {
 }
 
 function mockSeniorQaCasesFromPrompt(prompt: string): unknown {
-  try {
-    const jsonMatch = prompt.match(/Requirements JSON:\s*(\[[\s\S]*\])/i);
-    const packed = jsonMatch
-      ? (JSON.parse(jsonMatch[1]!) as Array<Record<string, unknown>>)
-      : [];
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const shared = require('@qaforge/shared') as typeof import('@qaforge/shared');
-    const source = packed
-      .map((r) => `${r.title ?? ''} ${r.text ?? ''}`)
-      .join('\n');
-    const assembled = shared.assembleGeneratedCases({
-      sourceText: source || prompt.slice(0, 4000),
-      llmCases: { cases: [] },
-    });
-    return {
-      cases: assembled.cases.map((c) => ({
-        scenario: c.scenario,
-        preconditions: c.preconditions,
-        steps: c.steps,
-        expected: c.expected,
-        type: c.type,
-        designTechnique: c.designTechnique,
-        requirementKey: c.requirementKey,
-        priorityLabel: c.priorityLabel,
-        testData: c.testData ?? {},
-      })),
-    };
-  } catch {
-    return { cases: [] };
-  }
+  const url =
+    prompt.match(/https?:\/\/[^\s"'<>]+/i)?.[0] ??
+    'https://the-internet.herokuapp.com/login';
+  const user =
+    prompt.match(/username[:\s]+["']?([^\s"']+)/i)?.[1] ?? 'tomsmith';
+  const pass =
+    prompt.match(/password[:\s]+["']?([^\s"']+)/i)?.[1] ??
+    'SuperSecretPassword!';
+  return {
+    cases: [
+      {
+        scenario: 'Valid user can log in',
+        preconditions: `Application is available at ${url}`,
+        steps: [
+          `Open ${url}`,
+          `Enter username "${user}"`,
+          `Enter password "${pass}"`,
+          'Click Login',
+          'Verify the user is logged in',
+        ],
+        expected: 'User is logged in successfully',
+        type: 'functional',
+        designTechnique: 'HAPPY_PATH',
+        requirementKey: 'REQ-001',
+        priorityLabel: 'HIGH',
+        module: 'Login',
+        testData: { appUrl: url, username: user, password: pass },
+      },
+      {
+        scenario: 'Login fails with an invalid password',
+        preconditions: `Application is available at ${url}`,
+        steps: [
+          `Open ${url}`,
+          `Enter username "${user}"`,
+          'Enter password "wrong_password"',
+          'Click Login',
+          'Verify an error is shown',
+        ],
+        expected: 'Login is rejected and an error is shown',
+        type: 'functional',
+        designTechnique: 'NEGATIVE',
+        requirementKey: 'REQ-001',
+        priorityLabel: 'HIGH',
+        module: 'Login',
+        testData: { appUrl: url, username: user, password: 'wrong_password' },
+      },
+      {
+        scenario: 'Login is blocked when username is blank',
+        preconditions: `Application is available at ${url}`,
+        steps: [
+          `Open ${url}`,
+          'Leave username blank',
+          `Enter password "${pass}"`,
+          'Click Login',
+          'Verify login does not succeed',
+        ],
+        expected: 'User remains on the login page',
+        type: 'functional',
+        designTechnique: 'BOUNDARY',
+        requirementKey: 'REQ-001',
+        priorityLabel: 'MEDIUM',
+        module: 'Login',
+        testData: { appUrl: url, username: '', password: pass },
+      },
+    ],
+  };
 }
 
 function mockJsonForPrompt(haystack: string, prompt = ''): unknown {

@@ -31,6 +31,7 @@ type OrgDetail = {
   name: string;
   slug: string;
   role: string;
+  browserstackConfigured?: boolean;
   memberships: Member[];
 };
 
@@ -47,6 +48,9 @@ type OrgCaseField = {
 export default function SettingsPage() {
   const qc = useQueryClient();
   const { org, caps, roleLabel: myLabel } = useOrgCaps();
+  const [bsUser, setBsUser] = useState('');
+  const [bsKey, setBsKey] = useState('');
+  const [bsError, setBsError] = useState<string | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [email, setEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<(typeof ASSIGNABLE_ROLES)[number]>(
@@ -63,6 +67,24 @@ export default function SettingsPage() {
     queryKey: ['org', org?.id],
     enabled: Boolean(org?.id),
     queryFn: () => api<OrgDetail>(`/api/v1/orgs/${org!.id}`),
+  });
+
+  const saveBrowserstack = useMutation({
+    mutationFn: () =>
+      api(`/api/v1/orgs/${org!.id}/browserstack`, {
+        method: 'PATCH',
+        body: JSON.stringify({ username: bsUser.trim(), accessKey: bsKey.trim() }),
+      }),
+    onSuccess: async () => {
+      setBsKey('');
+      setBsError(null);
+      await qc.invalidateQueries({ queryKey: ['org', org?.id] });
+    },
+    onError: (e) => {
+      setBsError(
+        e instanceof ApiError ? e.message : 'Could not save BrowserStack keys',
+      );
+    },
   });
 
   const invite = useMutation({
@@ -256,6 +278,58 @@ export default function SettingsPage() {
           <Badge tone="accent">{myLabel}</Badge>
           <span className="text-xs text-muted">{roleBlurb(caps.role)}</span>
         </div>
+      </Card>
+
+      <Card className="space-y-3">
+        <div className="text-xs uppercase tracking-wide text-muted">
+          BrowserStack
+        </div>
+        <p className="text-xs text-muted">
+          Cloud AI Executor connects Playwright to BrowserStack. Keys are
+          encrypted and never shown again.
+        </p>
+        <div className="text-xs">
+          Status:{' '}
+          {orgQuery.data?.browserstackConfigured ? (
+            <span className="text-success">Configured</span>
+          ) : (
+            <span className="text-muted">Not configured</span>
+          )}
+        </div>
+        {caps.canManageMembers ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Input
+              placeholder="BrowserStack username"
+              value={bsUser}
+              onChange={(e) => setBsUser(e.target.value)}
+              autoComplete="off"
+            />
+            <Input
+              type="password"
+              placeholder="Access key"
+              value={bsKey}
+              onChange={(e) => setBsKey(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+        ) : (
+          <p className="text-xs text-muted">
+            Administrators can save BrowserStack keys.
+          </p>
+        )}
+        {bsError ? <p className="text-sm text-danger">{bsError}</p> : null}
+        {caps.canManageMembers ? (
+          <Button
+            type="button"
+            size="sm"
+            disabled={
+              saveBrowserstack.isPending || !bsUser.trim() || !bsKey.trim()
+            }
+            onClick={() => saveBrowserstack.mutate()}
+          >
+            {saveBrowserstack.isPending ? 'Saving…' : 'Save keys'}
+          </Button>
+        ) : null}
       </Card>
 
       <div className="space-y-3">

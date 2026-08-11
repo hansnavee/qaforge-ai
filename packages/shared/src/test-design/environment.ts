@@ -21,6 +21,18 @@ function hostnameOf(raw: string): string | null {
   return m?.[1]?.toLowerCase() ?? null;
 }
 
+/** True for localhost / RFC1918 hosts the cloud API cannot crawl. */
+export function isPrivateAppUrl(raw: string): boolean {
+  const host = hostnameOf(raw)?.replace(/:\d+$/, '') ?? null;
+  if (!host) return true;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+  if (host.endsWith('.local') || host.endsWith('.localhost')) return true;
+  if (/^10\.\d+\.\d+\.\d+$/.test(host)) return true;
+  if (/^192\.168\.\d+\.\d+$/.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+$/.test(host)) return true;
+  return false;
+}
+
 /** Generic open step when no environment URL exists yet. */
 export function openAppStep(appUrl?: string | null): string {
   return isUsableAppUrl(appUrl)

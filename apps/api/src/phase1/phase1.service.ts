@@ -23,6 +23,9 @@ import {
   deleteTcmsFolderSchema,
   evaluateRequirementsReadiness,
   generateTestCasesSchema,
+  DEFAULT_GENERATE_TECHNIQUES,
+  credsFromCases,
+  reviewApplicationByFetch,
   proposeTcmsRunSchema,
   importTestCasesSchema,
   isLikelyProductionUrl,
@@ -1010,7 +1013,8 @@ export class Phase1Service {
     }
     if (
       execution.status !== ExecutionStatus.RUNNING &&
-      execution.status !== ExecutionStatus.PENDING
+      execution.status !== ExecutionStatus.PENDING &&
+      execution.status !== ExecutionStatus.FAILED
     ) {
       throw new BadRequestException('This cycle is locked');
     }
@@ -2202,35 +2206,49 @@ export class Phase1Service {
     const execution = await this.loadManualRun(projectId, executionId);
     this.assertCycleWritable(execution);
     const input = parseBody(aiExecuteRunSchema, body);
-    if (input.target === 'CLOUD') {
-      throw new BadRequestException('Cloud execution is coming soon');
-    }
-    const creds = await this.saveAiEnvironment(projectId, input);
     const selection = readSelection(execution.selection);
-    const caseIds = input.testCaseIds?.length
+    const roster = selection.testCaseIds ?? [];
+    const runCaseIds = input.testCaseIds?.length
       ? input.testCaseIds
-      : selection.testCaseIds ?? [];
-    if (!caseIds.length) {
+      : roster;
+    if (!runCaseIds.length) {
       throw new BadRequestException('No cases in this cycle');
     }
+    const caseRows = await prisma.testCase.findMany({
+      where: { id: { in: runCaseIds }, deletedAt: null },
+      select: { testData: true, steps: true },
+    });
+    const fromCases = credsFromCases(caseRows, {});
+    const mergedInput = {
+      ...input,
+      appUrl: input.appUrl?.trim() || fromCases.appUrl || '',
+      loginUrl: input.loginUrl || fromCases.loginUrl,
+      username: input.username || fromCases.username,
+      password: input.password || fromCases.password,
+    };
+    const creds = await this.saveAiEnvironment(projectId, mergedInput);
     const browserMode =
       input.browserMode ??
-      (input.target === 'LOCAL' ? 'HEADED' : 'HEADLESS');
+      (input.target === 'CLOUD' ? 'HEADLESS' : 'HEADED');
     if (!hasEncryptionKey()) {
       throw new BadRequestException(
-        'ENCRYPTION_KEY is not configured — cannot hand credentials to the local runner',
+        'ENCRYPTION_KEY is not configured — cannot hand credentials to the runner',
       );
     }
-    await this.runners.assertUserRunnerOnline(orgId, userId);
+    const target = input.target === 'CLOUD' ? 'CLOUD' : 'LOCAL';
+    if (target === 'LOCAL') {
+      await this.runners.assertUserRunnerOnline(orgId, userId);
+    }
     const nextSelection: TcmsSelection = {
       ...selection,
-      testCaseIds: caseIds,
+      testCaseIds: roster.length ? roster : runCaseIds,
+      aiExecuteCaseIds: runCaseIds,
       runKind: 'AUTOMATION',
       browserMode,
       browser: input.browser ?? 'chromium',
-      runnerTarget: 'LOCAL',
+      runnerTarget: target,
       runnerUserId: userId,
-      localQueuedAt: new Date().toISOString(),
+      localQueuedAt: target === 'LOCAL' ? new Date().toISOString() : undefined,
       claimedByRunnerId: null,
       localCreds: this.runners.encryptLocalCreds({
         appUrl: creds.appUrl,
@@ -2243,12 +2261,30 @@ export class Phase1Service {
       where: { id: executionId },
       data: {
         status: ExecutionStatus.PENDING,
-        startedAt: null,
+        startedAt: execution.startedAt ?? null,
         finishedAt: null,
-        errorSummary: 'Waiting for local runner',
+        errorSummary:
+          target === 'LOCAL'
+            ? 'Waiting for local runner'
+            : 'Queued on BrowserStack',
         selection: nextSelection as never,
       },
     });
+    if (target === 'CLOUD') {
+      const keys = await this.orgs.readBrowserstackKeys(orgId);
+      await this.queue.enqueueAiExecute({
+        executionId,
+        testCaseIds: runCaseIds,
+        browser: input.browser ?? 'chromium',
+        headless: browserMode !== 'HEADED',
+        username: creds.username,
+        password: creds.password,
+        appUrl: creds.appUrl,
+        loginUrl: creds.loginUrl,
+        browserstackUsername: keys.username,
+        browserstackAccessKey: keys.accessKey,
+      });
+    }
     await this.queue.clearPause(executionId);
     return this.getTcmsRun(userId, orgId, projectId, executionId);
   }
@@ -2317,9 +2353,6 @@ export class Phase1Service {
   ) {
     await this.requireProject(userId, orgId, projectId, Role.TESTER);
     const input = parseBody(aiExecuteRunSchema, body);
-    if (input.target === 'CLOUD') {
-      throw new BadRequestException('Cloud execution is coming soon');
-    }
     const scripts = await prisma.automatedScript.findMany({
       where: { projectId },
       select: { testCaseId: true },
@@ -3339,18 +3372,99 @@ export class Phase1Service {
       ).trim();
       documentName = file.originalname;
     }
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: {
+        name: true,
+        appUrl: true,
+        loginUrl: true,
+        encryptedConfig: true,
+        requirementText: true,
+      },
+    });
+    const includeReqs = input.includeProjectRequirements !== false;
+    const storedRequirements = includeReqs
+      ? (
+          await prisma.requirement.findMany({
+            where: { projectId },
+            orderBy: { requirementKey: 'asc' },
+            take: 80,
+            select: {
+              requirementKey: true,
+              title: true,
+              description: true,
+              acceptanceCriteria: true,
+            },
+          })
+        ).map((r) => ({
+          requirementKey: r.requirementKey,
+          title: r.title,
+          description: r.description,
+          acceptanceCriteria: Array.isArray(r.acceptanceCriteria)
+            ? r.acceptanceCriteria.map(String)
+            : [],
+        }))
+      : [];
+    if (
+      includeReqs &&
+      !storedRequirements.length &&
+      project?.requirementText?.trim()
+    ) {
+      storedRequirements.push({
+        requirementKey: 'REQ-001',
+        title: project.name,
+        description: project.requirementText.trim(),
+        acceptanceCriteria: [],
+      });
+    }
+    let username: string | undefined;
+    let password: string | undefined;
+    if (project?.encryptedConfig && hasEncryptionKey()) {
+      try {
+        const parsed = JSON.parse(decrypt(project.encryptedConfig)) as {
+          username?: string;
+          password?: string;
+        };
+        username = parsed.username;
+        password = parsed.password;
+      } catch {
+        /* ignore */
+      }
+    }
+    const fromPrompt = credsFromCases(
+      [{ steps: sourceText.split('\n'), testData: {} }],
+      {},
+    );
+    const appUrl =
+      normalizeStoredAppUrl(project?.appUrl) ?? fromPrompt.appUrl ?? null;
+    const loginUrl =
+      normalizeStoredAppUrl(project?.loginUrl) ?? appUrl;
+    username = username || fromPrompt.username;
+    password = password || fromPrompt.password;
+    const shouldReview = input.reviewApplication !== false && Boolean(appUrl);
+    const pageMap = shouldReview && appUrl
+      ? await reviewApplicationByFetch(appUrl)
+      : null;
     const generated = await this.aiGenerate.generate({
       sourceText,
       documentName,
       techniques: (input.techniques?.length
         ? input.techniques
-        : (['HAPPY_PATH'] as DesignTechnique[])),
+        : DEFAULT_GENERATE_TECHNIQUES) as DesignTechnique[],
       type: input.type,
       priorityLabel: input.priorityLabel,
+      projectName: project?.name,
+      appUrl,
+      loginUrl,
+      username,
+      password,
+      storedRequirements,
+      pageMap,
     });
     return {
       ...generated,
       folderId: input.folderId ?? null,
+      pageMap,
     };
   }
 
@@ -3736,6 +3850,15 @@ function coerceGenerateBody(body: unknown): unknown {
   if (!body || typeof body !== 'object') return {};
   const raw = { ...(body as Record<string, unknown>) };
   if (raw.folderId === '') raw.folderId = null;
+  if (typeof raw.includeProjectRequirements === 'string') {
+    raw.includeProjectRequirements =
+      raw.includeProjectRequirements === '1' ||
+      raw.includeProjectRequirements === 'true';
+  }
+  if (typeof raw.reviewApplication === 'string') {
+    raw.reviewApplication =
+      raw.reviewApplication === '1' || raw.reviewApplication === 'true';
+  }
   if (typeof raw.techniques === 'string') {
     try {
       raw.techniques = JSON.parse(raw.techniques);

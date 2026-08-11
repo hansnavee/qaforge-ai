@@ -54,6 +54,8 @@ export function TcmsAiGenerateModal({
   const [prompt, setPrompt] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [folderId, setFolderId] = useState(defaultFolderId);
+  const [includeReqs, setIncludeReqs] = useState(true);
+  const [reviewApp, setReviewApp] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -76,8 +78,8 @@ export function TcmsAiGenerateModal({
 
   async function generate() {
     setError(null);
-    if (mode === 'prompt' && !prompt.trim()) {
-      setError('Paste the requirements to generate from');
+    if (mode === 'prompt' && !prompt.trim() && !includeReqs && !reviewApp) {
+      setError('Paste requirements, or include project requirements / review the app URL');
       return;
     }
     if (mode === 'upload' && !file) {
@@ -92,6 +94,8 @@ export function TcmsAiGenerateModal({
         const form = new FormData();
         form.append('file', file);
         form.append('folderId', folderId);
+        form.append('includeProjectRequirements', includeReqs ? 'true' : 'false');
+        form.append('reviewApplication', reviewApp ? 'true' : 'false');
         data = await apiForm<GenerateResponse>(
           `/api/v1/orgs/${orgId}/projects/${projectId}/test-cases/generate`,
           form,
@@ -104,6 +108,8 @@ export function TcmsAiGenerateModal({
             body: JSON.stringify({
               prompt: prompt.trim(),
               folderId: folderId || null,
+              includeProjectRequirements: includeReqs,
+              reviewApplication: reviewApp,
             }),
           },
         );
@@ -210,9 +216,9 @@ export function TcmsAiGenerateModal({
       {step === 'form' ? (
         <div className="space-y-3">
           <p className="text-xs text-muted">
-            Paste the exact steps you want (URL, username, password, expected
-            result). Those details are copied into the case. You pick which
-            drafts to add, then mark them Ready.
+            Describe what to test. The API sends your prompt, stored
+            requirements, and a live look at the app URL to the model so it
+            writes many executable cases — not one canned login row.
           </p>
           <div className="flex gap-2">
             <Button
@@ -246,6 +252,22 @@ export function TcmsAiGenerateModal({
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             />
           )}
+          <label className="flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={includeReqs}
+              onChange={(e) => setIncludeReqs(e.target.checked)}
+            />
+            Include project requirements
+          </label>
+          <label className="flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={reviewApp}
+              onChange={(e) => setReviewApp(e.target.checked)}
+            />
+            Review application URL
+          </label>
           <label className="block space-y-1 text-xs text-muted">
             Folder
             <select

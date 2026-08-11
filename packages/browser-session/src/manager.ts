@@ -98,6 +98,60 @@ export class BrowserSessionManager {
     };
   }
 
+  async launchBrowserStack(opts: {
+    executionId: string;
+    startUrl: string;
+    username: string;
+    accessKey: string;
+    browser?: 'chromium' | 'firefox' | 'webkit' | string;
+    headless?: boolean;
+    name?: string;
+  }): Promise<{ sessionId: string; viewerHint: string }> {
+    const sessionId = randomUUID();
+    const headless = opts.headless !== false;
+    const caps = {
+      browser: opts.browser === 'firefox' ? 'firefox' : opts.browser === 'webkit' ? 'webkit' : 'chrome',
+      os: 'Windows',
+      os_version: '11',
+      name: opts.name || `QAForge ${opts.executionId}`,
+      build: 'qaforge-ai-executor',
+      'browserstack.username': opts.username,
+      'browserstack.accessKey': opts.accessKey,
+      'browserstack.playwrightVersion': '1.51.0',
+      headless,
+    };
+    const wsEndpoint = `wss://cdp.browserstack.com/playwright?caps=${encodeURIComponent(JSON.stringify(caps))}`;
+    const browser = await chromium.connect(wsEndpoint, { timeout: 60_000 });
+    const videoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qaforge-video-'));
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      acceptDownloads: false,
+      recordVideo: {
+        dir: videoDir,
+        size: { width: 1280, height: 720 },
+      },
+    });
+    const page = await context.newPage();
+    await page.goto(opts.startUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    });
+    this.sessions.set(sessionId, {
+      sessionId,
+      executionId: opts.executionId,
+      browser,
+      context,
+      page,
+      videoDir,
+      continueResolver: null,
+      continuePromise: null,
+    });
+    return {
+      sessionId,
+      viewerHint: `BrowserStack session for ${opts.executionId}`,
+    };
+  }
+
   async waitForContinue(sessionId: string): Promise<void> {
     const session = this.requireSession(sessionId);
     if (!session.continuePromise) {

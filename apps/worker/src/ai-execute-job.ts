@@ -2,6 +2,8 @@ import { prisma } from '@qaforge/database';
 import {
   ArtifactType,
   ExecutionStatus,
+  caseStartUrl,
+  credsFromCases,
   isUsableAppUrl,
   normalizePriorityLabel,
   sortCasesByPriority,
@@ -9,11 +11,7 @@ import {
 import { BrowserSessionManager } from '@qaforge/browser-session';
 import { buildZipPackage } from '@qaforge/report-engine';
 import { createAgentContext, putBinaryArtifact } from './context.js';
-import {
-  buildAutomationHtml,
-  playwrightSpec,
-  tryLogin,
-} from './ai-execute-playwright.js';
+import { buildAutomationHtml, playwrightSpec } from './ai-execute-playwright.js';
 import { executeTestSteps } from './execute-test-steps.js';
 import {
   ExecutionCancelledError,
@@ -30,6 +28,8 @@ export type AiExecuteJobData = {
   password?: string;
   appUrl?: string;
   loginUrl?: string;
+  browserstackUsername?: string;
+  browserstackAccessKey?: string;
 };
 
 type Selection = {
@@ -46,30 +46,6 @@ function forceHeadless(requestedHeadless: boolean): boolean {
   if (process.env.BROWSER_HEADLESS === 'true') return true;
   if (process.platform === 'linux' && !process.env.DISPLAY) return true;
   return requestedHeadless;
-}
-
-function credsFromCases(
-  cases: Array<{ testData?: unknown; steps?: unknown }>,
-  fallback: { username?: string; password?: string },
-) {
-  let username = fallback.username ?? '';
-  let password = fallback.password ?? '';
-  for (const tc of cases) {
-    const data =
-      tc.testData && typeof tc.testData === 'object'
-        ? (tc.testData as Record<string, string>)
-        : {};
-    if (!username && data.username) username = data.username;
-    if (!password && data.password) password = data.password;
-    const steps = Array.isArray(tc.steps) ? (tc.steps as string[]) : [];
-    for (const step of steps) {
-      const user = step.match(/username\s+"([^"]+)"/i);
-      const pass = step.match(/password\s+"([^"]+)"/i);
-      if (!username && user?.[1]) username = user[1];
-      if (!password && pass?.[1]) password = pass[1];
-    }
-  }
-  return { username, password };
 }
 
 export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
@@ -106,8 +82,8 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
     await prisma.execution.update({
       where: { id: executionId },
       data: {
-        status: ExecutionStatus.FAILED,
-        finishedAt: new Date(),
+        status: ExecutionStatus.RUNNING,
+        finishedAt: null,
         errorSummary: 'No cases to execute',
       },
     });
@@ -141,8 +117,8 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
     await prisma.execution.update({
       where: { id: executionId },
       data: {
-        status: ExecutionStatus.FAILED,
-        finishedAt: new Date(),
+        status: ExecutionStatus.RUNNING,
+        finishedAt: null,
         errorSummary: 'Application URL is required before AI execution',
       },
     });
@@ -160,18 +136,34 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
     data.browser === 'firefox' || data.browser === 'webkit'
       ? data.browser
       : 'chromium';
-  const headless = forceHeadless(data.headless !== false);
+  const useBstack = Boolean(
+    data.browserstackUsername && data.browserstackAccessKey,
+  );
+  const headless = useBstack
+    ? data.headless !== false
+    : forceHeadless(data.headless !== false);
   const browserManager = new BrowserSessionManager();
   let launched: { sessionId: string } | null = null;
   let ctx: Awaited<ReturnType<typeof createAgentContext>> | null = null;
 
   try {
-    launched = await browserManager.launch({
-      executionId,
-      startUrl: appUrl as string,
-      headless,
-      browser: browserKind,
-    });
+    launched = useBstack
+      ? await browserManager.launchBrowserStack({
+          executionId,
+          startUrl: appUrl as string,
+          username: data.browserstackUsername!,
+          accessKey: data.browserstackAccessKey!,
+          browser: browserKind,
+          headless,
+          name: selection.name,
+        })
+      : await browserManager.launch({
+          executionId,
+          startUrl: appUrl as string,
+          headless,
+          browser: browserKind,
+        });
+    if (!launched) throw new Error('Browser session failed');
     ctx = await createAgentContext({
       organizationId: project.organizationId,
       projectId: project.id,
@@ -182,8 +174,8 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
     await prisma.execution.update({
       where: { id: executionId },
       data: {
-        status: ExecutionStatus.FAILED,
-        finishedAt: new Date(),
+        status: ExecutionStatus.RUNNING,
+        finishedAt: null,
         errorSummary:
           err instanceof Error
             ? `Browser failed to start: ${err.message}`
@@ -225,12 +217,6 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
 
   try {
     const page = await browserManager.getPage(launched.sessionId);
-    await tryLogin(page, {
-      appUrl: appUrl as string,
-      loginUrl: data.loginUrl ?? project.loginUrl,
-      username: data.username,
-      password: data.password,
-    }).catch(() => undefined);
 
     for (const tc of ordered) {
       await throwIfCancelled(executionId);
@@ -282,20 +268,19 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
           ? (tc.testData as Record<string, string>)
           : {}),
       };
-      if (data.username) testData.username = data.username;
-      if (data.password) testData.password = data.password;
+      const fromCase = credsFromCases([{ testData, steps }], {});
+      if (!testData.username && fromCase.username) testData.username = fromCase.username;
+      if (!testData.password && fromCase.password) testData.password = fromCase.password;
+      if (!testData.username && data.username) testData.username = data.username;
+      if (!testData.password && data.password) testData.password = data.password;
 
       try {
-        await page.goto(appUrl as string, {
+        const startUrl = caseStartUrl(tc.testData, steps, appUrl as string);
+        await page.goto(startUrl, {
           waitUntil: 'domcontentloaded',
           timeout: 45_000,
         });
-        await executeTestSteps(
-          page,
-          steps,
-          appUrl as string,
-          testData,
-        );
+        await executeTestSteps(page, steps, startUrl, testData);
       } catch (err) {
         status = 'FAILED';
         message = err instanceof Error ? err.message : String(err);
@@ -322,30 +307,6 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
         }
       } catch {
         /* ignore screenshot errors */
-      }
-
-      if (status === 'FAILED') {
-        try {
-          const video = await browserManager.captureFailureVideo(
-            launched.sessionId,
-            tc.externalId.replace(/[^a-zA-Z0-9_-]/g, '_'),
-          );
-          if (video) {
-            const videoName = `videos/fail-${tc.externalId}.webm`;
-            zipFiles[videoName] = video;
-            const key = await putBinaryArtifact({
-              executionId,
-              type: ArtifactType.VIDEO,
-              key: `${executionId}/${videoName}`,
-              body: video,
-              mime: 'video/webm',
-              store: ctx.artifactStore,
-            });
-            evidenceKeys.push(key);
-          }
-        } catch {
-          /* ignore */
-        }
       }
 
       const durationMs = Date.now() - started;
@@ -389,8 +350,8 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
       await prisma.execution.update({
         where: { id: executionId },
         data: {
-          status: ExecutionStatus.FAILED,
-          finishedAt: new Date(),
+          status: ExecutionStatus.RUNNING,
+          finishedAt: null,
           errorSummary: err instanceof Error ? err.message : String(err),
         },
       });
@@ -487,8 +448,9 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
   await prisma.execution.update({
     where: { id: executionId },
     data: {
-      status: ExecutionStatus.COMPLETED,
-      finishedAt: new Date(),
+      status: ExecutionStatus.RUNNING,
+      finishedAt: null,
+      errorSummary: null,
     },
   });
 }

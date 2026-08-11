@@ -75,6 +75,8 @@ model Organization {
   auditLogs        AuditLog[]
   caseFields       CaseField[]
   localRunners     LocalRunner[]
+  /// AES blob { username, accessKey } for BrowserStack Cloud
+  browserstackEncrypted String?
 }
 
 /// Paired laptop Playwright runner for Local AI execution (no Redis/DB on the PC).

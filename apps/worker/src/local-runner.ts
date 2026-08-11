@@ -1,10 +1,7 @@
 import os from 'node:os';
 import { BrowserSessionManager } from '@qaforge/browser-session';
-import {
-  buildAutomationHtml,
-  playwrightSpec,
-  tryLogin,
-} from './ai-execute-playwright.js';
+import { caseStartUrl, credsFromCases } from '@qaforge/shared';
+import { buildAutomationHtml, playwrightSpec } from './ai-execute-playwright.js';
 import { executeTestSteps } from './execute-test-steps.js';
 
 type LocalJob = {
@@ -88,6 +85,58 @@ class RunnerClient {
   }
 }
 
+async function finishLocalJob(
+  client: RunnerClient,
+  browserManager: BrowserSessionManager,
+  launched: { sessionId: string } | null,
+  opts: {
+    executionId: string;
+    status: 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    errorSummary: string | null;
+    passed: number;
+    failed: number;
+    html?: string;
+    headless: boolean;
+  },
+) {
+  let sessionVideoBase64: string | undefined;
+  if (launched) {
+    try {
+      const files = await browserManager.flushAndCollectVideos(launched.sessionId);
+      const session = files[0];
+      if (session && session.body.length < 12_000_000) {
+        sessionVideoBase64 = session.body.toString('base64');
+      }
+    } catch {
+      /* ignore */
+    }
+    if (!opts.headless) {
+      const hold = Math.max(
+        0,
+        Number(process.env.QAFORGE_HEADED_HOLD_MS ?? 15_000) || 15_000,
+      );
+      console.log(
+        `[local-runner] Keeping headed Chromium open for ${hold}ms so you can see it`,
+      );
+      await new Promise((r) => setTimeout(r, hold));
+    }
+    await browserManager.destroy(launched.sessionId).catch(() => undefined);
+  }
+  await client
+    .request(`/runners/jobs/${opts.executionId}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({
+        status: opts.status,
+        errorSummary: opts.errorSummary,
+        passed: opts.passed,
+        failed: opts.failed,
+        html: opts.html,
+        sessionVideoBase64,
+      }),
+    })
+    .catch(() => undefined);
+}
+
 async function runJob(client: RunnerClient, job: LocalJob) {
   const headless = forceHeadlessIfNoDisplay(job.headless);
   console.log(
@@ -129,12 +178,6 @@ async function runJob(client: RunnerClient, job: LocalJob) {
       browser: job.browser,
     });
     const page = await browserManager.getPage(launched.sessionId);
-    await tryLogin(page, {
-      appUrl: job.appUrl,
-      loginUrl: job.loginUrl,
-      username: job.username,
-      password: job.password,
-    }).catch(() => undefined);
 
     for (const tc of job.cases) {
       await beat();
@@ -150,22 +193,25 @@ async function runJob(client: RunnerClient, job: LocalJob) {
         password: job.password,
       });
       const testData: Record<string, string> = { ...(tc.testData ?? {}) };
-      if (job.username) testData.username = job.username;
-      if (job.password) testData.password = job.password;
+      const fromCase = credsFromCases([{ testData, steps }], {});
+      if (!testData.username && fromCase.username) testData.username = fromCase.username;
+      if (!testData.password && fromCase.password) testData.password = fromCase.password;
+      if (!testData.username && job.username) testData.username = job.username;
+      if (!testData.password && job.password) testData.password = job.password;
       const started = Date.now();
       let status: 'PASSED' | 'FAILED' = 'PASSED';
       let message: string | null =
         'AI Executor: steps completed without hard failure';
       let screenshotBase64: string | undefined;
-      let videoBase64: string | undefined;
       let thumb: string | null = null;
 
       try {
-        await page.goto(job.appUrl, {
+        const startUrl = caseStartUrl(tc.testData, steps, job.appUrl);
+        await page.goto(startUrl, {
           waitUntil: 'domcontentloaded',
           timeout: 45_000,
         });
-        await executeTestSteps(page, steps, job.appUrl, testData);
+        await executeTestSteps(page, steps, startUrl, testData);
       } catch (err) {
         status = 'FAILED';
         message = err instanceof Error ? err.message : String(err);
@@ -182,20 +228,6 @@ async function runJob(client: RunnerClient, job: LocalJob) {
         }
       } catch {
         /* ignore */
-      }
-
-      if (status === 'FAILED') {
-        try {
-          const video = await browserManager.captureFailureVideo(
-            launched.sessionId,
-            tc.externalId.replace(/[^a-zA-Z0-9_-]/g, '_'),
-          );
-          if (video && video.length < 4_000_000) {
-            videoBase64 = video.toString('base64');
-          }
-        } catch {
-          /* ignore */
-        }
       }
 
       const durationMs = Date.now() - started;
@@ -220,38 +252,20 @@ async function runJob(client: RunnerClient, job: LocalJob) {
           durationMs,
           spec,
           screenshotBase64,
-          videoBase64,
         }),
       });
       console.log(`[local-runner] ${status} ${tc.externalId} ${tc.scenario}`);
     }
   } catch (err) {
-    await client
-      .request(`/runners/jobs/${job.executionId}/complete`, {
-        method: 'POST',
-        body: JSON.stringify({
-          status: cancelled ? 'CANCELLED' : 'FAILED',
-          errorSummary: err instanceof Error ? err.message : String(err),
-          passed,
-          failed,
-        }),
-      })
-      .catch(() => undefined);
+    await finishLocalJob(client, browserManager, launched, {
+      executionId: job.executionId,
+      status: cancelled ? 'CANCELLED' : 'FAILED',
+      errorSummary: err instanceof Error ? err.message : String(err),
+      passed,
+      failed,
+      headless,
+    });
     throw err;
-  } finally {
-    if (launched && !headless) {
-      const hold = Math.max(
-        0,
-        Number(process.env.QAFORGE_HEADED_HOLD_MS ?? 15_000) || 15_000,
-      );
-      console.log(
-        `[local-runner] Keeping headed Chromium open for ${hold}ms so you can see it`,
-      );
-      await new Promise((r) => setTimeout(r, hold));
-    }
-    if (launched) {
-      await browserManager.destroy(launched.sessionId).catch(() => undefined);
-    }
   }
 
   const html = htmlRows.length
@@ -261,15 +275,14 @@ async function runJob(client: RunnerClient, job: LocalJob) {
         rows: htmlRows,
       })
     : undefined;
-  await client.request(`/runners/jobs/${job.executionId}/complete`, {
-    method: 'POST',
-    body: JSON.stringify({
-      status: cancelled ? 'CANCELLED' : 'COMPLETED',
-      errorSummary: cancelled ? 'Stopped by user' : null,
-      passed,
-      failed,
-      html,
-    }),
+  await finishLocalJob(client, browserManager, launched, {
+    executionId: job.executionId,
+    status: cancelled ? 'CANCELLED' : 'COMPLETED',
+    errorSummary: cancelled ? 'Stopped by user' : null,
+    passed,
+    failed,
+    html,
+    headless,
   });
   console.log(
     `[local-runner] Finished ${job.executionId} passed=${passed} failed=${failed} cancelled=${cancelled}`,
