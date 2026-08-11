@@ -28,7 +28,7 @@ import {
   type TcmsSelection,
 } from '../phase1/tcms-support';
 
-export const RUNNER_ONLINE_MS = 20_000;
+export const RUNNER_ONLINE_MS = 45_000;
 export const LOCAL_WAIT_MS = 120_000;
 
 export type RunnerPrincipal = {

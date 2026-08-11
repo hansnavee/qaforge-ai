@@ -92,6 +92,9 @@ describe('environment helpers', () => {
     expect(isLikelyProductionUrl('https://www.shop.com')).toBe(true);
     expect(isLikelyProductionUrl('https://qa.shop.com')).toBe(false);
     expect(isLikelyProductionUrl('https://www.saucedemo.com')).toBe(false);
+    expect(isLikelyProductionUrl('https://the-internet.herokuapp.com/login')).toBe(
+      false,
+    );
   });
 
   it('grounds generic open steps onto the live URL', () => {

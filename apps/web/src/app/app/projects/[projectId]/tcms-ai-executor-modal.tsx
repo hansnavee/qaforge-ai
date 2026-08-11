@@ -1,11 +1,14 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { isLikelyProductionUrl } from '@qaforge/shared';
 import { API_BASE_URL, api } from '@/lib/api';
 import { getDefaultOrgId } from '@/lib/org';
 import { Button } from '@/components/Button';
 import { Modal } from '@/components/Modal';
 import { fieldClass } from './tcms-board';
+
+const PAIR_STORAGE = 'qaforge-local-runner-pair';
 
 type ProjectEnv = {
   appUrl?: string | null;
@@ -67,6 +70,21 @@ export function TcmsAiExecutorModal({
     let cancelled = false;
     void (async () => {
       const orgId = await getDefaultOrgId();
+      try {
+        const raw = sessionStorage.getItem(PAIR_STORAGE);
+        if (raw) {
+          const stored = JSON.parse(raw) as RunnerToken & { orgId?: string };
+          if (stored.command && stored.token && stored.orgId === orgId) {
+            setPair({
+              token: stored.token,
+              command: stored.command,
+              apiUrl: stored.apiUrl,
+            });
+          }
+        }
+      } catch {
+        /* ignore */
+      }
       const project = await api<ProjectEnv>(
         `/api/v1/orgs/${orgId}/projects/${projectId}`,
       );
@@ -77,7 +95,11 @@ export function TcmsAiExecutorModal({
       if (/saucedemo/i.test(url)) {
         setUsername((u) => u || 'standard_user');
       }
-    })().catch(() => undefined);
+    })().catch((err) => {
+      if (!cancelled) {
+        setError(err instanceof Error ? err.message : 'Could not load project');
+      }
+    });
     return () => {
       cancelled = true;
     };
@@ -98,7 +120,7 @@ export function TcmsAiExecutorModal({
           setBrowserMode((mode) => (mode === 'HEADLESS' ? 'HEADED' : mode));
         }
       } catch {
-        /* ignore */
+        /* keep last known status */
       }
     }
     void loadStatus();
@@ -120,6 +142,14 @@ export function TcmsAiExecutorModal({
       );
       setPair(created);
       setCopied(false);
+      try {
+        sessionStorage.setItem(
+          PAIR_STORAGE,
+          JSON.stringify({ ...created, orgId }),
+        );
+      } catch {
+        /* ignore */
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create token');
     } finally {
@@ -197,7 +227,12 @@ export function TcmsAiExecutorModal({
           <Button
             type="button"
             size="sm"
-            disabled={busy || !online}
+            disabled={busy}
+            title={
+              online
+                ? undefined
+                : 'Local runner is offline until you run the token command on this PC'
+            }
             onClick={() => void submit()}
           >
             {busy ? 'Starting…' : 'Start AI Executor'}
@@ -207,8 +242,9 @@ export function TcmsAiExecutorModal({
     >
       <div className="space-y-3">
         <p className="text-xs text-muted">
-          Local runs Playwright on <strong>this computer</strong>. Pair a runner
-          below, then Start. Cloud execution is coming soon.
+          Local opens Chromium on <strong>this PC</strong>. Create a token, keep
+          the runner command running in a terminal, wait for Online, then Start
+          Headed. Closing the terminal or clicking New token stops the runner.
         </p>
         <div className="rounded-lg border border-border bg-surface p-3 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -230,14 +266,14 @@ export function TcmsAiExecutorModal({
               {creatingToken
                 ? 'Creating…'
                 : pair
-                  ? 'New token'
+                  ? 'New token (restarts runner)'
                   : 'Create token'}
             </Button>
           </div>
           {pair ? (
             <>
               <p className="text-[11px] text-muted">
-                Token is shown once. In this repo, run:
+                Keep this terminal open. New token invalidates the previous one.
               </p>
               <pre className="overflow-x-auto rounded-md border border-border bg-surface px-2 py-2 text-[11px] leading-snug">
                 {pair.command}
@@ -344,6 +380,12 @@ export function TcmsAiExecutorModal({
             Cloud (coming soon)
           </label>
         </fieldset>
+        {isLikelyProductionUrl(appUrl) ? (
+          <p className="text-xs text-danger">
+            This URL is treated as production. Check the box below or Start will
+            fail.
+          </p>
+        ) : null}
         <label className="flex items-center gap-2 text-xs text-muted">
           <input
             type="checkbox"
@@ -352,6 +394,12 @@ export function TcmsAiExecutorModal({
           />
           This URL is production and I want to proceed
         </label>
+        {!online ? (
+          <p className="text-xs text-danger">
+            Runner is Offline. Create a token and run the command in this repo
+            before Start.
+          </p>
+        ) : null}
         {error ? <p className="text-sm text-danger">{error}</p> : null}
       </div>
     </Modal>

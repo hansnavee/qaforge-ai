@@ -239,6 +239,16 @@ async function runJob(client: RunnerClient, job: LocalJob) {
       .catch(() => undefined);
     throw err;
   } finally {
+    if (launched && !headless) {
+      const hold = Math.max(
+        0,
+        Number(process.env.QAFORGE_HEADED_HOLD_MS ?? 15_000) || 15_000,
+      );
+      console.log(
+        `[local-runner] Keeping headed Chromium open for ${hold}ms so you can see it`,
+      );
+      await new Promise((r) => setTimeout(r, hold));
+    }
     if (launched) {
       await browserManager.destroy(launched.sessionId).catch(() => undefined);
     }

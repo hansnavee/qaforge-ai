@@ -48,7 +48,7 @@ export class BrowserSessionManager {
     const kind = opts.browser ?? 'chromium';
     const slowMo = headless
       ? 0
-      : Math.max(0, Number(process.env.PLAYWRIGHT_SLOWMO ?? 250) || 250);
+      : Math.max(0, Number(process.env.PLAYWRIGHT_SLOWMO ?? 400) || 400);
     const launchArgs = headless
       ? ['--no-sandbox', '--disable-dev-shm-usage']
       : ['--start-maximized'];

@@ -49,7 +49,10 @@ export function isLikelyProductionUrl(raw: string): boolean {
     host === 'localhost' ||
     host === '127.0.0.1' ||
     host.endsWith('.local') ||
-    host.includes('saucedemo')
+    host.includes('saucedemo') ||
+    host.includes('herokuapp') ||
+    host.endsWith('.github.io') ||
+    host.includes('the-internet')
   ) {
     return false;
   }
