@@ -9,6 +9,35 @@ import { Modal } from '@/components/Modal';
 import { fieldClass } from './tcms-board';
 
 const PAIR_STORAGE = 'qaforge-local-runner-pair';
+const REPO_STORAGE = 'qaforge-repo-root';
+const DEFAULT_REPO = 'D:\\auto-test-genration';
+
+function readRepoDir() {
+  try {
+    const saved = localStorage.getItem(REPO_STORAGE)?.trim();
+    if (saved) return saved;
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_REPO;
+}
+
+function persistRepoDir(dir: string) {
+  try {
+    localStorage.setItem(REPO_STORAGE, dir.trim());
+  } catch {
+    /* ignore */
+  }
+}
+
+function buildRunnerCommand(apiUrl: string, token: string, repoDir: string) {
+  const flags = `--api ${apiUrl} --token ${token}`;
+  const dir = repoDir.trim().replace(/[/\\]+$/, '').replace(/"/g, '');
+  if (!dir) {
+    return `cmd /c "pnpm --filter @qaforge/worker local-runner ${flags}"`;
+  }
+  return `cmd /c "cd /d ${dir} && pnpm --filter @qaforge/worker local-runner ${flags}"`;
+}
 
 type ProjectEnv = {
   appUrl?: string | null;
@@ -64,21 +93,24 @@ export function TcmsAiExecutorModal({
   const [pair, setPair] = useState<RunnerToken | null>(null);
   const [copied, setCopied] = useState(false);
   const [creatingToken, setCreatingToken] = useState(false);
+  const [repoDir, setRepoDir] = useState(DEFAULT_REPO);
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     void (async () => {
       const orgId = await getDefaultOrgId();
+      const dir = readRepoDir();
+      setRepoDir(dir);
       try {
         const raw = sessionStorage.getItem(PAIR_STORAGE);
         if (raw) {
           const stored = JSON.parse(raw) as RunnerToken & { orgId?: string };
-          if (stored.command && stored.token && stored.orgId === orgId) {
+          if (stored.token && stored.orgId === orgId) {
             setPair({
               token: stored.token,
-              command: stored.command,
               apiUrl: stored.apiUrl,
+              command: buildRunnerCommand(stored.apiUrl, stored.token, dir),
             });
           }
         }
@@ -143,12 +175,17 @@ export function TcmsAiExecutorModal({
           body: JSON.stringify({ name: 'Windows', force }),
         },
       );
-      setPair(created);
+      const next: RunnerToken = {
+        token: created.token,
+        apiUrl: created.apiUrl,
+        command: buildRunnerCommand(created.apiUrl, created.token, repoDir),
+      };
+      setPair(next);
       setCopied(false);
       try {
         sessionStorage.setItem(
           PAIR_STORAGE,
-          JSON.stringify({ ...created, orgId }),
+          JSON.stringify({ ...next, orgId }),
         );
       } catch {
         /* ignore */
@@ -171,10 +208,20 @@ export function TcmsAiExecutorModal({
     void createToken(true);
   }
 
+  const displayCommand = pair
+    ? buildRunnerCommand(pair.apiUrl, pair.token, repoDir)
+    : '';
+
+  function onRepoDirChange(value: string) {
+    setRepoDir(value);
+    persistRepoDir(value);
+    setCopied(false);
+  }
+
   async function copyCommand() {
-    if (!pair?.command) return;
+    if (!displayCommand) return;
     try {
-      await navigator.clipboard.writeText(pair.command);
+      await navigator.clipboard.writeText(displayCommand);
       setCopied(true);
     } catch {
       setCopied(false);
@@ -303,12 +350,21 @@ export function TcmsAiExecutorModal({
           ) : null}
           {pair ? (
             <>
+              <label className="block text-[11px] text-muted">
+                Repo folder on this PC
+                <input
+                  className={`${fieldClass} mt-1`}
+                  value={repoDir}
+                  onChange={(e) => onRepoDirChange(e.target.value)}
+                  placeholder={DEFAULT_REPO}
+                />
+              </label>
               <p className="text-[11px] text-muted">
-                Keep this terminal open. Replace token only if you lost the
-                process or switched machines.
+                Works in CMD or PowerShell from any folder (Desktop, C:\,
+                etc.). Keep the window open. Needs pnpm on PATH.
               </p>
               <pre className="overflow-x-auto rounded-md border border-border bg-surface px-2 py-2 text-[11px] leading-snug">
-                {pair.command}
+                {displayCommand}
               </pre>
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -323,9 +379,10 @@ export function TcmsAiExecutorModal({
             </>
           ) : online ? null : (
             <p className="text-[11px] text-muted">
-              Create a token, then run{' '}
-              <code>pnpm --filter @qaforge/worker local-runner --api {apiUrl} --token …</code>{' '}
-              on this PC. Status turns Online within a few seconds.
+              Create a token, then paste the command in CMD or PowerShell from
+              any folder. It uses{' '}
+              <code>pnpm --dir</code> so you do not have to cd into the repo.
+              API: {apiUrl}.
             </p>
           )}
         </div>

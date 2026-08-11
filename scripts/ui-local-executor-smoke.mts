@@ -206,7 +206,7 @@ async function main() {
     }
     await dialog.locator('pre').waitFor({ timeout: 15_000 });
     const command = (await dialog.locator('pre').innerText()).trim();
-    const token = command.match(/--token\s+(\S+)/)?.[1];
+    const token = command.match(/--token\s+"?([^\s"]+)/)?.[1];
     assert(token, `no token in command: ${command}`);
     report.commandHasApi = command.includes(API);
     log('token created');

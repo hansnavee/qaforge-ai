@@ -14,7 +14,8 @@
     "docker:up": "docker compose up --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
-    "docker:infra": "docker compose up -d postgres redis"
+    "docker:infra": "docker compose up -d postgres redis",
+    "local-runner": "pnpm --filter @qaforge/worker local-runner"
   },
   "devDependencies": {
     "turbo": "^2.3.3",
