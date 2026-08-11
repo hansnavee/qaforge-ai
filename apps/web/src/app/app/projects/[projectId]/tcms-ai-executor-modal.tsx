@@ -227,7 +227,7 @@ export function TcmsAiExecutorModal({
           <Button
             type="button"
             size="sm"
-            disabled={busy}
+            disabled={busy || !online}
             title={
               online
                 ? undefined
@@ -243,14 +243,18 @@ export function TcmsAiExecutorModal({
       <div className="space-y-3">
         <p className="text-xs text-muted">
           Local opens Chromium on <strong>this PC</strong>. Create a token, keep
-          the runner command running in a terminal, wait for Online, then Start
-          Headed. Closing the terminal or clicking New token stops the runner.
+          the runner command running in a terminal, wait until the runner is
+          connected, then Start Headed. Closing the terminal or clicking New
+          token stops the runner.
         </p>
         <div className="rounded-lg border border-border bg-surface p-3 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs font-medium">
               Local runner:{' '}
-              <span className={online ? 'text-success' : 'text-muted'}>
+              <span
+                data-testid="local-runner-status"
+                className={online ? 'text-success' : 'text-muted'}
+              >
                 {online
                   ? `Online${runner?.name ? ` (${runner.name})` : ''}`
                   : 'Offline'}

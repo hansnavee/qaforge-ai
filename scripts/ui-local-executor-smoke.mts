@@ -206,7 +206,10 @@ async function main() {
     log('token created');
 
     runner = startLocalRunner(token);
-    await dialog.getByText(/Online/i).waitFor({ timeout: 45_000 });
+    await dialog
+      .getByTestId('local-runner-status')
+      .filter({ hasText: /^Online/ })
+      .waitFor({ timeout: 45_000 });
     await page.screenshot({ path: path.join(OUT, '04-online.png') });
 
     await dialog.getByPlaceholder('https://qa.example.com').fill(APP);

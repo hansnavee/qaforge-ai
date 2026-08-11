@@ -289,7 +289,10 @@ async function main() {
 
   const client = new RunnerClient(api, token);
   console.log(`[local-runner] Pairing with ${api}`);
-  console.log('[local-runner] Headed Playwright will open on this machine when a Local job is claimed.');
+  console.log(
+    '[local-runner] Headed Playwright will open on this machine when a Local job is claimed.',
+  );
+  let readyLogged = false;
 
   let stopping = false;
   process.on('SIGINT', () => {
@@ -309,6 +312,10 @@ async function main() {
           userAgent: `qaforge-local-runner/${process.platform}`,
         }),
       });
+      if (!readyLogged) {
+        readyLogged = true;
+        console.log('[local-runner] Connected — waiting for a Local job');
+      }
       const next = await client.request<{ job: LocalJob | null }>(
         '/runners/jobs/next',
       );
