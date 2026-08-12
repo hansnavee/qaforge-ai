@@ -31,22 +31,61 @@ export const DEFAULT_GENERATE_TECHNIQUES: DesignTechnique[] = [
   'BOUNDARY',
 ];
 
+/** Full design suite when the author asks for complete / 100% coverage. */
+export const FULL_COVERAGE_TECHNIQUES: DesignTechnique[] = [...DESIGN_TECHNIQUES];
+
+export function wantsFullCoverage(prompt: string): boolean {
+  return /100\s*%|full\s+coverage|complete\s+coverage|exhaustive|maximum\s+coverage|all\s+scenarios/i.test(
+    prompt,
+  );
+}
+
+export function resolveGenerateTechniques(
+  prompt: string,
+  requested?: DesignTechnique[] | null,
+): DesignTechnique[] {
+  if (requested?.length) return requested;
+  if (wantsFullCoverage(prompt)) return FULL_COVERAGE_TECHNIQUES;
+  return DEFAULT_GENERATE_TECHNIQUES;
+}
+
 export const SENIOR_QA_GENERATE_SYSTEM = `You are a Senior QA writing executable test cases for THIS product only.
 
 Do:
-- Write MANY cases. One observable behavior per case, but cover every requested technique and every feature in the prompt, stored requirements, and observed UI.
-- For login, include at least: valid credentials, invalid password, and blank username/password — plus any other flows the UI or requirements show (logout, inventory, errors).
+- Write MANY cases (aim for broad coverage, not a thin sample). One observable behavior per case.
+- Cover every requested technique and every feature in the prompt, stored requirements, and observed UI.
+- For Welcome / Login / Account pages, ALWAYS cover at least:
+  1) Page load / Welcome branding and layout
+  2) Valid login success
+  3) Invalid password
+  4) Invalid / unknown username
+  5) Blank username
+  6) Blank password
+  7) Both fields blank
+  8) Field labels, placeholders, and required markers
+  9) Password masking / show-hide if present
+  10) Remember me / stay signed in if present
+  11) Forgot password / reset link if present
+  12) Sign up / register link if present
+  13) Keyboard / Enter submit
+  14) Redirect after login and session cookie
+  15) Locked / disabled account messaging if present
+  16) XSS / SQL injection style negative input (safe strings only)
+  17) Accessibility basics (focus order, error association) when UI supports it
+- Put cases in clear modules (e.g. "Welcome", "Login") — not everything under General.
 - Copy URL, username, password, button labels, and expected text into steps AND testData. Never use placeholders like "a valid username".
-- Trace every case to a requirementKey from the input (REQ-001, …).
+- Trace every case to a requirementKey from the input (REQ-001, …). If the author only gave a short prompt, invent REQ-001 Welcome, REQ-002 Login (and more if needed) and cover each.
 - Steps must be concrete: Open URL, Enter field, Click button, Verify outcome.
 
 Don't:
 - Do not invent a different product than the one named in the prompt, requirements, or page map.
-- Do not emit only a single happy-path login case when the user asked for login tests or the UI has more than a login form.
+- Do not emit only a single happy-path login case when the user asked for login/welcome tests or 100% coverage.
 - Do not drop URLs or credentials that appear in the source.
+- Do not stop after 3–5 cases when the author asked for full / 100% coverage — produce a large suite (typically 20–50+ for login+welcome).
 
 Return JSON only:
 {"cases":[{"scenario":"","preconditions":"","steps":[""],"expected":"","type":"functional","designTechnique":"HAPPY_PATH","requirementKey":"REQ-001","priorityLabel":"HIGH","module":"Login","testData":{"username":"","password":"","appUrl":""}}]}`;
+
 
 export type GeneratedCasePreview = {
   scenario: string;
@@ -413,7 +452,10 @@ export function buildLlmGeneratePrompt(opts: {
   }
   parts.push(
     '',
-    'Write JSON test cases for this application only. Copy URL and credentials into every relevant case.',
+    wantsFullCoverage(opts.userPrompt)
+      ? 'Coverage mandate: the author asked for full / 100% coverage. Produce a LARGE suite across ALL requested techniques and Welcome/Login checklist items. Prefer 25+ cases when the scope is Welcome+Login.'
+      : 'Write JSON test cases for this application only. Copy URL and credentials into every relevant case.',
+    'Group cases with module "Welcome" or "Login" (or other real page names from the UI). Return JSON only.',
   );
   return parts.filter((p, i) => p !== '' || parts[i - 1] !== '').join('\n');
 }
@@ -441,6 +483,8 @@ export function assembleGeneratedCases(opts: {
   techniques?: DesignTechnique[];
   type?: string;
   priorityLabel?: 'HIGH' | 'MEDIUM' | 'LOW';
+  appUrl?: string | null;
+  fillMissing?: boolean;
 }): {
   requirements: DesignRequirement[];
   cases: GeneratedCasePreview[];
@@ -464,6 +508,13 @@ export function assembleGeneratedCases(opts: {
     )
       ? (String(row.designTechnique).toUpperCase() as DesignTechnique)
       : 'HAPPY_PATH';
+    const moduleGuess =
+      row.module ||
+      (/welcome/i.test(row.scenario)
+        ? 'Welcome'
+        : /log\s*in|sign\s*in|password|username|account/i.test(row.scenario)
+          ? 'Login'
+          : 'General');
     previews.push({
       scenario: row.scenario,
       preconditions: row.preconditions ?? '',
@@ -476,7 +527,7 @@ export function assembleGeneratedCases(opts: {
         opts.priorityLabel ??
         normalizePriorityLabel(row.priorityLabel ?? row.priority),
       testData: row.testData ?? null,
-      module: row.module || 'General',
+      module: moduleGuess,
     });
   }
   const sourceBlob = [
@@ -487,7 +538,9 @@ export function assembleGeneratedCases(opts: {
     const blob = `${c.scenario} ${c.preconditions} ${c.steps.join(' ')} ${c.expected}`;
     return !mentionsInventedApp(blob, sourceBlob);
   });
-  if (cases.length > MAX_CASES) cases = cases.slice(0, MAX_CASES);
+
+  const fillMissing =
+    opts.fillMissing === true || wantsFullCoverage(opts.sourceText);
   const asExisting = cases.map((c, i) => ({
     id: `gen-${i}`,
     scenario: c.scenario,
@@ -501,15 +554,55 @@ export function assembleGeneratedCases(opts: {
     testData: c.testData ?? undefined,
     module: c.module,
   }));
+  const expanded = expandTechniqueCoverage({
+    requirements,
+    existingCases: asExisting,
+    appUrl: opts.appUrl ?? null,
+    techniques,
+    fillMissing,
+  });
+  if (fillMissing) {
+    for (const tc of expanded.testCases) {
+      const key = tc.scenario.toLowerCase().replace(/\s+/g, ' ');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      cases.push({
+        scenario: tc.scenario,
+        preconditions: tc.preconditions,
+        steps: tc.steps,
+        expected: tc.expected,
+        type: tc.type || 'functional',
+        designTechnique: tc.designTechnique,
+        requirementKey: tc.requirementKey,
+        priorityLabel: normalizePriorityLabel(tc.priorityLabel ?? tc.priority),
+        testData: null,
+        module: tc.module || 'General',
+      });
+    }
+  }
+  if (cases.length > MAX_CASES) cases = cases.slice(0, MAX_CASES);
+  const coverage = expandTechniqueCoverage({
+    requirements,
+    existingCases: cases.map((c, i) => ({
+      id: `final-${i}`,
+      scenario: c.scenario,
+      preconditions: c.preconditions,
+      steps: c.steps,
+      expected: c.expected,
+      type: c.type,
+      designTechnique: c.designTechnique,
+      requirementKey: c.requirementKey,
+      priorityLabel: c.priorityLabel,
+      testData: c.testData ?? undefined,
+      module: c.module,
+    })),
+    appUrl: opts.appUrl ?? null,
+    techniques,
+    fillMissing: false,
+  }).coverage;
   return {
     requirements,
     cases,
-    coverage: expandTechniqueCoverage({
-      requirements,
-      existingCases: asExisting,
-      appUrl: null,
-      techniques,
-      fillMissing: false,
-    }).coverage,
+    coverage,
   };
 }

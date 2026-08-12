@@ -1,12 +1,13 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { OpenRouterLlmClient } from '@qaforge/agent-sdk';
 import {
-  DEFAULT_GENERATE_TECHNIQUES,
   SENIOR_QA_GENERATE_SYSTEM,
   assembleGeneratedCases,
   buildLlmGeneratePrompt,
   parseJsonFromLlm,
   requirementsFromSource,
+  resolveGenerateTechniques,
+  wantsFullCoverage,
   type AppPageMap,
   type DesignTechnique,
   type GeneratedCasePreview,
@@ -43,9 +44,11 @@ export class AiGenerateCasesService {
     if (!sourceText && !stored.length && !opts.pageMap) {
       throw new BadRequestException('Requirements are required');
     }
-    const techniques = (opts.techniques?.length
-      ? opts.techniques
-      : DEFAULT_GENERATE_TECHNIQUES) as DesignTechnique[];
+    const techniques = resolveGenerateTechniques(
+      sourceText,
+      opts.techniques?.length ? opts.techniques : null,
+    );
+    const fullCoverage = wantsFullCoverage(sourceText);
     const combinedSource = [
       sourceText,
       ...stored.map((r) => `${r.requirementKey}: ${r.title}\n${r.description}`),
@@ -83,7 +86,7 @@ export class AiGenerateCasesService {
         prompt: userPrompt,
         json: true,
         model: 'reasoning',
-        maxTokens: 8000,
+        maxTokens: fullCoverage ? 16_000 : 8_000,
         temperature: 0.2,
       });
       tokensUsed = result.tokensUsed;
@@ -103,6 +106,8 @@ export class AiGenerateCasesService {
       techniques,
       type: opts.type,
       priorityLabel: opts.priorityLabel,
+      appUrl: opts.appUrl,
+      fillMissing: fullCoverage,
     });
     if (!assembled.cases.length) {
       throw new BadRequestException(

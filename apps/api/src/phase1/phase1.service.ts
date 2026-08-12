@@ -23,8 +23,8 @@ import {
   deleteTcmsFolderSchema,
   evaluateRequirementsReadiness,
   generateTestCasesSchema,
-  DEFAULT_GENERATE_TECHNIQUES,
   credsFromCases,
+  extractAppUrlFromText,
   reviewApplicationByFetch,
   proposeTcmsRunSchema,
   importTestCasesSchema,
@@ -3729,8 +3729,12 @@ export class Phase1Service {
       [{ steps: sourceText.split('\n'), testData: {} }],
       {},
     );
+    const promptUrl = extractAppUrlFromText(sourceText);
     const appUrl =
-      normalizeStoredAppUrl(project?.appUrl) ?? fromPrompt.appUrl ?? null;
+      normalizeStoredAppUrl(project?.appUrl) ??
+      fromPrompt.appUrl ??
+      promptUrl ??
+      null;
     const loginUrl =
       normalizeStoredAppUrl(project?.loginUrl) ?? appUrl;
     username = username || fromPrompt.username;
@@ -3739,12 +3743,20 @@ export class Phase1Service {
     const pageMap = shouldReview && appUrl
       ? await reviewApplicationByFetch(appUrl)
       : null;
+    // Persist URL from the prompt onto the project when missing so later runs reuse it.
+    if (appUrl && !normalizeStoredAppUrl(project?.appUrl)) {
+      await prisma.project.update({
+        where: { id: projectId },
+        data: {
+          appUrl,
+          loginUrl: loginUrl ?? appUrl,
+        },
+      });
+    }
     const generated = await this.aiGenerate.generate({
       sourceText,
       documentName,
-      techniques: (input.techniques?.length
-        ? input.techniques
-        : DEFAULT_GENERATE_TECHNIQUES) as DesignTechnique[],
+      techniques: input.techniques as DesignTechnique[] | undefined,
       type: input.type,
       priorityLabel: input.priorityLabel,
       projectName: project?.name,

@@ -29,9 +29,23 @@ type GenerateResponse = {
     requirementCount: number;
     caseCount: number;
     complete: boolean;
+    requirementsWithMultiTechnique?: number;
+    byRequirement?: Record<
+      string,
+      { techniques: string[]; missingTechniques: string[]; caseCount: number }
+    >;
   };
   tokensUsed: number;
   requirementCount: number;
+  pageMap?: {
+    url: string;
+    title: string;
+    headings: string[];
+    buttons: string[];
+    inputs: Array<{ name: string; type: string; id: string; placeholder: string }>;
+    links: string[];
+    error?: string;
+  } | null;
 };
 
 export function TcmsAiGenerateModal({
@@ -226,9 +240,10 @@ export function TcmsAiGenerateModal({
       {step === 'form' ? (
         <div className="space-y-3">
           <p className="text-xs text-muted">
-            Describe what to test. The API sends your prompt, stored
-            requirements, and a live look at the app URL to the model so it
-            writes many executable cases — not one canned login row.
+            Describe what to test, include the app URL, and ask for coverage
+            (e.g. Welcome + Login, 100% coverage). We review the live page when
+            possible and return modules, techniques, and many executable cases —
+            not one canned login row.
           </p>
           <div className="flex gap-2">
             <Button
@@ -296,11 +311,54 @@ export function TcmsAiGenerateModal({
         </div>
       ) : (
         <div className="space-y-3">
-          <p className="text-xs text-muted">
-            {preview?.coverage.caseCount ?? 0} cases from{' '}
-            {preview?.requirementCount ?? 0} requirement(s). Uncheck anything you
-            do not want. Added cases are Draft until you review and approve.
-          </p>
+          {(() => {
+            const modules = new Map<string, number>();
+            const techniques = new Map<string, number>();
+            for (const c of preview?.cases ?? []) {
+              const mod = c.module || 'General';
+              modules.set(mod, (modules.get(mod) ?? 0) + 1);
+              const tech = c.designTechnique || 'HAPPY_PATH';
+              techniques.set(tech, (techniques.get(tech) ?? 0) + 1);
+            }
+            const moduleSummary = [...modules.entries()]
+              .map(([k, v]) => `${k} (${v})`)
+              .join(' · ');
+            const techSummary = [...techniques.entries()]
+              .map(([k, v]) => `${k} (${v})`)
+              .join(' · ');
+            return (
+              <>
+                <div className="rounded-md border border-border bg-surface/60 p-3 text-xs space-y-1.5">
+                  <p className="font-medium text-fg">
+                    {(preview?.cases ?? []).length} cases ·{' '}
+                    {preview?.requirementCount ?? 0} requirement(s) · coverage{' '}
+                    {preview?.coverage?.complete ? 'complete' : 'partial'}
+                    {preview?.tokensUsed
+                      ? ` · ${preview.tokensUsed} tokens`
+                      : ''}
+                  </p>
+                  {moduleSummary ? (
+                    <p className="text-muted">Modules: {moduleSummary}</p>
+                  ) : null}
+                  {techSummary ? (
+                    <p className="text-muted">Techniques: {techSummary}</p>
+                  ) : null}
+                  {preview?.pageMap ? (
+                    <p className="text-muted">
+                      Observed UI:{' '}
+                      {preview.pageMap.error
+                        ? `could not review (${preview.pageMap.error})`
+                        : `${preview.pageMap.title || preview.pageMap.url} — ${preview.pageMap.inputs?.length ?? 0} inputs, ${preview.pageMap.buttons?.length ?? 0} buttons`}
+                    </p>
+                  ) : null}
+                  <p className="text-muted">
+                    Uncheck anything you do not want. Added cases are Draft until
+                    you review and approve.
+                  </p>
+                </div>
+              </>
+            );
+          })()}
           <div className="flex gap-2">
             <Button
               type="button"
@@ -326,7 +384,9 @@ export function TcmsAiGenerateModal({
               <thead className="sticky top-0 bg-surface text-xs text-muted">
                 <tr>
                   <th className="p-2 w-8" />
+                  <th className="p-2">Module</th>
                   <th className="p-2">Title</th>
+                  <th className="p-2">Technique</th>
                   <th className="p-2">Steps</th>
                   <th className="p-2">Expected</th>
                 </tr>
@@ -348,7 +408,13 @@ export function TcmsAiGenerateModal({
                         }}
                       />
                     </td>
+                    <td className="p-2 align-top text-xs text-muted">
+                      {c.module || 'General'}
+                    </td>
                     <td className="p-2 align-top font-medium">{c.scenario}</td>
+                    <td className="p-2 align-top text-xs text-muted">
+                      {c.designTechnique}
+                    </td>
                     <td className="p-2 align-top text-xs text-muted">
                       {c.steps.slice(0, 5).map((s, si) => (
                         <div key={si}>{si + 1}. {s}</div>

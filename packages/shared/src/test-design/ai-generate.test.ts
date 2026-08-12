@@ -4,9 +4,12 @@ import {
   compressSourceForGeneration,
   parseJsonFromLlm,
   requirementsFromSource,
+  resolveGenerateTechniques,
+  wantsFullCoverage,
 } from './ai-generate.js';
 import { rowsFromCsv, rowsFromJson } from './import-cases.js';
 import { DESIGN_TECHNIQUES } from './techniques.js';
+import { extractAppUrlFromText } from './execution-creds.js';
 
 const SOURCE = `
 The billing user can apply a discount code at checkout.
@@ -15,6 +18,26 @@ The discount field accepts 3 to 12 characters.
 `;
 
 describe('ai generate pipeline', () => {
+  it('detects 100% coverage prompts and expands techniques', () => {
+    expect(
+      wantsFullCoverage(
+        "Generate test cases of Welcome and login page. needed 100% test coverage",
+      ),
+    ).toBe(true);
+    expect(resolveGenerateTechniques('needed 100% test coverage')).toEqual([
+      ...DESIGN_TECHNIQUES,
+    ]);
+    expect(resolveGenerateTechniques('just login happy path')).toHaveLength(3);
+  });
+
+  it('extracts app URL from quoted prompt text', () => {
+    expect(
+      extractAppUrlFromText(
+        "URL: 'https://test.pbweb.info/Account/Login' needed 100%",
+      ),
+    ).toBe('https://test.pbweb.info/Account/Login');
+  });
+
   it('compresses boilerplate without inventing text', () => {
     const out = compressSourceForGeneration(
       '# Title\n\n---\n\nUsers can reset a password via email OTP.\n',

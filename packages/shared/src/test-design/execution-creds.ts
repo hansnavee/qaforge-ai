@@ -22,14 +22,23 @@ function fromSteps(steps: unknown): CredsFields {
   const list = Array.isArray(steps) ? steps.map(String) : [];
   const out: CredsFields = {};
   for (const step of list) {
-    const url = step.match(/https?:\/\/[^\s"'<>]+/i)?.[0];
-    if (!out.appUrl && url && isUsableAppUrl(url)) out.appUrl = url;
+    const url = extractAppUrlFromText(step);
+    if (!out.appUrl && url) out.appUrl = url;
     const user = step.match(/username\s+"([^"]+)"/i)?.[1];
     if (!out.username && user && !/^a valid /i.test(user)) out.username = user;
     const pass = step.match(/password\s+"([^"]+)"/i)?.[1];
     if (!out.password && pass && !/^a valid /i.test(pass)) out.password = pass;
   }
   return out;
+}
+
+/** Pull the first usable http(s) URL from free text (handles quotes around the URL). */
+export function extractAppUrlFromText(text: string): string | undefined {
+  if (!text?.trim()) return undefined;
+  const match = text.match(/https?:\/\/[^\s"'<>]+/i);
+  if (!match?.[0]) return undefined;
+  const cleaned = match[0].replace(/[),.;]+$/g, '');
+  return isUsableAppUrl(cleaned) ? cleaned : undefined;
 }
 
 function firstFilled(
