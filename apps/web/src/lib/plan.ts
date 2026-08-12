@@ -10,6 +10,7 @@ export type UsageMeter = {
 
 export type BillingSummary = {
   plan: PlanId;
+  planExempt?: boolean;
   status: string;
   features: PlanFeatureFlags;
   usage: Record<UsageEventType, UsageMeter>;

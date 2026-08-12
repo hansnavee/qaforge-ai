@@ -17,20 +17,22 @@ export function usePlan() {
 
   const features = query.data?.features;
   const plan = query.data?.plan ?? 'FREE';
+  const planExempt = Boolean(query.data?.planExempt);
 
   return {
     ...query,
     orgId: org?.id,
     plan,
+    planExempt,
     features,
     billing: query.data,
-    isFree: plan === 'FREE',
-    isPro: plan === 'PRO' || plan === 'ENTERPRISE',
-    canCloudRunner: Boolean(features?.cloudRunner),
-    canRuleHealer: Boolean(features?.ruleHealer),
-    canLlmHealer: Boolean(features?.llmHealer),
-    canExportsHtml: Boolean(features?.exportsHtml),
-    canEmailNotify: Boolean(features?.emailNotify),
-    canQaAgent: Boolean(features?.qaAgentFull),
+    isFree: plan === 'FREE' && !planExempt,
+    isPro: plan === 'PRO' || plan === 'ENTERPRISE' || planExempt,
+    canCloudRunner: Boolean(features?.cloudRunner) || planExempt,
+    canRuleHealer: Boolean(features?.ruleHealer) || planExempt,
+    canLlmHealer: Boolean(features?.llmHealer) || planExempt,
+    canExportsHtml: Boolean(features?.exportsHtml) || planExempt,
+    canEmailNotify: Boolean(features?.emailNotify) || planExempt,
+    canQaAgent: Boolean(features?.qaAgentFull) || planExempt,
   };
 }

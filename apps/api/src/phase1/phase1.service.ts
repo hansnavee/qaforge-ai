@@ -2038,7 +2038,7 @@ export class Phase1Service {
     body: unknown,
   ) {
     await this.requireProject(userId, orgId, projectId, Role.MEMBER);
-    await this.planUsage.assertPlanLimit(orgId, 'TCMS_RUN');
+    await this.planUsage.assertPlanLimit(orgId, 'TCMS_RUN', 1, userId);
     const input = parseBody(createTcmsRunSchema, body);
     const uniqueIds = await this.resolveRunCaseIds(projectId, {
       testCaseIds: input.testCaseIds ?? [],
@@ -2119,7 +2119,7 @@ export class Phase1Service {
         'No Ready cases to select. Mark cases Ready first.',
       );
     }
-    await this.planUsage.assertPlanLimit(orgId, 'AI_PLAN_RUN');
+    await this.planUsage.assertPlanLimit(orgId, 'AI_PLAN_RUN', 1, userId);
     const project = await prisma.project.findUnique({
       where: { id: projectId },
       select: { testStrategy: true, kanbanWipLimit: true },
@@ -2246,12 +2246,14 @@ export class Phase1Service {
         orgId,
         'SCRIPT_REPLAY',
         runCaseIds.length,
+        userId,
       );
     } else {
       await this.planUsage.assertPlanLimit(
         orgId,
         'AI_EXECUTOR_CASE',
         runCaseIds.length,
+        userId,
       );
     }
     const caseRows = await prisma.testCase.findMany({
@@ -2277,7 +2279,7 @@ export class Phase1Service {
     }
     const target = input.target === 'CLOUD' ? 'CLOUD' : 'LOCAL';
     if (target === 'CLOUD') {
-      await this.planUsage.assertFeature(orgId, 'cloudRunner');
+      await this.planUsage.assertFeature(orgId, 'cloudRunner', userId);
     }
     if (target === 'LOCAL') {
       await this.runners.assertUserRunnerOnline(orgId, userId);
@@ -2574,6 +2576,7 @@ export class Phase1Service {
       orgId,
       'SCRIPT_REPLAY',
       testCaseIds.length,
+      userId,
     );
     const creds = await this.saveAiEnvironment(projectId, input);
     const browserMode = input.browserMode ?? 'HEADLESS';
@@ -3308,7 +3311,7 @@ export class Phase1Service {
     const project = await this.requireProject(userId, orgId, projectId);
     const fmt = (format || 'html').toLowerCase();
     if (fmt !== 'csv' && fmt !== 'json') {
-      await this.planUsage.assertFeature(orgId, 'exportsHtml');
+      await this.planUsage.assertFeature(orgId, 'exportsHtml', userId);
     }
     const report = await buildTcrPayload(
       projectId,
@@ -3645,7 +3648,7 @@ export class Phase1Service {
     file?: Express.Multer.File,
   ) {
     await this.requireProject(userId, orgId, projectId, Role.MEMBER);
-    await this.planUsage.assertPlanLimit(orgId, 'AI_GENERATE');
+    await this.planUsage.assertPlanLimit(orgId, 'AI_GENERATE', 1, userId);
     const input = parseBody(
       generateTestCasesSchema,
       coerceGenerateBody(body),

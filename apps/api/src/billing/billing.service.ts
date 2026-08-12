@@ -146,11 +146,12 @@ export class BillingService {
     });
     if (!subscription) throw new NotFoundException('Subscription not found');
 
-    const summary = await this.planUsage.getUsageSummary(orgId);
+    const summary = await this.planUsage.getUsageSummary(orgId, userId);
 
     return {
       subscription,
       plan: summary.plan,
+      planExempt: summary.planExempt,
       status: subscription.status,
       features: summary.features,
       limits: summary.limits,

@@ -49,8 +49,8 @@ export class ExecutionsService {
     });
   }
 
-  private async assertUsageLimit(orgId: string) {
-    await this.planUsage.assertPlanLimit(orgId, 'EXECUTION');
+  private async assertUsageLimit(orgId: string, userId?: string) {
+    await this.planUsage.assertPlanLimit(orgId, 'EXECUTION', 1, userId);
   }
 
   async create(user: SessionUser, orgId: string, projectId: string) {
@@ -61,7 +61,7 @@ export class ExecutionsService {
     });
     if (!project) throw new NotFoundException('Project not found');
 
-    await this.assertUsageLimit(orgId);
+    await this.assertUsageLimit(orgId, user.id);
 
     const execution = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const created = await tx.execution.create({

@@ -1,6 +1,8 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { prisma } from '@qaforge/database';
 import {
+  PLAN_LIMITS,
+  Role,
   USAGE_EVENT_TYPES,
   checkPlanLimit,
   getPlanLimits,
@@ -35,6 +37,18 @@ export class PlanUsageService {
     return { plan, limits: getPlanLimits(plan) };
   }
 
+  /** Org OWNER bypasses FREE/PRO quantity and feature gates. */
+  async isPlanExempt(userId: string | undefined, orgId: string): Promise<boolean> {
+    if (!userId) return false;
+    const membership = await prisma.membership.findUnique({
+      where: {
+        organizationId_userId: { organizationId: orgId, userId },
+      },
+      select: { role: true },
+    });
+    return membership?.role === Role.OWNER;
+  }
+
   async sumUsage(
     orgId: string,
     type: UsageEventType,
@@ -65,7 +79,11 @@ export class PlanUsageService {
     orgId: string,
     type: UsageEventType,
     quantity = 1,
+    userId?: string,
   ): Promise<{ warning: boolean }> {
+    if (await this.isPlanExempt(userId, orgId)) {
+      return { warning: false };
+    }
     const { plan, limits } = await this.getLimits(orgId);
     const limit = limitForUsageType(type, limits);
     const used = await this.sumUsage(orgId, type);
@@ -81,14 +99,17 @@ export class PlanUsageService {
   async assertFeature(
     orgId: string,
     feature: keyof PlanFeatureFlags,
+    userId?: string,
   ): Promise<void> {
+    if (await this.isPlanExempt(userId, orgId)) return;
     const { plan, limits } = await this.getLimits(orgId);
     if (!limits.features[feature]) {
       throw new ForbiddenException(planFeatureErrorPayload(plan, feature));
     }
   }
 
-  async assertProjectLimit(orgId: string): Promise<void> {
+  async assertProjectLimit(orgId: string, userId?: string): Promise<void> {
+    if (await this.isPlanExempt(userId, orgId)) return;
     const { plan, limits } = await this.getLimits(orgId);
     const used = await this.countActiveProjects(orgId);
     const check = checkPlanLimit(used, limits.projects, 1);
@@ -102,7 +123,8 @@ export class PlanUsageService {
     }
   }
 
-  async assertSeatLimit(orgId: string): Promise<void> {
+  async assertSeatLimit(orgId: string, userId?: string): Promise<void> {
+    if (await this.isPlanExempt(userId, orgId)) return;
     const { plan, limits } = await this.getLimits(orgId);
     const used = await this.countSeats(orgId);
     const check = checkPlanLimit(used, limits.seats, 1);
@@ -131,8 +153,13 @@ export class PlanUsageService {
     });
   }
 
-  async getUsageSummary(orgId: string) {
-    const { plan, limits } = await this.getLimits(orgId);
+  async getUsageSummary(orgId: string, userId?: string) {
+    const { plan, limits: planLimits } = await this.getLimits(orgId);
+    const planExempt = await this.isPlanExempt(userId, orgId);
+    const limits = planExempt ? getPlanLimits('ENTERPRISE') : planLimits;
+    const features = planExempt
+      ? PLAN_LIMITS.ENTERPRISE.features
+      : planLimits.features;
     const since = startOfUtcMonth();
     const types = Object.keys(USAGE_EVENT_TYPES) as UsageEventType[];
     const usage: Record<
@@ -146,39 +173,48 @@ export class PlanUsageService {
       const check = checkPlanLimit(used, limit, 0);
       usage[type] = {
         used,
-        limit,
-        warning: check.warning,
-        unlimited: check.unlimited,
+        limit: planExempt ? -1 : limit,
+        warning: planExempt ? false : check.warning,
+        unlimited: planExempt ? true : check.unlimited,
       };
     }
 
     return {
       plan,
+      planExempt,
       limits,
-      features: limits.features,
+      features,
       usage,
       projects: {
         used: await this.countActiveProjects(orgId),
-        limit: limits.projects,
+        limit: planExempt ? -1 : planLimits.projects,
       },
       seats: {
         used: await this.countSeats(orgId),
-        limit: limits.seats,
+        limit: planExempt ? -1 : planLimits.seats,
       },
     };
   }
 
-  async assertAutomationReplay(orgId: string, caseCount: number): Promise<void> {
-    await this.assertPlanLimit(orgId, 'SCRIPT_REPLAY', caseCount);
+  async assertAutomationReplay(
+    orgId: string,
+    caseCount: number,
+    userId?: string,
+  ): Promise<void> {
+    await this.assertPlanLimit(orgId, 'SCRIPT_REPLAY', caseCount, userId);
   }
 
-  async assertRuleHealer(orgId: string): Promise<void> {
-    await this.assertFeature(orgId, 'ruleHealer');
+  async assertRuleHealer(orgId: string, userId?: string): Promise<void> {
+    await this.assertFeature(orgId, 'ruleHealer', userId);
   }
 
-  async assertLlmHeal(orgId: string, quantity = 1): Promise<void> {
-    await this.assertFeature(orgId, 'llmHealer');
-    await this.assertPlanLimit(orgId, 'LLM_HEAL', quantity);
+  async assertLlmHeal(
+    orgId: string,
+    quantity = 1,
+    userId?: string,
+  ): Promise<void> {
+    await this.assertFeature(orgId, 'llmHealer', userId);
+    await this.assertPlanLimit(orgId, 'LLM_HEAL', quantity, userId);
   }
 
   async recordLlmHeal(

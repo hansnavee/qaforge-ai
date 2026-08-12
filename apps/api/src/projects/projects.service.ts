@@ -83,7 +83,7 @@ export class ProjectsService {
 
   async create(user: SessionUser, orgId: string, body: unknown) {
     await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
-    await this.planUsage.assertProjectLimit(orgId);
+    await this.planUsage.assertProjectLimit(orgId, user.id);
     const input = parseBody(createProjectSchema, body);
 
     const project = await prisma.project.create({

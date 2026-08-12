@@ -205,7 +205,7 @@ export class OrgsService {
       throw new ConflictException('User is already a member');
     }
 
-    await this.planUsage.assertSeatLimit(orgId);
+    await this.planUsage.assertSeatLimit(orgId, actor.id);
 
     const membership = await prisma.membership.create({
       data: {
