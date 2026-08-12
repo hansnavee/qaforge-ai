@@ -86,7 +86,7 @@ export function TcmsAiExecutorModal({
     'chromium',
   );
   const [browserMode, setBrowserMode] = useState<'HEADLESS' | 'HEADED'>(
-    'HEADED',
+    'HEADLESS',
   );
   const [target, setTarget] = useState<'LOCAL' | 'CLOUD'>('LOCAL');
   const [confirmProduction, setConfirmProduction] = useState(false);
@@ -280,8 +280,11 @@ export function TcmsAiExecutorModal({
       setError('Environment URL is required');
       return;
     }
-    if (target === 'LOCAL' && !runner?.online) {
-      setError('Start the local runner on your PC, then retry');
+    const needsLocalRunner = target === 'LOCAL' && browserMode === 'HEADED';
+    if (needsLocalRunner && !runner?.online) {
+      setError(
+        'Headed Local needs the local runner Online. Or switch Mode to Headless to run on the server.',
+      );
       return;
     }
     if (target === 'CLOUD' && !browserstackConfigured) {
@@ -320,6 +323,11 @@ export function TcmsAiExecutorModal({
 
   const online = Boolean(runner?.online);
   const apiUrl = pair?.apiUrl || runner?.apiUrl || API_BASE_URL;
+  const needsLocalRunner = target === 'LOCAL' && browserMode === 'HEADED';
+  const startDisabled =
+    busy ||
+    (needsLocalRunner && !online) ||
+    (target === 'CLOUD' && !browserstackConfigured);
 
   return (
     <Modal
@@ -334,14 +342,10 @@ export function TcmsAiExecutorModal({
           <Button
             type="button"
             size="sm"
-            disabled={
-              busy ||
-              (target === 'LOCAL' && !online) ||
-              (target === 'CLOUD' && !browserstackConfigured)
-            }
+            disabled={startDisabled}
             title={
-              target === 'LOCAL' && !online
-                ? 'Local runner is offline until you run the token command on this PC'
+              needsLocalRunner && !online
+                ? 'Headed Local needs the runner Online — or choose Headless'
                 : target === 'CLOUD' && !browserstackConfigured
                   ? 'Add BrowserStack keys in Settings'
                   : undefined
@@ -355,10 +359,9 @@ export function TcmsAiExecutorModal({
     >
       <div className="space-y-3">
         <p className="text-xs text-muted">
-          Local opens Chromium on <strong>this PC</strong>. Create a token once,
-          keep that terminal running, wait until the runner is connected, then
-          Start Headed. If status already says Online, do not create another
-          token — that would disconnect this machine.
+          <strong>Headless</strong> runs on the server (no local runner required).{' '}
+          <strong>Headed</strong> opens Chromium on this PC — create a token and
+          wait until Online before Start. Cloud uses BrowserStack.
         </p>
         <div className="rounded-lg border border-border bg-surface p-3 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -372,6 +375,11 @@ export function TcmsAiExecutorModal({
                   ? `Online${runner?.name ? ` (${runner.name})` : ''}`
                   : 'Offline'}
               </span>
+              {browserMode === 'HEADLESS' && target === 'LOCAL' ? (
+                <span className="ml-1 font-normal text-muted">
+                  (optional for Headless)
+                </span>
+              ) : null}
             </p>
             {online ? (
               <Button
@@ -397,10 +405,18 @@ export function TcmsAiExecutorModal({
           </div>
           {online ? (
             <p className="text-[11px] text-success">
-              Connected. Leave the terminal as-is and click Start AI Executor.
+              Connected. Leave the terminal as-is
+              {needsLocalRunner
+                ? ' and click Start AI Executor.'
+                : '. Headless will use the server worker.'}
+            </p>
+          ) : browserMode === 'HEADLESS' && target === 'LOCAL' ? (
+            <p className="text-[11px] text-muted">
+              Headless does not need a local runner. Click Start AI Executor to
+              queue on the server.
             </p>
           ) : null}
-          {pair ? (
+          {pair && needsLocalRunner ? (
             <>
               <label className="block text-[11px] text-muted">
                 Repo folder on this PC
@@ -429,12 +445,10 @@ export function TcmsAiExecutorModal({
                 </Button>
               </div>
             </>
-          ) : online ? null : (
+          ) : online || (browserMode === 'HEADLESS' && target === 'LOCAL') ? null : (
             <p className="text-[11px] text-muted">
               Create a token, then paste the command in CMD or PowerShell from
-              any folder. It uses{' '}
-              <code>pnpm --dir</code> so you do not have to cd into the repo.
-              API: {apiUrl}.
+              any folder. API: {apiUrl}.
             </p>
           )}
         </div>
@@ -496,13 +510,12 @@ export function TcmsAiExecutorModal({
             <select
               className={`${fieldClass} mt-1`}
               value={browserMode}
-              disabled={target === 'LOCAL' && !online}
               onChange={(e) =>
                 setBrowserMode(e.target.value as 'HEADLESS' | 'HEADED')
               }
             >
-              <option value="HEADED">Headed (opens a browser)</option>
-              <option value="HEADLESS">Headless</option>
+              <option value="HEADLESS">Headless (server)</option>
+              <option value="HEADED">Headed (opens a browser on this PC)</option>
             </select>
           </label>
         </div>

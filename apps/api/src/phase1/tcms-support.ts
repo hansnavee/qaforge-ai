@@ -12,7 +12,7 @@ export type TcmsSelection = {
   browser?: string;
   featureKey?: string | null;
   folderId?: string | null;
-  runnerTarget?: 'LOCAL' | 'CLOUD';
+  runnerTarget?: 'LOCAL' | 'CLOUD' | 'SERVER';
   runnerUserId?: string;
   localQueuedAt?: string;
   claimedByRunnerId?: string | null;

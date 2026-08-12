@@ -2269,19 +2269,21 @@ export class Phase1Service {
       password: input.password || fromCases.password,
     };
     const creds = await this.saveAiEnvironment(projectId, mergedInput);
+    const target = input.target === 'CLOUD' ? 'CLOUD' : 'LOCAL';
     const browserMode =
       input.browserMode ??
-      (input.target === 'CLOUD' ? 'HEADLESS' : 'HEADED');
+      (target === 'CLOUD' ? 'HEADLESS' : 'HEADED');
+    /** Headless runs on the API worker; headed Local needs a paired laptop runner. */
+    const runOnServer = target === 'CLOUD' || browserMode === 'HEADLESS';
     if (!hasEncryptionKey()) {
       throw new BadRequestException(
         'ENCRYPTION_KEY is not configured — cannot hand credentials to the runner',
       );
     }
-    const target = input.target === 'CLOUD' ? 'CLOUD' : 'LOCAL';
     if (target === 'CLOUD') {
       await this.planUsage.assertFeature(orgId, 'cloudRunner', userId);
     }
-    if (target === 'LOCAL') {
+    if (target === 'LOCAL' && !runOnServer) {
       await this.runners.assertUserRunnerOnline(orgId, userId);
     }
     const nextSelection: TcmsSelection = {
@@ -2291,9 +2293,12 @@ export class Phase1Service {
       runKind: 'AUTOMATION',
       browserMode,
       browser: input.browser ?? 'chromium',
-      runnerTarget: target,
+      runnerTarget: runOnServer && target === 'LOCAL' ? 'SERVER' : target,
       runnerUserId: userId,
-      localQueuedAt: target === 'LOCAL' ? new Date().toISOString() : undefined,
+      localQueuedAt:
+        target === 'LOCAL' && !runOnServer
+          ? new Date().toISOString()
+          : undefined,
       claimedByRunnerId: null,
       localCreds: this.runners.encryptLocalCreds({
         appUrl: creds.appUrl,
@@ -2309,14 +2314,22 @@ export class Phase1Service {
         startedAt: execution.startedAt ?? null,
         finishedAt: null,
         errorSummary:
-          target === 'LOCAL'
-            ? 'Waiting for local runner'
-            : 'Queued on BrowserStack',
+          target === 'CLOUD'
+            ? 'Queued on BrowserStack'
+            : runOnServer
+              ? 'Queued for headless server execution'
+              : 'Waiting for local runner',
         selection: nextSelection as never,
       },
     });
-    if (target === 'CLOUD') {
-      const keys = await this.orgs.readBrowserstackKeys(orgId);
+    if (runOnServer) {
+      let browserstackUsername: string | undefined;
+      let browserstackAccessKey: string | undefined;
+      if (target === 'CLOUD') {
+        const keys = await this.orgs.readBrowserstackKeys(orgId);
+        browserstackUsername = keys.username;
+        browserstackAccessKey = keys.accessKey;
+      }
       await this.queue.enqueueAiExecute({
         executionId,
         testCaseIds: runCaseIds,
@@ -2326,8 +2339,8 @@ export class Phase1Service {
         password: creds.password,
         appUrl: creds.appUrl,
         loginUrl: creds.loginUrl,
-        browserstackUsername: keys.username,
-        browserstackAccessKey: keys.accessKey,
+        browserstackUsername,
+        browserstackAccessKey,
       });
     }
     await this.queue.clearPause(executionId);
