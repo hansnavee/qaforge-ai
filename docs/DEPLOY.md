@@ -73,8 +73,8 @@ BROWSER_HEADLESS=true
 OPENROUTER_API_KEY=          # optional; mock LLM used when empty
 OPENROUTER_USE_FREE=true     # default: free OpenRouter models for testing
 # OPENROUTER_MODEL_FAST=nvidia/nemotron-3-nano-30b-a3b:free
-# OPENROUTER_MODEL_REASONING=nvidia/nemotron-3-nano-30b-a3b:free
-# On 429/unavailable the client also tries openrouter/free, gpt-oss-20b:free, then Gemma free IDs
+# OPENROUTER_MODEL_REASONING=openai/gpt-oss-20b:free
+# On 429/unavailable the client also tries openrouter/free, Nano, then Gemma free IDs
 # Set OPENROUTER_USE_FREE=false to use paid openai/gpt-4o-mini + anthropic/claude-sonnet-4
 NODE_ENV=production
 ```

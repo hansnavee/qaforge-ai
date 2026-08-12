@@ -233,15 +233,68 @@ export function parseJsonFromLlm(text: string): unknown {
   const trimmed = text.trim();
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const body = (fenced?.[1] ?? trimmed).trim();
+
+  const tryParse = (raw: string): unknown | undefined => {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+  };
+
+  const sliceBalancedObject = (source: string, from: number): string | null => {
+    if (from < 0 || source[from] !== '{') return null;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = from; i < source.length; i += 1) {
+      const ch = source[i]!;
+      if (inString) {
+        if (escape) {
+          escape = false;
+        } else if (ch === '\\') {
+          escape = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) return source.slice(from, i + 1);
+      }
+    }
+    return null;
+  };
+
+  const casesIdx = body.search(/\{\s*"cases"\s*:/);
+  if (casesIdx >= 0) {
+    const sliced = sliceBalancedObject(body, casesIdx);
+    const parsed = sliced ? tryParse(sliced) : undefined;
+    if (parsed !== undefined) return parsed;
+  }
+
   const start = body.indexOf('{');
+  const balanced = start >= 0 ? sliceBalancedObject(body, start) : null;
+  if (balanced) {
+    const parsed = tryParse(balanced);
+    if (parsed !== undefined) return parsed;
+  }
   const end = body.lastIndexOf('}');
   if (start >= 0 && end > start) {
-    return JSON.parse(body.slice(start, end + 1));
+    const parsed = tryParse(body.slice(start, end + 1));
+    if (parsed !== undefined) return parsed;
   }
   const arrStart = body.indexOf('[');
   const arrEnd = body.lastIndexOf(']');
   if (arrStart >= 0 && arrEnd > arrStart) {
-    return JSON.parse(body.slice(arrStart, arrEnd + 1));
+    const parsed = tryParse(body.slice(arrStart, arrEnd + 1));
+    if (parsed !== undefined) return parsed;
   }
   return JSON.parse(body);
 }

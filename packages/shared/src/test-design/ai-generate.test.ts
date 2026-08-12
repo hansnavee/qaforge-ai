@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assembleGeneratedCases,
   compressSourceForGeneration,
+  parseJsonFromLlm,
   requirementsFromSource,
 } from './ai-generate.js';
 import { rowsFromCsv, rowsFromJson } from './import-cases.js';
@@ -125,6 +126,14 @@ describe('ai generate pipeline', () => {
     expect(blob).toMatch(/standard_user/);
     expect(blob).toMatch(/secret_sauce/);
     expect(cases[0]?.steps.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('extracts cases JSON after model preamble', () => {
+    const raw = `We need to produce JSON only.
+{"cases":[{"scenario":"Valid login","expected":"Inventory shown","steps":["Open https://www.saucedemo.com/","Click Login"],"designTechnique":"HAPPY_PATH"}]}
+`;
+    const parsed = parseJsonFromLlm(raw) as { cases: unknown[] };
+    expect(parsed.cases).toHaveLength(1);
   });
 });
 

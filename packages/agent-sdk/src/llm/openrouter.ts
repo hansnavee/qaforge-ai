@@ -20,10 +20,10 @@ function resolveModelMap(): Record<'fast' | 'reasoning', string> {
     reasoning: 'anthropic/claude-sonnet-4',
   } as const;
   const free = {
-    // Fast/general JSON-friendly free model (availability rotates on OpenRouter)
+    // Fast/general — Nano is quick when it cooperates
     fast: 'nvidia/nemotron-3-nano-30b-a3b:free',
-    // Case generate / design — Nano is currently the most reliable free JSON writer
-    reasoning: 'nvidia/nemotron-3-nano-30b-a3b:free',
+    // Case generate needs clean {"cases":[...]} JSON; gpt-oss is the most reliable free writer today
+    reasoning: 'openai/gpt-oss-20b:free',
   } as const;
   const base = useFree ? free : paid;
   return {
