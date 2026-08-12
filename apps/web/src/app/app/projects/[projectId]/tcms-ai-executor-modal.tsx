@@ -558,10 +558,11 @@ export function TcmsAiExecutorModal({
           />
           This URL is production and I want to proceed
         </label>
-        {target === 'LOCAL' && !online ? (
+        {needsLocalRunner && !online ? (
           <p className="text-xs text-danger">
-            Runner is Offline. Create a token and run the command in this repo
-            before Start.
+            Headed mode needs the local runner Online. Switch Mode to{' '}
+            <strong>Headless (server)</strong> to run without a token, or create
+            a token and start the runner.
           </p>
         ) : null}
         {target === 'CLOUD' ? (
