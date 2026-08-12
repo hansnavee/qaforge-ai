@@ -135,6 +135,16 @@ describe('ai generate pipeline', () => {
     const parsed = parseJsonFromLlm(raw) as { cases: unknown[] };
     expect(parsed.cases).toHaveLength(1);
   });
+
+  it('salvages valid case objects when later array items are broken', () => {
+    const raw = `{"cases":[
+      {"scenario":"Valid login","expected":"OK","steps":["Open url"],"designTechnique":"HAPPY_PATH"},
+      {"scenario":"Broken "quote","expected":"Nope","steps":["x"]}
+    ]}`;
+    const parsed = parseJsonFromLlm(raw) as { cases: Array<{ scenario: string }> };
+    expect(parsed.cases.length).toBeGreaterThanOrEqual(1);
+    expect(parsed.cases[0]?.scenario).toBe('Valid login');
+  });
 });
 
 describe('case import parse', () => {

@@ -242,29 +242,30 @@ export function parseJsonFromLlm(text: string): unknown {
     }
   };
 
-  const sliceBalancedObject = (source: string, from: number): string | null => {
-    if (from < 0 || source[from] !== '{') return null;
+  const sliceBalanced = (
+    source: string,
+    from: number,
+    open: '{' | '[',
+  ): string | null => {
+    const close = open === '{' ? '}' : ']';
+    if (from < 0 || source[from] !== open) return null;
     let depth = 0;
     let inString = false;
     let escape = false;
     for (let i = from; i < source.length; i += 1) {
       const ch = source[i]!;
       if (inString) {
-        if (escape) {
-          escape = false;
-        } else if (ch === '\\') {
-          escape = true;
-        } else if (ch === '"') {
-          inString = false;
-        }
+        if (escape) escape = false;
+        else if (ch === '\\') escape = true;
+        else if (ch === '"') inString = false;
         continue;
       }
       if (ch === '"') {
         inString = true;
         continue;
       }
-      if (ch === '{') depth += 1;
-      if (ch === '}') {
+      if (ch === open) depth += 1;
+      if (ch === close) {
         depth -= 1;
         if (depth === 0) return source.slice(from, i + 1);
       }
@@ -272,28 +273,62 @@ export function parseJsonFromLlm(text: string): unknown {
     return null;
   };
 
+  const salvageCaseObjects = (source: string): unknown[] => {
+    const marker = source.search(/"cases"\s*:\s*\[/);
+    if (marker < 0) return [];
+    const arrStart = source.indexOf('[', marker);
+    if (arrStart < 0) return [];
+    const items: unknown[] = [];
+    let i = arrStart + 1;
+    while (i < source.length) {
+      while (i < source.length && /[\s,]/.test(source[i]!)) i += 1;
+      if (source[i] === ']') break;
+      if (source[i] !== '{') break;
+      const obj = sliceBalanced(source, i, '{');
+      if (!obj) break;
+      const parsed = tryParse(obj);
+      if (parsed && typeof parsed === 'object') items.push(parsed);
+      i += obj.length;
+    }
+    return items;
+  };
+
+  const softFix = (raw: string): string =>
+    raw
+      .replace(/,\s*([}\]])/g, '$1')
+      .replace(/\u201c|\u201d/g, '"')
+      .replace(/\u2018|\u2019/g, "'");
+
   const casesIdx = body.search(/\{\s*"cases"\s*:/);
   if (casesIdx >= 0) {
-    const sliced = sliceBalancedObject(body, casesIdx);
-    const parsed = sliced ? tryParse(sliced) : undefined;
-    if (parsed !== undefined) return parsed;
+    const sliced = sliceBalanced(body, casesIdx, '{');
+    if (sliced) {
+      const parsed =
+        tryParse(sliced) ?? tryParse(softFix(sliced));
+      if (parsed !== undefined) return parsed;
+    }
   }
 
+  const salvaged = salvageCaseObjects(body);
+  if (salvaged.length) return { cases: salvaged };
+
   const start = body.indexOf('{');
-  const balanced = start >= 0 ? sliceBalancedObject(body, start) : null;
+  const balanced = start >= 0 ? sliceBalanced(body, start, '{') : null;
   if (balanced) {
-    const parsed = tryParse(balanced);
+    const parsed = tryParse(balanced) ?? tryParse(softFix(balanced));
     if (parsed !== undefined) return parsed;
   }
   const end = body.lastIndexOf('}');
   if (start >= 0 && end > start) {
-    const parsed = tryParse(body.slice(start, end + 1));
+    const chunk = body.slice(start, end + 1);
+    const parsed = tryParse(chunk) ?? tryParse(softFix(chunk));
     if (parsed !== undefined) return parsed;
   }
   const arrStart = body.indexOf('[');
   const arrEnd = body.lastIndexOf(']');
   if (arrStart >= 0 && arrEnd > arrStart) {
-    const parsed = tryParse(body.slice(arrStart, arrEnd + 1));
+    const chunk = body.slice(arrStart, arrEnd + 1);
+    const parsed = tryParse(chunk) ?? tryParse(softFix(chunk));
     if (parsed !== undefined) return parsed;
   }
   return JSON.parse(body);
