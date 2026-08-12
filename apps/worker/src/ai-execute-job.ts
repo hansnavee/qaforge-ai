@@ -48,7 +48,7 @@ export function classifyAiFailureMessage(
   const msg = (raw || 'Unknown failure').trim();
   if (
     msg.startsWith('[UI]') ||
-    msg.startsWith('[BUTTON]') ||
+    msg.startsWith('[FUNCTIONAL]') ||
     msg.startsWith('[PERF]')
   ) {
     return msg;
@@ -59,7 +59,7 @@ export function classifyAiFailureMessage(
       lower,
     )
   ) {
-    return `[BUTTON] ${msg}`;
+    return `[FUNCTIONAL] ${msg}`;
   }
   if (
     /locator|timeout|waiting for|strict mode|element|selector|not found|not visible|detached|intercepts pointer/i.test(

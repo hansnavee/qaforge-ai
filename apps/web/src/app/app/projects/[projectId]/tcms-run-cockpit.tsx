@@ -106,7 +106,7 @@ export function TcmsRunCockpit({
       const msg = (c.result.message ?? '').toUpperCase();
       return (
         msg.includes('[UI]') ||
-        msg.includes('[BUTTON]') ||
+        msg.includes('[FUNCTIONAL]') ||
         msg.includes('[PERF]')
       );
     });
