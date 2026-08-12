@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ApiError, api, apiForm } from '@/lib/api';
 import { parsePlanLimitError } from '@/lib/plan';
 import { getDefaultOrgId } from '@/lib/org';
@@ -48,12 +48,29 @@ type GenerateResponse = {
   } | null;
 };
 
+type PromptHistoryItem = {
+  id: string;
+  prompt: string;
+  source: string;
+  caseCount: number | null;
+  createdAt: string;
+};
+
+export type AiGenerateModalDefaults = {
+  prompt?: string;
+  applyMode?: 'create' | 'update';
+  reviewApplication?: boolean;
+  source?: 'GENERATE' | 'UPDATE' | 'ENV_REFRESH';
+  caseIds?: string[];
+};
+
 export function TcmsAiGenerateModal({
   open,
   projectId,
   folders,
   defaultFolderId,
   busy,
+  defaults,
   onClose,
   onAdded,
 }: {
@@ -62,11 +79,13 @@ export function TcmsAiGenerateModal({
   folders: FolderOption[];
   defaultFolderId: string;
   busy?: boolean;
+  defaults?: AiGenerateModalDefaults | null;
   onClose: () => void;
   onAdded: () => void;
 }) {
   const [step, setStep] = useState<'form' | 'preview'>('form');
   const [mode, setMode] = useState<'prompt' | 'upload'>('prompt');
+  const [applyMode, setApplyMode] = useState<'create' | 'update'>('create');
   const [prompt, setPrompt] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [folderId, setFolderId] = useState(defaultFolderId);
@@ -78,11 +97,50 @@ export function TcmsAiGenerateModal({
   const [preview, setPreview] = useState<GenerateResponse | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [upgradeError, setUpgradeError] = useState<ReturnType<typeof parsePlanLimitError>>(null);
+  const [history, setHistory] = useState<PromptHistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [clearConfirm, setClearConfirm] = useState(false);
+  const [applySource, setApplySource] = useState<
+    'GENERATE' | 'UPDATE' | 'ENV_REFRESH'
+  >('GENERATE');
+  const [targetCaseIds, setTargetCaseIds] = useState<string[]>([]);
 
   const selectedCases = useMemo(
     () => (preview?.cases ?? []).filter((_, i) => selected.has(i)),
     [preview, selected],
   );
+
+  async function loadHistory() {
+    setHistoryLoading(true);
+    try {
+      const orgId = await getDefaultOrgId();
+      const data = await api<{ items: PromptHistoryItem[] }>(
+        `/api/v1/orgs/${orgId}/projects/${projectId}/ai-prompts`,
+      );
+      setHistory(data.items ?? []);
+    } catch {
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    setFolderId(defaultFolderId);
+    setApplyMode(defaults?.applyMode ?? 'create');
+    setPrompt(defaults?.prompt ?? '');
+    setReviewApp(defaults?.reviewApplication ?? true);
+    setApplySource(defaults?.source ?? (defaults?.applyMode === 'update' ? 'UPDATE' : 'GENERATE'));
+    setTargetCaseIds(defaults?.caseIds ?? []);
+    setStep('form');
+    setError(null);
+    setPreview(null);
+    setSelected(new Set());
+    setClearConfirm(false);
+    void loadHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset when modal opens / defaults change
+  }, [open, projectId, defaultFolderId, defaults]);
 
   function reset() {
     setStep('form');
@@ -91,6 +149,21 @@ export function TcmsAiGenerateModal({
     setSelected(new Set());
     setGenerating(false);
     setAdding(false);
+    setClearConfirm(false);
+  }
+
+  async function clearHistory() {
+    try {
+      const orgId = await getDefaultOrgId();
+      await api(`/api/v1/orgs/${orgId}/projects/${projectId}/ai-prompts`, {
+        method: 'DELETE',
+      });
+      setHistory([]);
+      setPrompt('');
+      setClearConfirm(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not clear history');
+    }
   }
 
   async function generate() {
@@ -134,6 +207,7 @@ export function TcmsAiGenerateModal({
       setPreview(data);
       setSelected(new Set(data.cases.map((_, i) => i)));
       setStep('preview');
+      void loadHistory();
     } catch (err) {
       const planErr =
         err instanceof ApiError ? parsePlanLimitError(err.body) : null;
@@ -158,11 +232,22 @@ export function TcmsAiGenerateModal({
     try {
       const orgId = await getDefaultOrgId();
       await api(
-        `/api/v1/orgs/${orgId}/projects/${projectId}/test-cases/bulk-create`,
+        `/api/v1/orgs/${orgId}/projects/${projectId}/test-cases/generate-apply`,
         {
           method: 'POST',
           body: JSON.stringify({
+            mode: applyMode,
+            // Avoid duplicate history after generate already saved the prompt
+            prompt:
+              applyMode === 'update' || applySource !== 'GENERATE'
+                ? prompt.trim() || undefined
+                : undefined,
+            source: applySource,
             folderId: folderId || null,
+            caseIds:
+              applyMode === 'update' && targetCaseIds.length
+                ? targetCaseIds
+                : undefined,
             cases: selectedCases.map((c) => ({
               scenario: c.scenario,
               preconditions: c.preconditions,
@@ -183,16 +268,25 @@ export function TcmsAiGenerateModal({
       onAdded();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Add failed');
+      setError(err instanceof Error ? err.message : 'Apply failed');
     } finally {
       setAdding(false);
     }
   }
 
   return (
+    <>
     <Modal
       open={open}
-      title={step === 'form' ? 'Generate cases with AI' : 'Select cases to add'}
+      title={
+        step === 'form'
+          ? applyMode === 'update'
+            ? 'Update cases with AI'
+            : 'Generate cases with AI'
+          : applyMode === 'update'
+            ? 'Select cases to update'
+            : 'Select cases to add'
+      }
       size="xl"
       onClose={() => {
         reset();
@@ -230,21 +324,50 @@ export function TcmsAiGenerateModal({
               onClick={() => void addSelected()}
             >
               {adding
-                ? 'Adding…'
-                : `Add ${selectedCases.length} as Draft`}
+                ? applyMode === 'update'
+                  ? 'Updating…'
+                  : 'Adding…'
+                : applyMode === 'update'
+                  ? `Update ${selectedCases.length} matching`
+                  : `Add ${selectedCases.length} as Draft`}
             </Button>
           </>
         )
       }
     >
       {step === 'form' ? (
-        <div className="space-y-3">
+        <div className="grid gap-4 md:grid-cols-[1fr_220px]">
+          <div className="space-y-3">
           <p className="text-xs text-muted">
             Describe what to test, include the app URL, and ask for coverage
             (e.g. Welcome + Login, 100% coverage). We review the live page when
             possible and return modules, techniques, and many executable cases —
             not one canned login row.
           </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant={applyMode === 'create' ? 'primary' : 'secondary'}
+              onClick={() => {
+                setApplyMode('create');
+                setApplySource('GENERATE');
+              }}
+            >
+              Add as Draft
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={applyMode === 'update' ? 'primary' : 'secondary'}
+              onClick={() => {
+                setApplyMode('update');
+                setApplySource((s) => (s === 'GENERATE' ? 'UPDATE' : s));
+              }}
+            >
+              Update matching
+            </Button>
+          </div>
           <div className="flex gap-2">
             <Button
               type="button"
@@ -308,6 +431,69 @@ export function TcmsAiGenerateModal({
               ))}
             </select>
           </label>
+          </div>
+          <aside className="space-y-2 rounded-lg border border-border bg-panel/40 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-medium text-fg">Prompt history</p>
+              {history.length ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setClearConfirm(true)}
+                >
+                  Clear
+                </Button>
+              ) : null}
+            </div>
+            {clearConfirm ? (
+              <div className="space-y-2 rounded-md border border-border bg-bg-elevated p-2 text-xs text-muted">
+                <p>
+                  Clear prompt history only — existing test cases are not deleted.
+                </p>
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" onClick={() => void clearHistory()}>
+                    Confirm clear
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setClearConfirm(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+            {historyLoading ? (
+              <p className="text-xs text-muted">Loading…</p>
+            ) : history.length === 0 ? (
+              <p className="text-xs text-muted">No prompts yet.</p>
+            ) : (
+              <ul className="max-h-64 space-y-1 overflow-y-auto">
+                {history.map((h) => (
+                  <li key={h.id}>
+                    <button
+                      type="button"
+                      className="w-full rounded-md px-2 py-1.5 text-left text-xs text-fg hover:bg-bg-elevated"
+                      onClick={() => {
+                        setMode('prompt');
+                        setPrompt(h.prompt);
+                      }}
+                      title={h.prompt}
+                    >
+                      <span className="line-clamp-2">{h.prompt}</span>
+                      <span className="mt-0.5 block text-[10px] text-muted">
+                        {h.source} · {new Date(h.createdAt).toLocaleString()}
+                        {h.caseCount != null ? ` · ${h.caseCount} cases` : ''}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </aside>
         </div>
       ) : (
         <div className="space-y-3">
@@ -317,49 +503,40 @@ export function TcmsAiGenerateModal({
             for (const c of preview?.cases ?? []) {
               const mod = c.module || 'General';
               modules.set(mod, (modules.get(mod) ?? 0) + 1);
-              const tech = c.designTechnique || 'HAPPY_PATH';
+              const tech = c.designTechnique || 'OTHER';
               techniques.set(tech, (techniques.get(tech) ?? 0) + 1);
             }
-            const moduleSummary = [...modules.entries()]
-              .map(([k, v]) => `${k} (${v})`)
-              .join(' · ');
-            const techSummary = [...techniques.entries()]
-              .map(([k, v]) => `${k} (${v})`)
-              .join(' · ');
             return (
               <>
-                <div className="rounded-md border border-border bg-surface/60 p-3 text-xs space-y-1.5">
-                  <p className="font-medium text-fg">
-                    {(preview?.cases ?? []).length} cases ·{' '}
-                    {preview?.requirementCount ?? 0} requirement(s) · coverage{' '}
-                    {preview?.coverage?.complete ? 'complete' : 'partial'}
-                    {preview?.tokensUsed
-                      ? ` · ${preview.tokensUsed} tokens`
-                      : ''}
+                <p className="text-xs text-muted">
+                  {preview?.cases.length ?? 0} cases
+                  {preview?.coverage?.requirementCount
+                    ? ` · ${preview.coverage.requirementCount} requirements`
+                    : ''}
+                  {preview?.pageMap?.url
+                    ? ` · reviewed ${preview.pageMap.url}`
+                    : ''}
+                </p>
+                {modules.size > 0 ? (
+                  <p className="text-xs text-muted">
+                    Modules:{' '}
+                    {[...modules.entries()]
+                      .map(([k, n]) => `${k} (${n})`)
+                      .join(', ')}
                   </p>
-                  {moduleSummary ? (
-                    <p className="text-muted">Modules: {moduleSummary}</p>
-                  ) : null}
-                  {techSummary ? (
-                    <p className="text-muted">Techniques: {techSummary}</p>
-                  ) : null}
-                  {preview?.pageMap ? (
-                    <p className="text-muted">
-                      Observed UI:{' '}
-                      {preview.pageMap.error
-                        ? `could not review (${preview.pageMap.error})`
-                        : `${preview.pageMap.title || preview.pageMap.url} — ${preview.pageMap.inputs?.length ?? 0} inputs, ${preview.pageMap.buttons?.length ?? 0} buttons`}
-                    </p>
-                  ) : null}
-                  <p className="text-muted">
-                    Uncheck anything you do not want. Added cases are Draft until
-                    you review and approve.
+                ) : null}
+                {techniques.size > 0 ? (
+                  <p className="text-xs text-muted">
+                    Techniques:{' '}
+                    {[...techniques.entries()]
+                      .map(([k, n]) => `${k} (${n})`)
+                      .join(', ')}
                   </p>
-                </div>
+                ) : null}
               </>
             );
           })()}
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button
               type="button"
               size="sm"
@@ -373,67 +550,57 @@ export function TcmsAiGenerateModal({
             <Button
               type="button"
               size="sm"
-              variant="secondary"
+              variant="ghost"
               onClick={() => setSelected(new Set())}
             >
-              Select none
+              Clear selection
             </Button>
           </div>
-          <div className="max-h-[50vh] overflow-auto rounded-md border border-border">
-            <table className="w-full text-left text-sm">
-              <thead className="sticky top-0 bg-surface text-xs text-muted">
-                <tr>
-                  <th className="p-2 w-8" />
-                  <th className="p-2">Module</th>
-                  <th className="p-2">Title</th>
-                  <th className="p-2">Technique</th>
-                  <th className="p-2">Steps</th>
-                  <th className="p-2">Expected</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(preview?.cases ?? []).map((c, i) => (
-                  <tr key={i} className="border-t border-border">
-                    <td className="p-2">
-                      <input
-                        type="checkbox"
-                        checked={selected.has(i)}
-                        onChange={() => {
-                          setSelected((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(i)) next.delete(i);
-                            else next.add(i);
-                            return next;
-                          });
-                        }}
-                      />
-                    </td>
-                    <td className="p-2 align-top text-xs text-muted">
-                      {c.module || 'General'}
-                    </td>
-                    <td className="p-2 align-top font-medium">{c.scenario}</td>
-                    <td className="p-2 align-top text-xs text-muted">
-                      {c.designTechnique}
-                    </td>
-                    <td className="p-2 align-top text-xs text-muted">
-                      {c.steps.slice(0, 5).map((s, si) => (
-                        <div key={si}>{si + 1}. {s}</div>
-                      ))}
-                    </td>
-                    <td className="p-2 align-top text-xs">{c.expected}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ul className="max-h-[360px] space-y-2 overflow-y-auto">
+            {(preview?.cases ?? []).map((c, i) => (
+              <li
+                key={`${c.scenario}-${i}`}
+                className="rounded-lg border border-border bg-panel/30 p-3"
+              >
+                <label className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={selected.has(i)}
+                    onChange={(e) => {
+                      setSelected((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(i);
+                        else next.delete(i);
+                        return next;
+                      });
+                    }}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-medium text-fg">
+                      {c.scenario}
+                    </span>
+                    <span className="mt-0.5 block text-xs text-muted">
+                      {c.module || 'General'} · {c.designTechnique || '—'} ·{' '}
+                      {c.priorityLabel}
+                    </span>
+                    <span className="mt-1 block text-xs text-muted line-clamp-2">
+                      {c.expected}
+                    </span>
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {error ? <p className="mt-3 text-sm text-danger">{error}</p> : null}
-      <UpgradeModal
-        open={Boolean(upgradeError)}
-        error={upgradeError}
-        onClose={() => setUpgradeError(null)}
-      />
     </Modal>
+    <UpgradeModal
+      open={Boolean(upgradeError)}
+      error={upgradeError}
+      onClose={() => setUpgradeError(null)}
+    />
+    </>
   );
 }

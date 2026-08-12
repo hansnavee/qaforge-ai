@@ -22,6 +22,10 @@ import { TcmsCycleChart } from './tcms-cycle-chart';
 import { TcmsProjectChrome } from './tcms-chrome';
 import { TcmsAiExecutorModal } from './tcms-ai-executor-modal';
 import {
+  TcmsAiGenerateModal,
+  type AiGenerateModalDefaults,
+} from './tcms-ai-generate-modal';
+import {
   caseHref,
   firstPendingId,
   isPendingCase,
@@ -30,6 +34,7 @@ import {
   type TcmsRunCase,
   type TcmsRunDetail,
 } from './tcms-types';
+import type { FolderOption } from './tcms-case-modal';
 
 type Filter =
   | 'all'
@@ -55,6 +60,9 @@ export function TcmsRunCockpit({
   const [executorOpen, setExecutorOpen] = useState(false);
   const [retestCaseIds, setRetestCaseIds] = useState<string[] | undefined>();
   const [now, setNow] = useState(() => Date.now());
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updateDefaults, setUpdateDefaults] =
+    useState<AiGenerateModalDefaults | null>(null);
 
   const projectQuery = useQuery({
     queryKey: ['project', projectId],
@@ -74,6 +82,64 @@ export function TcmsRunCockpit({
     },
     refetchInterval: 5000,
   });
+
+  const foldersQuery = useQuery({
+    queryKey: ['tcms-folders', projectId],
+    queryFn: async () => {
+      const orgId = await getDefaultOrgId();
+      return api<Array<{ id: string; name: string; parentId?: string | null }>>(
+        `/api/v1/orgs/${orgId}/projects/${projectId}/tcms/folders`,
+      );
+    },
+  });
+
+  const folderOptions: FolderOption[] = useMemo(() => {
+    return (foldersQuery.data ?? []).map((f) => ({
+      id: f.id,
+      label: f.name,
+    }));
+  }, [foldersQuery.data]);
+
+  const taggedFailures = useMemo(() => {
+    return (runQuery.data?.cases ?? []).filter((c) => {
+      if (c.result?.status !== 'FAILED') return false;
+      const msg = (c.result.message ?? '').toUpperCase();
+      return (
+        msg.includes('[UI]') ||
+        msg.includes('[BUTTON]') ||
+        msg.includes('[PERF]')
+      );
+    });
+  }, [runQuery.data?.cases]);
+
+  const failedCases = useMemo(
+    () =>
+      (runQuery.data?.cases ?? []).filter(
+        (c) => c.result?.status === 'FAILED',
+      ),
+    [runQuery.data?.cases],
+  );
+
+  function openUpdateFromFindings(onlyTagged: boolean) {
+    const source = onlyTagged ? taggedFailures : failedCases;
+    const lines = source.slice(0, 20).map((c) => {
+      const msg = c.result?.message?.slice(0, 160) ?? 'FAILED';
+      return `- ${c.externalId}: ${c.scenario} → ${msg}`;
+    });
+    setUpdateDefaults({
+      applyMode: 'update',
+      source: 'UPDATE',
+      reviewApplication: true,
+      caseIds: source.map((c) => c.id),
+      prompt: [
+        'Update failed cases based on execution findings. Fix steps/locators for real UI controls; keep coverage.',
+        '',
+        'Findings:',
+        ...lines,
+      ].join('\n'),
+    });
+    setUpdateOpen(true);
+  }
 
   const completeMutation = useMutation({
     mutationFn: async () => {
@@ -309,6 +375,18 @@ export function TcmsRunCockpit({
                   All runs
                 </Button>
               </Link>
+              {caps.canDesign && failedCases.length > 0 ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() =>
+                    openUpdateFromFindings(taggedFailures.length > 0)
+                  }
+                >
+                  Update cases from findings
+                </Button>
+              ) : null}
             </div>
           </div>
           {run.counts ? <TcmsCycleChart counts={run.counts} /> : null}
@@ -483,6 +561,21 @@ export function TcmsRunCockpit({
         onStarted={() => {
           void qc.invalidateQueries({ queryKey: ['tcms-run', projectId, runId] });
           void qc.invalidateQueries({ queryKey: ['tcms-runs', projectId] });
+        }}
+      />
+      <TcmsAiGenerateModal
+        open={updateOpen}
+        projectId={projectId}
+        folders={folderOptions}
+        defaultFolderId=""
+        defaults={updateDefaults}
+        onClose={() => {
+          setUpdateOpen(false);
+          setUpdateDefaults(null);
+        }}
+        onAdded={() => {
+          void qc.invalidateQueries({ queryKey: ['test-cases', projectId] });
+          void qc.invalidateQueries({ queryKey: ['tcms-run', projectId, runId] });
         }}
       />
     </TcmsProjectChrome>

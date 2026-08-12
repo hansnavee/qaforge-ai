@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -110,21 +109,27 @@ export class OrgsService {
 
   async getById(userId: string, orgId: string) {
     const membership = await this.requireMembership(userId, orgId, Role.VIEWER);
+    const canSeeMemberPii = roleRank(membership.role) >= roleRank(Role.ADMIN);
     const org = await prisma.organization.findUnique({
       where: { id: orgId },
       include: {
         subscription: true,
-        memberships: {
-          include: {
-            user: { select: { id: true, email: true, name: true, image: true } },
-          },
-        },
+        memberships: canSeeMemberPii
+          ? {
+              include: {
+                user: {
+                  select: { id: true, email: true, name: true, image: true },
+                },
+              },
+            }
+          : false,
       },
     });
     if (!org) throw new NotFoundException('Organization not found');
     const { browserstackEncrypted, ...rest } = org;
     return {
       ...rest,
+      memberships: canSeeMemberPii ? rest.memberships : [],
       role: membership.role,
       browserstackConfigured: Boolean(browserstackEncrypted),
     };
@@ -190,19 +195,22 @@ export class OrgsService {
     const target = await prisma.user.findUnique({
       where: { email: input.email.toLowerCase() },
     });
-    if (!target) {
-      throw new NotFoundException(
-        `No user with email ${input.email}. They must sign up first.`,
+    const existing = target
+      ? await prisma.membership.findUnique({
+          where: {
+            organizationId_userId: {
+              organizationId: orgId,
+              userId: target.id,
+            },
+          },
+        })
+      : null;
+    // Same message whether the email has no account or is already a member —
+    // avoids probing global signup existence.
+    if (!target || existing) {
+      throw new BadRequestException(
+        'Unable to add that email. The user must already have an account and not be a member of this organization.',
       );
-    }
-
-    const existing = await prisma.membership.findUnique({
-      where: {
-        organizationId_userId: { organizationId: orgId, userId: target.id },
-      },
-    });
-    if (existing) {
-      throw new ConflictException('User is already a member');
     }
 
     await this.planUsage.assertSeatLimit(orgId, actor.id);

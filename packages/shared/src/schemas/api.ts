@@ -397,6 +397,35 @@ export const generateTestCasesSchema = z.object({
 
 export type GenerateTestCasesInput = z.infer<typeof generateTestCasesSchema>;
 
+export const aiPromptSourceSchema = z.enum([
+  'GENERATE',
+  'UPDATE',
+  'ENV_REFRESH',
+]);
+
+export const aiPromptHistoryCreateSchema = z.object({
+  prompt: z.string().min(1).max(100_000),
+  source: aiPromptSourceSchema.optional(),
+  caseCount: z.number().int().min(0).max(10_000).optional(),
+});
+
+export type AiPromptHistoryCreateInput = z.infer<
+  typeof aiPromptHistoryCreateSchema
+>;
+
+export const generateApplySchema = z.object({
+  mode: z.enum(['create', 'update']),
+  prompt: z.string().max(100_000).optional(),
+  source: aiPromptSourceSchema.optional(),
+  folderId: z.string().min(1).nullable().optional(),
+  templateId: z.string().min(1).nullable().optional(),
+  /** Prefer updating these existing case ids (order maps to cases[] when lengths match). */
+  caseIds: z.array(z.string().min(1)).max(200).optional(),
+  cases: z.array(testCaseWriteSchema).min(1).max(200),
+});
+
+export type GenerateApplyInput = z.infer<typeof generateApplySchema>;
+
 export const testCaseBulkCreateSchema = z.object({
   folderId: z.string().min(1).nullable().optional(),
   templateId: z.string().min(1).nullable().optional(),

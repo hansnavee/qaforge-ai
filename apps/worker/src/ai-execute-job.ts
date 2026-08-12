@@ -40,6 +40,40 @@ type Selection = {
   runKind?: string;
 };
 
+/** Prefix failure messages for cockpit "Update cases from findings". */
+export function classifyAiFailureMessage(
+  raw: string,
+  durationMs?: number,
+): string {
+  const msg = (raw || 'Unknown failure').trim();
+  if (
+    msg.startsWith('[UI]') ||
+    msg.startsWith('[BUTTON]') ||
+    msg.startsWith('[PERF]')
+  ) {
+    return msg;
+  }
+  const lower = msg.toLowerCase();
+  if (
+    /button|getbyrole\(\s*['"]button|click.*not (found|visible|enabled)|unable to click/i.test(
+      lower,
+    )
+  ) {
+    return `[BUTTON] ${msg}`;
+  }
+  if (
+    /locator|timeout|waiting for|strict mode|element|selector|not found|not visible|detached|intercepts pointer/i.test(
+      lower,
+    )
+  ) {
+    return `[UI] ${msg}`;
+  }
+  if (typeof durationMs === 'number' && durationMs >= 10_000) {
+    return `[PERF] Slow step (${Math.round(durationMs / 1000)}s): ${msg}`;
+  }
+  return msg;
+}
+
 function readSelection(raw: unknown): Selection {
   if (!raw || typeof raw !== 'object') return {};
   return raw as Selection;
@@ -356,7 +390,12 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
         }
       } catch (err) {
         status = 'FAILED';
-        message = err instanceof Error ? err.message : String(err);
+        const raw = err instanceof Error ? err.message : String(err);
+        message = classifyAiFailureMessage(raw, Date.now() - started);
+      }
+
+      if (status === 'FAILED' && message) {
+        message = classifyAiFailureMessage(message, Date.now() - started);
       }
 
       // On replay, do not overwrite a healthy recorded script with empty/partial log.

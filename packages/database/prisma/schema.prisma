@@ -212,8 +212,24 @@ model Project {
   automatedScripts     AutomatedScript[]
   automationReports    AutomationReport[]
   automationHealLogs   AutomationHealLog[]
+  aiPromptHistory      AiPromptHistory[]
 
   @@index([organizationId])
+}
+
+/// Per-project AI generate/update prompt history (shared by org members with project access).
+model AiPromptHistory {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String?
+  prompt    String   @db.Text
+  /// GENERATE | UPDATE | ENV_REFRESH
+  source    String
+  caseCount Int?
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
 }
 
 model RequirementDocument {

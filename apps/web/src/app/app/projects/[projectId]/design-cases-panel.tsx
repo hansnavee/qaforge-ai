@@ -1,7 +1,8 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   DESIGN_TECHNIQUES,
   TECHNIQUE_LABELS,
@@ -27,7 +28,10 @@ import {
 } from '@/components/ListingTable';
 import { Modal } from '@/components/Modal';
 import { TcmsBoard, TcmsTreeButton, fieldClass } from './tcms-board';
-import { TcmsAiGenerateModal } from './tcms-ai-generate-modal';
+import {
+  TcmsAiGenerateModal,
+  type AiGenerateModalDefaults,
+} from './tcms-ai-generate-modal';
 import {
   TcmsCaseModal,
   type CaseDraft,
@@ -195,8 +199,27 @@ export function DesignCasesPanel({
   const [archiveIds, setArchiveIds] = useState<string[] | null>(null);
   const [purgeIds, setPurgeIds] = useState<string[] | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
+  const [aiDefaults, setAiDefaults] = useState<AiGenerateModalDefaults | null>(
+    null,
+  );
   const [importOpen, setImportOpen] = useState(false);
   const [templatesOpen, setTemplatesOpen] = useState(false);
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    const ai = searchParams.get('ai');
+    if (ai !== 'update' && ai !== 'refresh') return;
+    setAiDefaults({
+      applyMode: 'update',
+      reviewApplication: true,
+      source: ai === 'refresh' ? 'ENV_REFRESH' : 'UPDATE',
+      prompt:
+        ai === 'refresh'
+          ? 'Refresh and update existing test cases using the live application URL and current environment. Align steps with real UI controls.'
+          : undefined,
+    });
+    setAiOpen(true);
+  }, [searchParams]);
 
   const casesQuery = useQuery({
     queryKey: ['test-cases', projectId],
@@ -784,7 +807,10 @@ export function DesignCasesPanel({
                   type="button"
                   size="sm"
                   variant="secondary"
-                  onClick={() => setAiOpen(true)}
+                  onClick={() => {
+                    setAiDefaults(null);
+                    setAiOpen(true);
+                  }}
                 >
                   AI
                 </Button>
@@ -864,7 +890,10 @@ export function DesignCasesPanel({
                       type="button"
                       size="sm"
                       variant="secondary"
-                      onClick={() => setAiOpen(true)}
+                      onClick={() => {
+                    setAiDefaults(null);
+                    setAiOpen(true);
+                  }}
                     >
                       AI
                     </Button>
@@ -993,7 +1022,11 @@ export function DesignCasesPanel({
             ? folder.folderId
             : '')
         }
-        onClose={() => setAiOpen(false)}
+        defaults={aiDefaults}
+        onClose={() => {
+          setAiOpen(false);
+          setAiDefaults(null);
+        }}
         onAdded={() => void invalidate()}
       />
 

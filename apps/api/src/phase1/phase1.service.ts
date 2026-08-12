@@ -18,10 +18,12 @@ import {
   clarifyExecutionSchema,
   createTcmsFolderSchema,
   aiExecuteRunSchema,
+  aiPromptHistoryCreateSchema,
   createTcmsRunSchema,
   cycleResultCounts,
   deleteTcmsFolderSchema,
   evaluateRequirementsReadiness,
+  generateApplySchema,
   generateTestCasesSchema,
   credsFromCases,
   extractAppUrlFromText,
@@ -3784,10 +3786,301 @@ export class Phase1Service {
       projectId,
       caseCount: generated.cases.length,
     });
+    const promptText = sourceText.trim();
+    if (promptText) {
+      await prisma.aiPromptHistory.create({
+        data: {
+          projectId,
+          userId,
+          prompt: promptText.slice(0, 100_000),
+          source: 'GENERATE',
+          caseCount: generated.cases.length,
+        },
+      });
+    }
     return {
       ...generated,
       folderId: input.folderId ?? null,
       pageMap,
+    };
+  }
+
+  async listAiPrompts(userId: string, orgId: string, projectId: string) {
+    await this.requireProject(userId, orgId, projectId);
+    const items = await prisma.aiPromptHistory.findMany({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+      select: {
+        id: true,
+        prompt: true,
+        source: true,
+        caseCount: true,
+        userId: true,
+        createdAt: true,
+      },
+    });
+    return { items };
+  }
+
+  async createAiPrompt(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(aiPromptHistoryCreateSchema, body);
+    const row = await prisma.aiPromptHistory.create({
+      data: {
+        projectId,
+        userId,
+        prompt: input.prompt.trim().slice(0, 100_000),
+        source: input.source ?? 'GENERATE',
+        caseCount: input.caseCount ?? null,
+      },
+      select: {
+        id: true,
+        prompt: true,
+        source: true,
+        caseCount: true,
+        userId: true,
+        createdAt: true,
+      },
+    });
+    return row;
+  }
+
+  async clearAiPrompts(userId: string, orgId: string, projectId: string) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const result = await prisma.aiPromptHistory.deleteMany({
+      where: { projectId },
+    });
+    return { ok: true, deleted: result.count };
+  }
+
+  async deleteAiPrompt(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    promptId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const existing = await prisma.aiPromptHistory.findFirst({
+      where: { id: promptId, projectId },
+      select: { id: true },
+    });
+    if (!existing) throw new NotFoundException('Prompt history entry not found');
+    await prisma.aiPromptHistory.delete({ where: { id: promptId } });
+    return { ok: true, id: promptId };
+  }
+
+  async generateApply(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(generateApplySchema, body);
+    const source =
+      input.source ?? (input.mode === 'update' ? 'UPDATE' : 'GENERATE');
+
+    let created = 0;
+    let updated = 0;
+    const casesOut: Array<{ id: string; externalId: string; scenario: string }> =
+      [];
+
+    const existingCases =
+      input.mode === 'update'
+        ? await prisma.testCase.findMany({
+            where: { projectId, deletedAt: null },
+            select: {
+              id: true,
+              externalId: true,
+              scenario: true,
+              module: true,
+            },
+          })
+        : [];
+
+    const byId = new Map(existingCases.map((c) => [c.id, c]));
+    const usedIds = new Set<string>();
+
+    const matchExisting = (
+      row: (typeof input.cases)[number],
+      index: number,
+    ) => {
+      const preferredId = input.caseIds?.[index];
+      if (preferredId && byId.has(preferredId) && !usedIds.has(preferredId)) {
+        return byId.get(preferredId)!;
+      }
+      const externalId = row.externalId?.trim();
+      if (externalId) {
+        const hit = existingCases.find(
+          (c) =>
+            !usedIds.has(c.id) &&
+            c.externalId.toLowerCase() === externalId.toLowerCase(),
+        );
+        if (hit) return hit;
+      }
+      const scenario = row.scenario?.trim().toLowerCase() ?? '';
+      const moduleName = (row.module ?? 'General').trim().toLowerCase();
+      return (
+        existingCases.find(
+          (c) =>
+            !usedIds.has(c.id) &&
+            c.scenario.trim().toLowerCase() === scenario &&
+            (c.module ?? 'General').trim().toLowerCase() === moduleName,
+        ) ?? null
+      );
+    };
+
+    let count = await prisma.testCase.count({ where: { projectId } });
+    const template = input.templateId
+      ? await prisma.caseTemplate.findFirst({
+          where: { id: input.templateId, projectId },
+        })
+      : await prisma.caseTemplate.findFirst({
+          where: { projectId, isDefault: true },
+        });
+    const templateDefaults =
+      template?.defaults && typeof template.defaults === 'object'
+        ? (template.defaults as Record<string, string>)
+        : {};
+
+    for (let i = 0; i < input.cases.length; i++) {
+      const row = input.cases[i]!;
+      if (!row.scenario?.trim() || !row.expected?.trim()) continue;
+      const folderId =
+        row.folderId !== undefined ? row.folderId : input.folderId;
+      const placement = await this.folderPlacement(projectId, folderId);
+      const matched =
+        input.mode === 'update' ? matchExisting(row, i) : null;
+
+      if (matched) {
+        usedIds.add(matched.id);
+        const status = this.statusFields({ caseStatus: 'DRAFT' });
+        const record = await prisma.testCase.update({
+          where: { id: matched.id },
+          data: {
+            module: row.module ?? placement.module ?? 'General',
+            scenario: row.scenario.trim(),
+            preconditions:
+              row.preconditions ?? templateDefaults.preconditions ?? '',
+            steps: (row.steps ?? ['Perform the scenario steps']) as never,
+            expected: row.expected.trim(),
+            priority:
+              row.priority ??
+              priorityFromLabel(
+                row.priorityLabel ??
+                  (templateDefaults.priorityLabel as
+                    | 'HIGH'
+                    | 'MEDIUM'
+                    | 'LOW') ??
+                  'MEDIUM',
+              ),
+            severity: row.severity ?? 'medium',
+            type: row.type ?? templateDefaults.type ?? 'functional',
+            requirementKey:
+              row.requirementKey ?? placement.requirementKey ?? null,
+            designTechnique:
+              row.designTechnique ??
+              templateDefaults.designTechnique ??
+              null,
+            featureKey: row.featureKey ?? placement.featureKey ?? null,
+            folderId: placement.folderId ?? null,
+            priorityLabel:
+              row.priorityLabel ??
+              normalizePriorityLabel(row.priority ?? 'P1'),
+            ...status,
+            testData: (row.testData ?? null) as never,
+            customFields: (row.customFields ?? null) as never,
+            templateId: input.templateId ?? template?.id ?? null,
+          },
+        });
+        updated += 1;
+        casesOut.push({
+          id: record.id,
+          externalId: record.externalId,
+          scenario: record.scenario,
+        });
+        continue;
+      }
+
+      count += 1;
+      const status = this.statusFields({ caseStatus: 'DRAFT' });
+      const record = await prisma.testCase.create({
+        data: {
+          projectId,
+          executionId: null,
+          externalId:
+            row.externalId?.trim() ||
+            `TC-${String(count).padStart(3, '0')}`,
+          module: row.module ?? placement.module ?? 'General',
+          scenario: row.scenario.trim(),
+          preconditions:
+            row.preconditions ?? templateDefaults.preconditions ?? '',
+          steps: (row.steps ?? ['Perform the scenario steps']) as never,
+          expected: row.expected.trim(),
+          priority:
+            row.priority ??
+            priorityFromLabel(
+              row.priorityLabel ??
+                (templateDefaults.priorityLabel as 'HIGH' | 'MEDIUM' | 'LOW') ??
+                'MEDIUM',
+            ),
+          severity: row.severity ?? 'medium',
+          type: row.type ?? templateDefaults.type ?? 'functional',
+          requirementKey:
+            row.requirementKey ?? placement.requirementKey ?? null,
+          designTechnique:
+            row.designTechnique ??
+            templateDefaults.designTechnique ??
+            null,
+          featureKey: row.featureKey ?? placement.featureKey ?? null,
+          folderId: placement.folderId ?? null,
+          designMode: 'GENERIC',
+          priorityLabel:
+            row.priorityLabel ??
+            normalizePriorityLabel(row.priority ?? 'P1'),
+          ...status,
+          testData: (row.testData ?? null) as never,
+          customFields: (row.customFields ?? null) as never,
+          templateId: input.templateId ?? template?.id ?? null,
+        },
+      });
+      created += 1;
+      casesOut.push({
+        id: record.id,
+        externalId: record.externalId,
+        scenario: record.scenario,
+      });
+    }
+
+    if (!created && !updated) {
+      throw new BadRequestException('No valid cases to apply');
+    }
+
+    const promptText = input.prompt?.trim();
+    if (promptText) {
+      await prisma.aiPromptHistory.create({
+        data: {
+          projectId,
+          userId,
+          prompt: promptText.slice(0, 100_000),
+          source,
+          caseCount: created + updated,
+        },
+      });
+    }
+
+    await this.syncDesignDocFromCases(projectId);
+    return {
+      mode: input.mode,
+      created,
+      updated,
+      cases: casesOut,
     };
   }
 

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
@@ -44,6 +45,8 @@ export function EnvironmentPanel({
   const [healRequiresReview, setHealRequiresReview] = useState(false);
   const [llmHealRequiresApproval, setLlmHealRequiresApproval] = useState(true);
   const [allowExecuteQuarantined, setAllowExecuteQuarantined] = useState(false);
+
+  const [savedReady, setSavedReady] = useState(false);
 
   const projectQuery = useQuery({
     queryKey: ['project', projectId],
@@ -119,6 +122,7 @@ export function EnvironmentPanel({
     },
     onSuccess: async () => {
       setPassword('');
+      setSavedReady(Boolean(appUrl.trim() && appUrl.trim() !== 'https://'));
       await qc.invalidateQueries({ queryKey: ['project', projectId] });
       await qc.invalidateQueries({ queryKey: ['stlc-phase', projectId] });
       await qc.invalidateQueries({ queryKey: ['test-cases', projectId] });
@@ -327,6 +331,25 @@ export function EnvironmentPanel({
               ? 'Save environment'
               : 'Save and update test steps'}
         </Button>
+      ) : null}
+      {savedReady ||
+      (project?.appUrl &&
+        project.appUrl.trim() &&
+        project.appUrl.trim() !== 'https://') ? (
+        <div className="rounded-md border border-border bg-bg-elevated p-3">
+          <p className="text-xs text-muted">
+            Environment URL is ready. Refresh cases from the live app and your
+            prompt history (update matching cases — does not wipe existing ones).
+          </p>
+          <Link
+            href={`/app/projects/${projectId}?tab=cases&ai=refresh`}
+            className="mt-2 inline-flex"
+          >
+            <Button type="button" size="sm" variant="secondary">
+              Refresh cases from app + prompt
+            </Button>
+          </Link>
+        </div>
       ) : null}
     </div>
   );

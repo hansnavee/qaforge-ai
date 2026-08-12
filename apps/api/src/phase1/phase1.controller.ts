@@ -247,6 +247,54 @@ export class Phase1Controller {
     return this.phase1.bulkCreateTestCases(user.id, orgId, projectId, body);
   }
 
+  @Post('orgs/:orgId/projects/:projectId/test-cases/generate-apply')
+  generateApply(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    return this.phase1.generateApply(user.id, orgId, projectId, body);
+  }
+
+  @Get('orgs/:orgId/projects/:projectId/ai-prompts')
+  listAiPrompts(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.phase1.listAiPrompts(user.id, orgId, projectId);
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/ai-prompts')
+  createAiPrompt(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    return this.phase1.createAiPrompt(user.id, orgId, projectId, body);
+  }
+
+  @Delete('orgs/:orgId/projects/:projectId/ai-prompts')
+  clearAiPrompts(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.phase1.clearAiPrompts(user.id, orgId, projectId);
+  }
+
+  @Delete('orgs/:orgId/projects/:projectId/ai-prompts/:promptId')
+  deleteAiPrompt(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('promptId') promptId: string,
+  ) {
+    return this.phase1.deleteAiPrompt(user.id, orgId, projectId, promptId);
+  }
+
   @Post('orgs/:orgId/projects/:projectId/test-cases/import')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -1141,6 +1189,7 @@ export class Phase1Controller {
     const { prisma } = await import('@qaforge/database');
     const m = await prisma.membership.findFirst({
       where: { userId: user.id },
+      orderBy: { createdAt: 'asc' },
       select: { organizationId: true },
     });
     if (!m) return { items: [] };
@@ -1169,6 +1218,7 @@ export class Phase1Controller {
     const { prisma } = await import('@qaforge/database');
     const m = await prisma.membership.findFirst({
       where: { userId: user.id },
+      orderBy: { createdAt: 'asc' },
       select: { organizationId: true },
     });
     if (!m) return [];
