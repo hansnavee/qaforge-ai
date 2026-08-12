@@ -22,8 +22,8 @@ function resolveModelMap(): Record<'fast' | 'reasoning', string> {
   const free = {
     // Fast/general JSON-friendly free model (availability rotates on OpenRouter)
     fast: 'google/gemma-4-26b-a4b-it:free',
-    // Stronger free model for design / case generation
-    reasoning: 'openai/gpt-oss-20b:free',
+    // Case generate / design — Gemma 4 31B; gpt-oss-20b:free is often rate-limited
+    reasoning: 'google/gemma-4-31b-it:free',
   } as const;
   const base = useFree ? free : paid;
   return {
@@ -527,11 +527,20 @@ export class OpenRouterLlmClient implements LlmClient {
 
     const models = resolveModelMap();
     const preferred = models[opts.model ?? 'fast'];
+    const useFree =
+      (process.env.OPENROUTER_USE_FREE ?? 'true').toLowerCase() !== 'false';
     // Fallback router picks any currently available free model if the pinned
-    // free ID was delisted (OpenRouter free catalog churns often).
-    const candidates = [preferred, 'openrouter/free'].filter(
-      (m, i, arr) => Boolean(m) && arr.indexOf(m) === i,
-    );
+    // free ID was delisted or rate-limited (OpenRouter free catalog churns often).
+    const candidates = [
+      preferred,
+      useFree ? 'openrouter/free' : '',
+      useFree && preferred !== 'google/gemma-4-31b-it:free'
+        ? 'google/gemma-4-31b-it:free'
+        : '',
+      useFree && preferred !== 'google/gemma-4-26b-a4b-it:free'
+        ? 'google/gemma-4-26b-a4b-it:free'
+        : '',
+    ].filter((m, i, arr) => Boolean(m) && arr.indexOf(m) === i);
 
     const messages: Array<{ role: string; content: string }> = [];
     if (opts.system) {
@@ -573,8 +582,8 @@ export class OpenRouterLlmClient implements LlmClient {
       });
       if (response.ok) break;
       lastErr = await response.text().catch(() => '');
-      // Retry next candidate on model-not-found / unavailable
-      if (![404, 400, 502, 503].includes(response.status)) {
+      // Retry next candidate on model-not-found / unavailable / rate-limit
+      if (![404, 400, 429, 502, 503].includes(response.status)) {
         throw new Error(
           `OpenRouter request failed (${response.status}): ${lastErr || response.statusText}`,
         );
