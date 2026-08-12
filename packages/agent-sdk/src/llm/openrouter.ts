@@ -21,9 +21,9 @@ function resolveModelMap(): Record<'fast' | 'reasoning', string> {
   } as const;
   const free = {
     // Fast/general JSON-friendly free model (availability rotates on OpenRouter)
-    fast: 'google/gemma-4-26b-a4b-it:free',
-    // Case generate / design — Gemma 4 31B; gpt-oss-20b:free is often rate-limited
-    reasoning: 'google/gemma-4-31b-it:free',
+    fast: 'nvidia/nemotron-3-nano-30b-a3b:free',
+    // Case generate / design — Nano is currently the most reliable free JSON writer
+    reasoning: 'nvidia/nemotron-3-nano-30b-a3b:free',
   } as const;
   const base = useFree ? free : paid;
   return {
@@ -534,6 +534,12 @@ export class OpenRouterLlmClient implements LlmClient {
     const candidates = [
       preferred,
       useFree ? 'openrouter/free' : '',
+      useFree && preferred !== 'nvidia/nemotron-3-nano-30b-a3b:free'
+        ? 'nvidia/nemotron-3-nano-30b-a3b:free'
+        : '',
+      useFree && preferred !== 'openai/gpt-oss-20b:free'
+        ? 'openai/gpt-oss-20b:free'
+        : '',
       useFree && preferred !== 'google/gemma-4-31b-it:free'
         ? 'google/gemma-4-31b-it:free'
         : '',
