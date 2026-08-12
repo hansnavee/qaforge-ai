@@ -7,16 +7,15 @@ import {
 import { prisma, type Prisma } from '@qaforge/database';
 import {
   ExecutionStatus,
-  PLAN_LIMITS,
   Role,
   clarifyExecutionSchema,
   executionSelectionSchema,
   isUsableAppUrl,
-  type PlanId,
 } from '@qaforge/shared';
 import { AuditService } from '../common/audit.service';
 import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
+import { PlanUsageService } from '../billing/plan-usage.service';
 import { OrgsService } from '../orgs/orgs.service';
 import { QueueService } from '../queue/queue.service';
 
@@ -26,6 +25,7 @@ export class ExecutionsService {
     private readonly orgs: OrgsService,
     private readonly queue: QueueService,
     private readonly audit: AuditService,
+    private readonly planUsage: PlanUsageService,
   ) {}
 
   /**
@@ -50,29 +50,7 @@ export class ExecutionsService {
   }
 
   private async assertUsageLimit(orgId: string) {
-    const subscription = await prisma.subscription.findUnique({
-      where: { organizationId: orgId },
-    });
-    const plan = (subscription?.plan ?? 'FREE') as PlanId;
-    const limits = PLAN_LIMITS[plan] ?? PLAN_LIMITS.FREE;
-
-    const startOfMonth = new Date();
-    startOfMonth.setUTCDate(1);
-    startOfMonth.setUTCHours(0, 0, 0, 0);
-
-    const used = await prisma.usageEvent.count({
-      where: {
-        organizationId: orgId,
-        type: 'EXECUTION',
-        createdAt: { gte: startOfMonth },
-      },
-    });
-
-    if (used >= limits.runsPerMonth) {
-      throw new ForbiddenException(
-        `Plan ${plan} limit reached (${limits.runsPerMonth} runs/month)`,
-      );
-    }
+    await this.planUsage.assertPlanLimit(orgId, 'EXECUTION');
   }
 
   async create(user: SessionUser, orgId: string, projectId: string) {

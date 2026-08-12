@@ -1,3 +1,5 @@
+import { specFromActionLog, type ActionEntry } from '@qaforge/shared';
+
 export function playwrightSpec(opts: {
   externalId: string;
   scenario: string;
@@ -6,10 +8,19 @@ export function playwrightSpec(opts: {
   appUrl: string;
   username?: string;
   password?: string;
+  actions?: ActionEntry[];
 }): string {
+  if (opts.actions?.length) {
+    return specFromActionLog({
+      externalId: opts.externalId,
+      scenario: opts.scenario,
+      expected: opts.expected,
+      actions: opts.actions,
+      fallbackAppUrl: opts.appUrl,
+    });
+  }
+  // Fallback when no ActionLog yet — still avoid embedding passwords as literals.
   const url = JSON.stringify(opts.appUrl);
-  const user = JSON.stringify(opts.username || '');
-  const pass = JSON.stringify(opts.password || '');
   const comments = opts.steps
     .map((s) => `  // ${String(s).replace(/\r?\n/g, ' ').slice(0, 240)}`)
     .join('\n');
@@ -18,10 +29,10 @@ export function playwrightSpec(opts: {
 test(${JSON.stringify(`${opts.externalId}: ${opts.scenario}`)}, async ({ page }) => {
   await page.goto(process.env.APP_URL || ${url});
 ${comments || '  // No steps recorded'}
-  if (${user} && ${pass}) {
-    await page.locator('[data-test="username"], #username, #user-name').first().fill(${user}).catch(() => undefined);
-    await page.locator('[data-test="password"], #password').first().fill(${pass}).catch(() => undefined);
-    await page.locator('[data-test="login-button"], #login-button').first().click().catch(() => undefined);
+  if (process.env.APP_USER && process.env.APP_PASS) {
+    await page.locator('[data-test="username"], #username, #user-name').first().fill(process.env.APP_USER);
+    await page.locator('[data-test="password"], #password').first().fill(process.env.APP_PASS);
+    await page.locator('[data-test="login-button"], #login-button').first().click();
   }
   // Expected: ${opts.expected.replace(/\r?\n/g, ' ').slice(0, 400)}
 });

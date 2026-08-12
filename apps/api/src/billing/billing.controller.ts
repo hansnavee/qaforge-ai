@@ -24,9 +24,9 @@ export class BillingController {
   @UseGuards(SessionAuthGuard)
   checkout(
     @CurrentUser() user: SessionUser,
-    @Body() body: { orgId: string },
+    @Body() body: { orgId: string; plan?: 'PRO' | 'ENTERPRISE' },
   ) {
-    return this.billing.checkout(user, body.orgId);
+    return this.billing.checkout(user, body.orgId, body.plan ?? 'PRO');
   }
 
   @Post('billing/webhook')

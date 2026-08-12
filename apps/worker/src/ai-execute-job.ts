@@ -13,6 +13,8 @@ import { buildZipPackage } from '@qaforge/report-engine';
 import { createAgentContext, putBinaryArtifact } from './context.js';
 import { buildAutomationHtml, playwrightSpec } from './ai-execute-playwright.js';
 import { executeTestSteps } from './execute-test-steps.js';
+import { parseActionLog } from './replay-action-log.js';
+import { runFailurePipeline } from './failure-pipeline.js';
 import {
   ExecutionCancelledError,
   throwIfCancelled,
@@ -35,6 +37,7 @@ export type AiExecuteJobData = {
 type Selection = {
   name?: string;
   testCaseIds?: string[];
+  runKind?: string;
 };
 
 function readSelection(raw: unknown): Selection {
@@ -224,39 +227,6 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
       await throwIfCancelled(executionId);
 
       const steps = Array.isArray(tc.steps) ? (tc.steps as string[]) : [];
-      const spec = playwrightSpec({
-        externalId: tc.externalId,
-        scenario: tc.scenario,
-        steps,
-        expected: tc.expected,
-        appUrl: appUrl as string,
-        username: data.username,
-        password: data.password,
-      });
-      const specPath = `tests/${tc.externalId.replace(/[^a-zA-Z0-9._-]/g, '_')}.spec.ts`;
-      await prisma.automatedScript.upsert({
-        where: {
-          projectId_testCaseId: { projectId: project.id, testCaseId: tc.id },
-        },
-        create: {
-          projectId: project.id,
-          testCaseId: tc.id,
-          path: specPath,
-          source: spec,
-          language: 'TYPESCRIPT',
-          framework: 'PLAYWRIGHT',
-          lastRunId: executionId,
-          lastStatus: 'RUNNING',
-        },
-        update: {
-          path: specPath,
-          source: spec,
-          lastRunId: executionId,
-          lastStatus: 'RUNNING',
-        },
-      });
-      zipFiles[specPath] = spec;
-
       const started = Date.now();
       const evidenceKeys: string[] = [];
       let status: 'PASSED' | 'FAILED' = 'PASSED';
@@ -274,16 +244,169 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
       if (!testData.username && data.username) testData.username = data.username;
       if (!testData.password && data.password) testData.password = data.password;
 
+      let actions: Awaited<ReturnType<typeof executeTestSteps>> = [];
+      const preferReplay = selection.runKind === 'AUTOMATION';
       try {
         const startUrl = caseStartUrl(tc.testData, steps, appUrl as string);
-        await page.goto(startUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: 45_000,
-        });
-        await executeTestSteps(page, steps, startUrl, testData);
+        if (preferReplay) {
+          const existingScript = await prisma.automatedScript.findUnique({
+            where: {
+              projectId_testCaseId: {
+                projectId: project.id,
+                testCaseId: tc.id,
+              },
+            },
+          });
+          const recorded = parseActionLog(existingScript?.actionLog);
+          if (recorded.length) {
+            const env = {
+              appUrl: appUrl as string,
+              loginUrl: data.loginUrl || project.loginUrl,
+              username: testData.username || data.username,
+              password: testData.password || data.password,
+              firstName: testData.firstName,
+              lastName: testData.lastName,
+              postalCode: testData.postalCode,
+            };
+            const pipeline = await runFailurePipeline({
+              page,
+              actions: recorded,
+              env,
+              startUrl,
+              healAttempts: existingScript?.healCount ?? 0,
+              stabilityStatus: existingScript?.stabilityStatus,
+              healRequiresReview: Boolean(
+                (project as { healRequiresReview?: boolean }).healRequiresReview,
+              ),
+              llmHealRequiresApproval:
+                (project as { llmHealRequiresApproval?: boolean })
+                  .llmHealRequiresApproval !== false,
+              isP0: (tc.priorityLabel ?? '').toUpperCase() === 'HIGH',
+              gotoStart: async () => {
+                await page.goto(startUrl, {
+                  waitUntil: 'domcontentloaded',
+                  timeout: 45_000,
+                });
+              },
+            });
+            status = pipeline.status;
+            message = pipeline.message;
+            actions = pipeline.actions;
+            if (pipeline.quarantined || pipeline.committedHeal || pipeline.pendingReview) {
+              await prisma.automationHealLog.create({
+                data: {
+                  projectId: project.id,
+                  testCaseId: tc.id,
+                  scriptVersion: existingScript?.scriptVersion ?? 1,
+                  healerKind: 'RULE',
+                  status: pipeline.quarantined
+                    ? 'QUARANTINED'
+                    : pipeline.pendingReview
+                      ? 'PENDING_REVIEW'
+                      : pipeline.committedHeal
+                        ? 'COMMITTED'
+                        : 'VERIFIED',
+                  patchDiff: pipeline.appliedRules.join(', ') || null,
+                  patchedLog:
+                    pipeline.committedHeal || pipeline.pendingReview
+                      ? ((pipeline.patchedActions ?? pipeline.actions) as never)
+                      : undefined,
+                  verificationRuns: pipeline.verificationRuns as never,
+                  rationale: pipeline.decision.rationale as never,
+                  committed: pipeline.committedHeal,
+                },
+              });
+              await prisma.automatedScript.update({
+                where: { id: existingScript!.id },
+                data: {
+                  lastRunId: executionId,
+                  lastStatus: status,
+                  healCount: pipeline.committedHeal || pipeline.quarantined
+                    ? { increment: 1 }
+                    : undefined,
+                  stabilityStatus: pipeline.quarantined
+                    ? 'QUARANTINED'
+                    : pipeline.committedHeal
+                      ? 'WATCH'
+                      : existingScript?.stabilityStatus,
+                  ...(pipeline.committedHeal
+                    ? {
+                        actionLog: pipeline.actions as never,
+                        recordedBy: 'HEALER',
+                        scriptVersion: { increment: 1 },
+                        lastVerifiedAt: new Date(),
+                      }
+                    : {}),
+                },
+              });
+            }
+          } else {
+            await page.goto(startUrl, {
+              waitUntil: 'domcontentloaded',
+              timeout: 45_000,
+            });
+            actions = await executeTestSteps(page, steps, startUrl, testData);
+          }
+        } else {
+          await page.goto(startUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: 45_000,
+          });
+          actions = await executeTestSteps(page, steps, startUrl, testData);
+        }
       } catch (err) {
         status = 'FAILED';
         message = err instanceof Error ? err.message : String(err);
+      }
+
+      // On replay, do not overwrite a healthy recorded script with empty/partial log.
+      const shouldWriteScript = !preferReplay || actions.length > 0;
+      const spec = playwrightSpec({
+        externalId: tc.externalId,
+        scenario: tc.scenario,
+        steps,
+        expected: tc.expected,
+        appUrl: appUrl as string,
+        username: data.username,
+        password: data.password,
+        actions,
+      });
+      const specPath = `tests/${tc.externalId.replace(/[^a-zA-Z0-9._-]/g, '_')}.spec.ts`;
+      if (shouldWriteScript && !preferReplay) {
+        await prisma.automatedScript.upsert({
+          where: {
+            projectId_testCaseId: { projectId: project.id, testCaseId: tc.id },
+          },
+          create: {
+            projectId: project.id,
+            testCaseId: tc.id,
+            path: specPath,
+            source: spec,
+            language: 'TYPESCRIPT',
+            framework: 'PLAYWRIGHT',
+            lastRunId: executionId,
+            lastStatus: status,
+            recordedBy: 'EXECUTOR',
+            scriptVersion: 1,
+            actionLog: actions as never,
+          },
+          update: {
+            path: specPath,
+            source: spec,
+            lastRunId: executionId,
+            lastStatus: status,
+            recordedBy: 'EXECUTOR',
+            scriptVersion: { increment: 1 },
+            actionLog: actions as never,
+          },
+        });
+        zipFiles[specPath] = spec;
+      } else {
+        await prisma.automatedScript.updateMany({
+          where: { projectId: project.id, testCaseId: tc.id },
+          data: { lastRunId: executionId, lastStatus: status },
+        });
+        if (actions.length) zipFiles[specPath] = spec;
       }
 
       try {
@@ -310,22 +433,39 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
       }
 
       const durationMs = Date.now() - started;
-      await prisma.testResult.create({
-        data: {
-          projectId: project.id,
-          executionId,
-          testCaseId: tc.id,
-          status,
-          message,
-          durationMs,
-          executedBy: 'AI',
-          evidenceKeys: evidenceKeys.length ? (evidenceKeys as never) : undefined,
-        },
+      const existingResult = await prisma.testResult.findFirst({
+        where: { executionId, testCaseId: tc.id },
+        orderBy: { createdAt: 'desc' },
       });
-      await prisma.automatedScript.updateMany({
-        where: { projectId: project.id, testCaseId: tc.id },
-        data: { lastRunId: executionId, lastStatus: status },
-      });
+      if (existingResult) {
+        await prisma.testResult.update({
+          where: { id: existingResult.id },
+          data: {
+            status,
+            message,
+            durationMs,
+            executedBy: 'AI',
+            evidenceKeys: evidenceKeys.length
+              ? (evidenceKeys as never)
+              : existingResult.evidenceKeys ?? undefined,
+          },
+        });
+      } else {
+        await prisma.testResult.create({
+          data: {
+            projectId: project.id,
+            executionId,
+            testCaseId: tc.id,
+            status,
+            message,
+            durationMs,
+            executedBy: 'AI',
+            evidenceKeys: evidenceKeys.length
+              ? (evidenceKeys as never)
+              : undefined,
+          },
+        });
+      }
       if (status === 'PASSED') passed += 1;
       else failed += 1;
       htmlRows.push({
@@ -445,8 +585,22 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
     });
     return;
   }
-  await prisma.execution.update({
-    where: { id: executionId },
+  // Do not reopen a human-signed-off COMPLETED cycle (race with Complete button).
+  if (latest?.status === ExecutionStatus.COMPLETED) {
+    return;
+  }
+  await prisma.execution.updateMany({
+    where: {
+      id: executionId,
+      status: {
+        in: [
+          ExecutionStatus.PENDING,
+          ExecutionStatus.RUNNING,
+          ExecutionStatus.FAILED,
+          ExecutionStatus.QUEUED,
+        ],
+      },
+    },
     data: {
       status: ExecutionStatus.RUNNING,
       finishedAt: null,

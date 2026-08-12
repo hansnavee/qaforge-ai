@@ -2,10 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import { isLikelyProductionUrl } from '@qaforge/shared';
-import { API_BASE_URL, api } from '@/lib/api';
+import { API_BASE_URL, ApiError, api } from '@/lib/api';
 import { getDefaultOrgId } from '@/lib/org';
+import { parsePlanLimitError } from '@/lib/plan';
+import { usePlan } from '@/lib/use-plan';
 import { Button } from '@/components/Button';
 import { Modal } from '@/components/Modal';
+import { ProFeatureNotice } from '@/components/UpgradeModal';
 import { fieldClass } from './tcms-board';
 
 const PAIR_STORAGE = 'qaforge-local-runner-pair';
@@ -95,6 +98,13 @@ export function TcmsAiExecutorModal({
   const [creatingToken, setCreatingToken] = useState(false);
   const [repoDir, setRepoDir] = useState(DEFAULT_REPO);
   const [browserstackConfigured, setBrowserstackConfigured] = useState(false);
+  const { canCloudRunner } = usePlan();
+
+  useEffect(() => {
+    if (!canCloudRunner && target === 'CLOUD') {
+      setTarget('LOCAL');
+    }
+  }, [canCloudRunner, target]);
 
   useEffect(() => {
     if (!open) return;
@@ -510,11 +520,17 @@ export function TcmsAiExecutorModal({
             <input
               type="radio"
               checked={target === 'CLOUD'}
+              disabled={!canCloudRunner}
               onChange={() => setTarget('CLOUD')}
             />
             Cloud (BrowserStack)
           </label>
         </fieldset>
+        {!canCloudRunner ? (
+          <ProFeatureNotice feature="Cloud runner">
+            Run AI Executor in the cloud on Pro.
+          </ProFeatureNotice>
+        ) : null}
         {isLikelyProductionUrl(appUrl) ? (
           <p className="text-xs text-danger">
             This URL is treated as production. Check the box below or Start will

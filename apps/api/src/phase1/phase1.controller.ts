@@ -771,6 +771,55 @@ export class Phase1Controller {
     return this.phase1.listAutomatedScripts(user.id, orgId, projectId);
   }
 
+  @Get('orgs/:orgId/projects/:projectId/tcms/automation/heals')
+  listAutomationHeals(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.phase1.listAutomationHeals(user.id, orgId, projectId);
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/tcms/automation/heals/:healId/approve')
+  approveHeal(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('healId') healId: string,
+  ) {
+    return this.phase1.decideHeal(user.id, orgId, projectId, healId, 'approve');
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/tcms/automation/heals/:healId/reject')
+  rejectHeal(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('healId') healId: string,
+  ) {
+    return this.phase1.decideHeal(user.id, orgId, projectId, healId, 'reject');
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/tcms/automation/scripts/:testCaseId/clear-quarantine')
+  clearQuarantine(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('testCaseId') testCaseId: string,
+  ) {
+    return this.phase1.clearQuarantine(user.id, orgId, projectId, testCaseId);
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/tcms/automation/scripts/:testCaseId/rerecord')
+  rerecordScript(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('testCaseId') testCaseId: string,
+  ) {
+    return this.phase1.rerecordScript(user.id, orgId, projectId, testCaseId);
+  }
+
   @Post('orgs/:orgId/projects/:projectId/tcms/automation/scripts/execute')
   executeAutomatedScripts(
     @CurrentUser() user: SessionUser,

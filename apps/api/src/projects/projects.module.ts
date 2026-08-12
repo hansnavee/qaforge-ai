@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { PlanModule } from '../billing/plan.module';
 import { CommonModule } from '../common/common.module';
 import { OrgsModule } from '../orgs/orgs.module';
 import { ProjectsCompatController } from './projects-compat.controller';
@@ -8,7 +9,7 @@ import { RequirementExtractionService } from './requirement-extraction.service';
 import { RequirementReviewService } from './requirement-review.service';
 
 @Module({
-  imports: [OrgsModule, CommonModule],
+  imports: [OrgsModule, CommonModule, PlanModule],
   controllers: [ProjectsController, ProjectsCompatController],
   providers: [
     ProjectsService,

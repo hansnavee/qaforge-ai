@@ -46,8 +46,24 @@ const caseEventSchema = z.object({
   message: z.string().max(8000).nullable().optional(),
   durationMs: z.number().int().nonnegative().optional(),
   spec: z.string().max(200_000).optional(),
+  actionLog: z.array(z.record(z.unknown())).max(500).optional(),
   screenshotBase64: z.string().max(2_500_000).optional(),
   videoBase64: z.string().max(16_000_000).optional(),
+  stabilityStatus: z.enum(['STABLE', 'WATCH', 'FLAKY', 'QUARANTINED']).optional(),
+  healCount: z.number().int().nonnegative().optional(),
+  consecutivePasses: z.number().int().nonnegative().optional(),
+  heal: z
+    .object({
+      healerKind: z.enum(['RULE', 'LLM']).optional(),
+      status: z.string().max(40).optional(),
+      applied: z.array(z.string()).max(40).optional(),
+      verificationRuns: z.array(z.boolean()).max(10).optional(),
+      rationale: z.array(z.string()).max(20).optional(),
+      committed: z.boolean().optional(),
+      pendingReview: z.boolean().optional(),
+      patchedLog: z.array(z.record(z.unknown())).max(500).optional(),
+    })
+    .optional(),
 });
 
 const completeSchema = z.object({
@@ -70,12 +86,16 @@ export type LocalJobPayload = {
   projectId: string;
   projectName: string;
   runName: string;
+  runKind?: string;
   appUrl: string;
   loginUrl?: string;
   username?: string;
   password?: string;
   browser: 'chromium' | 'firefox' | 'webkit';
   headless: boolean;
+  healRequiresReview: boolean;
+  llmHealRequiresApproval: boolean;
+  allowExecuteQuarantined: boolean;
   cases: Array<{
     id: string;
     externalId: string;
@@ -84,6 +104,9 @@ export type LocalJobPayload = {
     steps: string[];
     expected: string;
     testData: Record<string, string>;
+    actionLog?: unknown[];
+    stabilityStatus?: string | null;
+    healCount?: number;
   }>;
 };
 
@@ -317,6 +340,9 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
     if (execution.status === ExecutionStatus.CANCELLED) {
       throw new BadRequestException('Run was stopped');
     }
+    if (execution.status === ExecutionStatus.COMPLETED) {
+      throw new BadRequestException('Run is already completed');
+    }
     const selection = readSelection(execution.selection);
     const caseIds = selection.testCaseIds ?? [];
     if (!caseIds.includes(input.testCaseId)) {
@@ -365,12 +391,22 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
           framework: 'PLAYWRIGHT',
           lastRunId: executionId,
           lastStatus: input.status,
+          recordedBy: 'EXECUTOR',
+          scriptVersion: 1,
+          actionLog: input.actionLog?.length
+            ? (input.actionLog as never)
+            : undefined,
         },
         update: {
           path: specPath,
           source: input.spec,
           lastRunId: executionId,
           lastStatus: input.status,
+          recordedBy: 'EXECUTOR',
+          scriptVersion: { increment: 1 },
+          ...(input.actionLog?.length
+            ? { actionLog: input.actionLog as never }
+            : {}),
         },
       });
     } else {
@@ -378,6 +414,68 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
         where: { projectId: execution.projectId, testCaseId: input.testCaseId },
         data: { lastRunId: executionId, lastStatus: input.status },
       });
+    }
+
+    if (input.stabilityStatus || input.heal || input.consecutivePasses != null) {
+      const script = await prisma.automatedScript.findUnique({
+        where: {
+          projectId_testCaseId: {
+            projectId: execution.projectId,
+            testCaseId: input.testCaseId,
+          },
+        },
+      });
+      if (script) {
+        const nextPasses =
+          input.consecutivePasses ??
+          (input.status === 'PASSED'
+            ? (script.consecutivePasses ?? 0) + 1
+            : 0);
+        await prisma.automatedScript.update({
+          where: { id: script.id },
+          data: {
+            lastRunId: executionId,
+            lastStatus: input.status,
+            ...(input.stabilityStatus
+              ? { stabilityStatus: input.stabilityStatus }
+              : {}),
+            consecutivePasses: nextPasses,
+            ...(input.healCount != null ? { healCount: input.healCount } : {}),
+            ...(input.heal?.committed && input.heal.patchedLog?.length
+              ? {
+                  actionLog: input.heal.patchedLog as never,
+                  recordedBy: 'HEALER',
+                  scriptVersion: { increment: 1 },
+                  lastVerifiedAt: new Date(),
+                }
+              : {}),
+          },
+        });
+        if (input.heal) {
+          await prisma.automationHealLog.create({
+            data: {
+              projectId: execution.projectId,
+              testCaseId: input.testCaseId,
+              scriptVersion: script.scriptVersion,
+              healerKind: input.heal.healerKind ?? 'RULE',
+              status:
+                input.heal.status ??
+                (input.heal.pendingReview
+                  ? 'PENDING_REVIEW'
+                  : input.heal.committed
+                    ? 'COMMITTED'
+                    : 'VERIFIED'),
+              patchDiff: (input.heal.applied ?? []).join(', ') || null,
+              patchedLog: input.heal.patchedLog?.length
+                ? (input.heal.patchedLog as never)
+                : undefined,
+              verificationRuns: input.heal.verificationRuns as never,
+              rationale: input.heal.rationale as never,
+              committed: Boolean(input.heal.committed),
+            },
+          });
+        }
+      }
     }
 
     const existing = await prisma.testResult.findFirst({
@@ -510,8 +608,14 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
         ? ExecutionStatus.CANCELLED
         : ExecutionStatus.RUNNING;
 
-    await prisma.execution.update({
-      where: { id: executionId },
+    // Conditional update — never overwrite COMPLETED / CANCELLED if human finished first.
+    const updated = await prisma.execution.updateMany({
+      where: {
+        id: executionId,
+        status: {
+          notIn: [ExecutionStatus.COMPLETED, ExecutionStatus.CANCELLED],
+        },
+      },
       data: {
         status,
         finishedAt: input.status === 'CANCELLED' ? new Date() : null,
@@ -524,6 +628,14 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
         selection: cleaned as never,
       },
     });
+
+    if (updated.count === 0) {
+      const current = await prisma.execution.findUnique({
+        where: { id: executionId },
+        select: { status: true },
+      });
+      return { ok: true, status: current?.status ?? execution.status };
+    }
 
     return { ok: true, status };
   }
@@ -583,7 +695,15 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
       projectId: string;
       createdAt: Date;
       selection: unknown;
-      project: { id: string; name: string; appUrl: string | null; loginUrl: string | null };
+      project: {
+        id: string;
+        name: string;
+        appUrl: string | null;
+        loginUrl: string | null;
+        healRequiresReview?: boolean;
+        llmHealRequiresApproval?: boolean;
+        allowExecuteQuarantined?: boolean;
+      };
     },
     selection: TcmsSelection,
   ): Promise<LocalJobPayload> {
@@ -603,6 +723,23 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
         priorityLabel: c.priorityLabel ?? normalizePriorityLabel(c.priority),
       })),
     );
+    const scripts = ordered.length
+      ? await prisma.automatedScript.findMany({
+          where: {
+            projectId: execution.projectId,
+            testCaseId: { in: ordered.map((c) => c.id) },
+          },
+          select: {
+            testCaseId: true,
+            actionLog: true,
+            stabilityStatus: true,
+            healCount: true,
+          },
+        })
+      : [];
+    const actionByCase = new Map(
+      scripts.map((s) => [s.testCaseId, s]),
+    );
     const browser =
       selection.browser === 'firefox' || selection.browser === 'webkit'
         ? selection.browser
@@ -612,24 +749,39 @@ export class RunnersService implements OnModuleInit, OnModuleDestroy {
       projectId: execution.projectId,
       projectName: execution.project.name,
       runName: cycleName(selection, execution.createdAt),
+      runKind: selection.runKind,
       appUrl: creds.appUrl || execution.project.appUrl || '',
       loginUrl: creds.loginUrl || execution.project.loginUrl || undefined,
       username: creds.username || undefined,
       password: creds.password || undefined,
       browser,
       headless: (selection.browserMode ?? 'HEADED') !== 'HEADED',
-      cases: ordered.map((c) => ({
-        id: c.id,
-        externalId: c.externalId,
-        scenario: c.scenario,
-        priorityLabel: c.priorityLabel ?? 'MEDIUM',
-        steps: Array.isArray(c.steps) ? c.steps.map(String) : [],
-        expected: c.expected,
-        testData:
-          c.testData && typeof c.testData === 'object'
-            ? (c.testData as Record<string, string>)
-            : {},
-      })),
+      healRequiresReview: Boolean(execution.project.healRequiresReview),
+      llmHealRequiresApproval:
+        execution.project.llmHealRequiresApproval !== false,
+      allowExecuteQuarantined: Boolean(
+        execution.project.allowExecuteQuarantined,
+      ),
+      cases: ordered.map((c) => {
+        const script = actionByCase.get(c.id);
+        return {
+          id: c.id,
+          externalId: c.externalId,
+          scenario: c.scenario,
+          priorityLabel: c.priorityLabel ?? 'MEDIUM',
+          steps: Array.isArray(c.steps) ? c.steps.map(String) : [],
+          expected: c.expected,
+          testData:
+            c.testData && typeof c.testData === 'object'
+              ? (c.testData as Record<string, string>)
+              : {},
+          actionLog: Array.isArray(script?.actionLog)
+            ? (script.actionLog as unknown[])
+            : undefined,
+          stabilityStatus: script?.stabilityStatus ?? null,
+          healCount: script?.healCount ?? 0,
+        };
+      }),
     };
   }
 

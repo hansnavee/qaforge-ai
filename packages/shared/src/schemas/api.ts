@@ -42,6 +42,11 @@ export const updateProjectSchema = createProjectSchema.partial().extend({
   name: z.string().trim().min(2).optional(),
   status: z.string().optional(),
   analysisStatus: projectAnalysisStatusSchema.optional(),
+  testStrategy: z.enum(['SPRINT', 'KANBAN']).optional(),
+  kanbanWipLimit: z.number().int().min(1).max(200).nullable().optional(),
+  healRequiresReview: z.boolean().optional(),
+  llmHealRequiresApproval: z.boolean().optional(),
+  allowExecuteQuarantined: z.boolean().optional(),
 });
 
 export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;

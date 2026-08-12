@@ -5,11 +5,25 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { prisma } from '@qaforge/database';
-import { Role } from '@qaforge/shared';
+import { Role, type PlanId } from '@qaforge/shared';
 import Stripe from 'stripe';
 import { AuditService } from '../common/audit.service';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
+import { PlanUsageService } from './plan-usage.service';
+
+function stripePriceForPlan(plan: PlanId): string | undefined {
+  if (plan === 'PRO') return process.env.STRIPE_PRICE_PRO;
+  if (plan === 'ENTERPRISE') return process.env.STRIPE_PRICE_ENTERPRISE;
+  return undefined;
+}
+
+function planFromStripePrice(priceId: string | undefined): PlanId {
+  if (!priceId) return 'FREE';
+  if (priceId === process.env.STRIPE_PRICE_ENTERPRISE) return 'ENTERPRISE';
+  if (priceId === process.env.STRIPE_PRICE_PRO) return 'PRO';
+  return 'PRO';
+}
 
 @Injectable()
 export class BillingService {
@@ -19,6 +33,7 @@ export class BillingService {
   constructor(
     private readonly orgs: OrgsService,
     private readonly audit: AuditService,
+    private readonly planUsage: PlanUsageService,
   ) {
     const key = process.env.STRIPE_SECRET_KEY;
     if (key) {
@@ -28,7 +43,11 @@ export class BillingService {
     }
   }
 
-  async checkout(user: SessionUser, orgId: string) {
+  async checkout(
+    user: SessionUser,
+    orgId: string,
+    targetPlan: Exclude<PlanId, 'FREE'> = 'PRO',
+  ) {
     await this.orgs.requireMembership(user.id, orgId, Role.OWNER);
 
     const org = await prisma.organization.findUnique({
@@ -38,12 +57,22 @@ export class BillingService {
     if (!org) throw new NotFoundException('Organization not found');
 
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-    const priceId = process.env.STRIPE_PRICE_PRO;
+    const priceId = stripePriceForPlan(targetPlan);
+
+    if (targetPlan === 'ENTERPRISE' && !priceId) {
+      return {
+        url: `${appUrl}/app/billing?contact=enterprise`,
+        mock: true,
+        contactSales: true,
+        plan: 'ENTERPRISE',
+      };
+    }
 
     if (!this.stripe || !priceId) {
       return {
-        url: `${appUrl}/billing/mock-checkout?orgId=${orgId}&plan=PRO`,
+        url: `${appUrl}/billing/mock-checkout?orgId=${orgId}&plan=${targetPlan}`,
         mock: true,
+        plan: targetPlan,
       };
     }
 
@@ -71,9 +100,9 @@ export class BillingService {
       mode: 'subscription',
       customer: customerId,
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `${appUrl}/orgs/${orgId}/billing?success=1`,
-      cancel_url: `${appUrl}/orgs/${orgId}/billing?canceled=1`,
-      metadata: { organizationId: orgId },
+      success_url: `${appUrl}/app/billing?success=1&plan=${targetPlan}`,
+      cancel_url: `${appUrl}/app/billing?canceled=1`,
+      metadata: { organizationId: orgId, targetPlan },
     });
 
     await this.audit.log({
@@ -82,9 +111,10 @@ export class BillingService {
       action: 'billing.checkout',
       resource: 'subscription',
       resourceId: org.subscription?.id,
+      metadata: { targetPlan },
     });
 
-    return { url: session.url };
+    return { url: session.url, plan: targetPlan };
   }
 
   async portal(user: SessionUser, orgId: string) {
@@ -104,7 +134,7 @@ export class BillingService {
 
     const session = await this.stripe.billingPortal.sessions.create({
       customer: sub.stripeCustomerId,
-      return_url: `${appUrl}/orgs/${orgId}/billing`,
+      return_url: `${appUrl}/app/billing`,
     });
     return { url: session.url };
   }
@@ -116,18 +146,19 @@ export class BillingService {
     });
     if (!subscription) throw new NotFoundException('Subscription not found');
 
-    const startOfMonth = new Date();
-    startOfMonth.setUTCDate(1);
-    startOfMonth.setUTCHours(0, 0, 0, 0);
-    const runsThisMonth = await prisma.usageEvent.count({
-      where: {
-        organizationId: orgId,
-        type: 'EXECUTION',
-        createdAt: { gte: startOfMonth },
-      },
-    });
+    const summary = await this.planUsage.getUsageSummary(orgId);
 
-    return { subscription, usage: { runsThisMonth } };
+    return {
+      subscription,
+      plan: summary.plan,
+      status: subscription.status,
+      features: summary.features,
+      limits: summary.limits,
+      usage: summary.usage,
+      projects: summary.projects,
+      seats: summary.seats,
+      upgradeUrl: '/app/billing',
+    };
   }
 
   async handleWebhook(rawBody: Buffer, signature: string | undefined) {
@@ -155,6 +186,7 @@ export class BillingService {
       case 'checkout.session.completed': {
         const session = event.data.object as Stripe.Checkout.Session;
         const orgId = session.metadata?.organizationId;
+        const targetPlan = (session.metadata?.targetPlan ?? 'PRO') as PlanId;
         if (orgId) {
           await prisma.subscription.upsert({
             where: { organizationId: orgId },
@@ -166,7 +198,7 @@ export class BillingService {
                 typeof session.subscription === 'string'
                   ? session.subscription
                   : undefined,
-              plan: 'PRO',
+              plan: targetPlan === 'ENTERPRISE' ? 'ENTERPRISE' : 'PRO',
               status: 'active',
             },
             update: {
@@ -176,7 +208,7 @@ export class BillingService {
                 typeof session.subscription === 'string'
                   ? session.subscription
                   : undefined,
-              plan: 'PRO',
+              plan: targetPlan === 'ENTERPRISE' ? 'ENTERPRISE' : 'PRO',
               status: 'active',
             },
           });
@@ -184,7 +216,7 @@ export class BillingService {
             organizationId: orgId,
             action: 'billing.checkout.completed',
             resource: 'subscription',
-            metadata: { sessionId: session.id },
+            metadata: { sessionId: session.id, plan: targetPlan },
           });
         }
         break;
@@ -197,11 +229,13 @@ export class BillingService {
         });
         if (existing) {
           const active = sub.status === 'active' || sub.status === 'trialing';
+          const priceId = sub.items.data[0]?.price?.id;
+          const plan = active ? planFromStripePrice(priceId) : 'FREE';
           await prisma.subscription.update({
             where: { id: existing.id },
             data: {
               status: sub.status,
-              plan: active ? 'PRO' : 'FREE',
+              plan,
               currentPeriodEnd: new Date(
                 ((sub as { current_period_end?: number }).current_period_end ?? 0) * 1000,
               ),

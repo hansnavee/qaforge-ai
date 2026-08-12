@@ -12,6 +12,11 @@ type ProjectEnv = {
   browserMode?: string | null;
   credentialsConfigured?: boolean;
   environment?: string | null;
+  testStrategy?: 'SPRINT' | 'KANBAN' | null;
+  kanbanWipLimit?: number | null;
+  healRequiresReview?: boolean;
+  llmHealRequiresApproval?: boolean;
+  allowExecuteQuarantined?: boolean;
 };
 
 export function EnvironmentPanel({
@@ -32,6 +37,13 @@ export function EnvironmentPanel({
     'HEADLESS',
   );
   const [confirmProduction, setConfirmProduction] = useState(false);
+  const [testStrategy, setTestStrategy] = useState<'SPRINT' | 'KANBAN'>(
+    'SPRINT',
+  );
+  const [kanbanWipLimit, setKanbanWipLimit] = useState('8');
+  const [healRequiresReview, setHealRequiresReview] = useState(false);
+  const [llmHealRequiresApproval, setLlmHealRequiresApproval] = useState(true);
+  const [allowExecuteQuarantined, setAllowExecuteQuarantined] = useState(false);
 
   const projectQuery = useQuery({
     queryKey: ['project', projectId],
@@ -50,7 +62,45 @@ export function EnvironmentPanel({
     if (project.browserMode === 'HEADED' || project.browserMode === 'HEADLESS') {
       setBrowserMode(project.browserMode);
     }
+    if (project.testStrategy === 'KANBAN' || project.testStrategy === 'SPRINT') {
+      setTestStrategy(project.testStrategy);
+    }
+    if (project.kanbanWipLimit != null) {
+      setKanbanWipLimit(String(project.kanbanWipLimit));
+    }
+    if (typeof project.healRequiresReview === 'boolean') {
+      setHealRequiresReview(project.healRequiresReview);
+    }
+    if (typeof project.llmHealRequiresApproval === 'boolean') {
+      setLlmHealRequiresApproval(project.llmHealRequiresApproval);
+    }
+    if (typeof project.allowExecuteQuarantined === 'boolean') {
+      setAllowExecuteQuarantined(project.allowExecuteQuarantined);
+    }
   }, [project]);
+
+  const policyMutation = useMutation({
+    mutationFn: async () => {
+      const orgId = await getDefaultOrgId();
+      const wip = Number.parseInt(kanbanWipLimit, 10);
+      return api(`/api/v1/orgs/${orgId}/projects/${projectId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          testStrategy,
+          kanbanWipLimit:
+            testStrategy === 'KANBAN' && Number.isFinite(wip) && wip > 0
+              ? wip
+              : null,
+          healRequiresReview,
+          llmHealRequiresApproval,
+          allowExecuteQuarantined,
+        }),
+      });
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['project', projectId] });
+    },
+  });
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -174,6 +224,89 @@ export function EnvironmentPanel({
       {project?.credentialsConfigured ? (
         <p className="text-xs text-success">Non-prod credentials are stored.</p>
       ) : null}
+
+      {variant === 'environment' ? (
+        <div className="space-y-3 border-t border-border pt-3">
+          <p className="text-sm font-medium text-fg">QA strategy & heal gates</p>
+          <p className="text-xs text-muted">
+            Sprint: AI Cycle proposes a full roster once. Kanban: each pull is a
+            small WIP batch. Heal gates stay human — Complete the run is always
+            a person.
+          </p>
+          <label className="block space-y-1 text-xs text-muted">
+            Test strategy
+            <select
+              className="w-full rounded-md border border-border bg-bg-elevated px-2 py-1.5 text-sm text-fg"
+              value={testStrategy}
+              onChange={(e) =>
+                setTestStrategy(e.target.value as 'SPRINT' | 'KANBAN')
+              }
+              disabled={!canEdit}
+            >
+              <option value="SPRINT">Sprint — fixed roster, nightly replay</option>
+              <option value="KANBAN">Kanban — pull next batch by WIP</option>
+            </select>
+          </label>
+          {testStrategy === 'KANBAN' ? (
+            <label className="block space-y-1 text-xs text-muted">
+              Kanban WIP limit
+              <input
+                className="w-full rounded-md border border-border bg-bg-elevated px-2 py-1.5 text-sm text-fg"
+                value={kanbanWipLimit}
+                onChange={(e) => setKanbanWipLimit(e.target.value)}
+                inputMode="numeric"
+                disabled={!canEdit}
+              />
+            </label>
+          ) : null}
+          <label className="flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={healRequiresReview}
+              onChange={(e) => setHealRequiresReview(e.target.checked)}
+              disabled={!canEdit}
+            />
+            Human must approve every heal (including rule-heal / P0)
+          </label>
+          <label className="flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={llmHealRequiresApproval}
+              onChange={(e) => setLlmHealRequiresApproval(e.target.checked)}
+              disabled={!canEdit}
+            />
+            LLM healer requires approval before commit
+          </label>
+          <label className="flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={allowExecuteQuarantined}
+              onChange={(e) => setAllowExecuteQuarantined(e.target.checked)}
+              disabled={!canEdit}
+            />
+            Allow Execute all to include quarantined scripts
+          </label>
+          {policyMutation.isError ? (
+            <p className="text-sm text-danger">
+              {policyMutation.error instanceof Error
+                ? policyMutation.error.message
+                : 'Policy save failed'}
+            </p>
+          ) : null}
+          {canEdit ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={policyMutation.isPending}
+              onClick={() => policyMutation.mutate()}
+            >
+              {policyMutation.isPending ? 'Saving…' : 'Save strategy & gates'}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
       {saveMutation.isError ? (
         <p className="text-sm text-danger">
           {saveMutation.error instanceof Error

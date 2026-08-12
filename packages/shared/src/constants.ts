@@ -1,12 +1,72 @@
+import type { PlanFeatureFlags, PlanLimits } from './plan-limits.js';
+
 export const PLAN_LIMITS = {
   FREE: {
     runsPerMonth: 5,
     seats: 1,
+    projects: 1,
+    tcmsRunsPerMonth: 20,
+    aiGeneratePerMonth: 3,
+    aiPlanPerMonth: 5,
+    aiExecutorCasesPerMonth: 10,
+    scriptReplayPerMonth: 50,
+    llmHealPerMonth: 0,
+    features: {
+      cloudRunner: false,
+      ruleHealer: false,
+      llmHealer: false,
+      aiReview: false,
+      emailNotify: false,
+      slack: false,
+      jira: false,
+      qaAgentFull: false,
+      exportsHtml: false,
+    } satisfies PlanFeatureFlags,
   },
   PRO: {
     runsPerMonth: 100,
     seats: 10,
+    projects: -1,
+    tcmsRunsPerMonth: -1,
+    aiGeneratePerMonth: 50,
+    aiPlanPerMonth: -1,
+    aiExecutorCasesPerMonth: 500,
+    scriptReplayPerMonth: -1,
+    llmHealPerMonth: 100,
+    features: {
+      cloudRunner: true,
+      ruleHealer: true,
+      llmHealer: true,
+      aiReview: true,
+      emailNotify: true,
+      slack: false,
+      jira: false,
+      qaAgentFull: false,
+      exportsHtml: true,
+    } satisfies PlanFeatureFlags,
   },
-} as const;
+  ENTERPRISE: {
+    runsPerMonth: -1,
+    seats: -1,
+    projects: -1,
+    tcmsRunsPerMonth: -1,
+    aiGeneratePerMonth: -1,
+    aiPlanPerMonth: -1,
+    aiExecutorCasesPerMonth: -1,
+    scriptReplayPerMonth: -1,
+    llmHealPerMonth: -1,
+    features: {
+      cloudRunner: true,
+      ruleHealer: true,
+      llmHealer: true,
+      aiReview: true,
+      emailNotify: true,
+      slack: true,
+      jira: true,
+      qaAgentFull: true,
+      exportsHtml: true,
+    } satisfies PlanFeatureFlags,
+  },
+} as const satisfies Record<string, PlanLimits>;
 
 export type PlanId = keyof typeof PLAN_LIMITS;

@@ -18,6 +18,7 @@ import { decrypt, encrypt, hasEncryptionKey } from '../common/encryption';
 import { assertRole } from '../common/rbac';
 import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
+import { PlanUsageService } from '../billing/plan-usage.service';
 
 function slugify(name: string): string {
   const base = name
@@ -31,7 +32,10 @@ function slugify(name: string): string {
 
 @Injectable()
 export class OrgsService {
-  constructor(private readonly audit: AuditService) {}
+  constructor(
+    private readonly audit: AuditService,
+    private readonly planUsage: PlanUsageService,
+  ) {}
 
   async create(user: SessionUser, body: unknown) {
     const input = parseBody(createOrganizationSchema, body);
@@ -200,6 +204,8 @@ export class OrgsService {
     if (existing) {
       throw new ConflictException('User is already a member');
     }
+
+    await this.planUsage.assertSeatLimit(orgId);
 
     const membership = await prisma.membership.create({
       data: {

@@ -22,6 +22,7 @@ import { encrypt, hasEncryptionKey } from '../common/encryption';
 import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
+import { PlanUsageService } from '../billing/plan-usage.service';
 import { QueueService } from '../queue/queue.service';
 import {
   isAllowedRequirementFile,
@@ -63,6 +64,7 @@ export class ProjectsService {
     private readonly orgs: OrgsService,
     private readonly audit: AuditService,
     private readonly queue: QueueService,
+    private readonly planUsage: PlanUsageService,
   ) {}
 
   private async requireProject(
@@ -81,6 +83,7 @@ export class ProjectsService {
 
   async create(user: SessionUser, orgId: string, body: unknown) {
     await this.orgs.requireMembership(user.id, orgId, Role.MEMBER);
+    await this.planUsage.assertProjectLimit(orgId);
     const input = parseBody(createProjectSchema, body);
 
     const project = await prisma.project.create({
@@ -290,6 +293,21 @@ export class ProjectsService {
         ...(input.status !== undefined ? { status: input.status } : {}),
         ...(input.requirementText !== undefined
           ? { requirementText: input.requirementText }
+          : {}),
+        ...(input.testStrategy !== undefined
+          ? { testStrategy: input.testStrategy }
+          : {}),
+        ...(input.kanbanWipLimit !== undefined
+          ? { kanbanWipLimit: input.kanbanWipLimit }
+          : {}),
+        ...(input.healRequiresReview !== undefined
+          ? { healRequiresReview: input.healRequiresReview }
+          : {}),
+        ...(input.llmHealRequiresApproval !== undefined
+          ? { llmHealRequiresApproval: input.llmHealRequiresApproval }
+          : {}),
+        ...(input.allowExecuteQuarantined !== undefined
+          ? { allowExecuteQuarantined: input.allowExecuteQuarantined }
           : {}),
       },
     });

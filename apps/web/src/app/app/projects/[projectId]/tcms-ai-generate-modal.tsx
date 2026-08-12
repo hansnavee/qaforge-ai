@@ -1,10 +1,12 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { api, apiForm } from '@/lib/api';
+import { ApiError, api, apiForm } from '@/lib/api';
+import { parsePlanLimitError } from '@/lib/plan';
 import { getDefaultOrgId } from '@/lib/org';
 import { Button } from '@/components/Button';
 import { Modal } from '@/components/Modal';
+import { UpgradeModal } from '@/components/UpgradeModal';
 import { fieldClass, areaClass } from './tcms-board';
 import type { FolderOption } from './tcms-case-modal';
 
@@ -61,6 +63,7 @@ export function TcmsAiGenerateModal({
   const [adding, setAdding] = useState(false);
   const [preview, setPreview] = useState<GenerateResponse | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [upgradeError, setUpgradeError] = useState<ReturnType<typeof parsePlanLimitError>>(null);
 
   const selectedCases = useMemo(
     () => (preview?.cases ?? []).filter((_, i) => selected.has(i)),
@@ -118,7 +121,14 @@ export function TcmsAiGenerateModal({
       setSelected(new Set(data.cases.map((_, i) => i)));
       setStep('preview');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Generate failed');
+      const planErr =
+        err instanceof ApiError ? parsePlanLimitError(err.body) : null;
+      if (planErr) {
+        setUpgradeError(planErr);
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err.message : 'Generate failed');
+      }
     } finally {
       setGenerating(false);
     }
@@ -353,6 +363,11 @@ export function TcmsAiGenerateModal({
         </div>
       )}
       {error ? <p className="mt-3 text-sm text-danger">{error}</p> : null}
+      <UpgradeModal
+        open={Boolean(upgradeError)}
+        error={upgradeError}
+        onClose={() => setUpgradeError(null)}
+      />
     </Modal>
   );
 }

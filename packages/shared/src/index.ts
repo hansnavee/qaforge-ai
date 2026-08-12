@@ -1,5 +1,7 @@
 export * from './schemas/index.js';
 export * from './constants.js';
+export * from './plan-limits.js';
+export * from './automation/index.js';
 export * from './events.js';
 export * from './requirement-extraction/index.js';
 export * from './requirement-review/index.js';

@@ -83,6 +83,9 @@ describe('@qaforge/shared schemas', () => {
   it('exposes plan limits', () => {
     expect(PLAN_LIMITS.FREE.runsPerMonth).toBeGreaterThan(0);
     expect(PLAN_LIMITS.PRO.runsPerMonth).toBeGreaterThan(PLAN_LIMITS.FREE.runsPerMonth);
+    expect(PLAN_LIMITS.FREE.features.cloudRunner).toBe(false);
+    expect(PLAN_LIMITS.PRO.features.ruleHealer).toBe(true);
+    expect(PLAN_LIMITS.ENTERPRISE.features.jira).toBe(true);
   });
 
   it('includes core artifact and agent ids', () => {

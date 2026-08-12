@@ -2,10 +2,12 @@
 
 import { useMemo, useState } from 'react';
 import { normalizeCaseStatus } from '@qaforge/shared';
-import { api, apiForm } from '@/lib/api';
+import { api, apiForm, ApiError } from '@/lib/api';
 import { getDefaultOrgId } from '@/lib/org';
+import { parsePlanLimitError } from '@/lib/plan';
 import { Button } from '@/components/Button';
 import { Modal } from '@/components/Modal';
+import { UpgradeModal } from '@/components/UpgradeModal';
 import { areaClass, fieldClass } from './tcms-board';
 import { TcmsSuitePicker } from './tcms-suite-picker';
 import type { TestCaseRow, TcmsFolderRow } from './design-cases-panel';
@@ -16,6 +18,8 @@ type ProposeResponse = {
   name: string;
   tokensUsed: number;
   readyCount: number;
+  strategy?: 'SPRINT' | 'KANBAN';
+  wipLimit?: number | null;
   cases: ProposedCase[];
 };
 
@@ -46,6 +50,7 @@ export function TcmsAiRunModal({
   const [approving, setApproving] = useState(false);
   const [preview, setPreview] = useState<ProposeResponse | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [upgradeError, setUpgradeError] = useState<ReturnType<typeof parsePlanLimitError>>(null);
 
   const readyCases = useMemo(
     () =>
@@ -109,7 +114,14 @@ export function TcmsAiRunModal({
       if (!name.trim()) setName(data.name);
       setStep('preview');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Propose failed');
+      const planErr =
+        err instanceof ApiError ? parsePlanLimitError(err.body) : null;
+      if (planErr) {
+        setUpgradeError(planErr);
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err.message : 'Propose failed');
+      }
     } finally {
       setProposing(false);
     }
@@ -214,8 +226,9 @@ export function TcmsAiRunModal({
       {step === 'form' ? (
         <div className="space-y-3">
           <p className="text-xs text-muted">
-            AI picks Ready cases that match your requirements. You can edit the
-            list before the cycle is created. Nothing runs until you approve.
+            AI picks Ready cases that match your requirements (Sprint roster or
+            Kanban WIP batch from Environment). You can edit the list before the
+            cycle is created. Nothing runs until you approve.
           </p>
           {!readyCount ? (
             <p className="text-sm text-danger">
@@ -271,6 +284,11 @@ export function TcmsAiRunModal({
             Uncheck cases to drop them, or add more Ready cases from the suite
             picker. Approve creates a pending cycle — it will not start until
             you run it manually or with AI Executor.
+            {preview?.strategy === 'KANBAN'
+              ? ` Strategy: Kanban (WIP ${preview.wipLimit ?? 8}).`
+              : preview?.strategy === 'SPRINT'
+                ? ' Strategy: Sprint roster.'
+                : ''}
           </p>
           <label className="block text-xs text-muted">
             Cycle name
@@ -305,6 +323,11 @@ export function TcmsAiRunModal({
           {error ? <p className="text-sm text-danger">{error}</p> : null}
         </div>
       )}
+      <UpgradeModal
+        open={Boolean(upgradeError)}
+        error={upgradeError}
+        onClose={() => setUpgradeError(null)}
+      />
     </Modal>
   );
 }

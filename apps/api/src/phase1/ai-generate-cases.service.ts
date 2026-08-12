@@ -119,6 +119,8 @@ export class AiGenerateCasesService {
 
   async proposeRunCases(opts: {
     sourceText: string;
+    strategy?: 'SPRINT' | 'KANBAN';
+    wipLimit?: number;
     cases: Array<{
       id: string;
       externalId: string;
@@ -140,6 +142,8 @@ export class AiGenerateCasesService {
         'No Ready cases to select. Mark cases Ready first.',
       );
     }
+    const strategy = opts.strategy === 'KANBAN' ? 'KANBAN' : 'SPRINT';
+    const wip = Math.min(Math.max(opts.wipLimit ?? 8, 1), 200);
     const catalog = opts.cases
       .map(
         (c) =>
@@ -149,11 +153,14 @@ export class AiGenerateCasesService {
     let selectedIds: string[] = [];
     let reasons: Record<string, string> = {};
     let tokensUsed = 0;
+    const system =
+      strategy === 'KANBAN'
+        ? `You pull the next Kanban automation batch. Return JSON only: {"cases":[{"id":"...","why":"..."}]}. Only use ids from the catalog. Pick at most ${wip} cases. HIGH/P0 first, then MEDIUM. Skip cosmetic LOW unless WIP has room. Do not invent cases.`
+        : 'You pick a Sprint execution roster from READY cases. Return JSON only: {"cases":[{"id":"...","why":"..."}]}. Only use ids from the catalog. Prefer HIGH/P0 coverage for the sprint goal; include MEDIUM that maps to the requirements. Do not invent cases.';
     try {
       const result = await this.llm.complete({
-        system:
-          'You pick existing READY test cases for an execution cycle. Return JSON only: {"cases":[{"id":"...","why":"..."}]}. Only use ids from the catalog. Do not invent cases.',
-        prompt: `Requirements:\n${sourceText.slice(0, 12_000)}\n\nCatalog (id, externalId, priority, folder, title):\n${catalog.slice(0, 20_000)}`,
+        system,
+        prompt: `Strategy: ${strategy}${strategy === 'KANBAN' ? ` (WIP ${wip})` : ''}\nRequirements:\n${sourceText.slice(0, 12_000)}\n\nCatalog (id, externalId, priority, folder, title):\n${catalog.slice(0, 20_000)}`,
         json: true,
         model: 'reasoning',
         maxTokens: 2000,
@@ -185,10 +192,19 @@ export class AiGenerateCasesService {
           .filter((w) => w.length > 3)
           .some((w) => hay.includes(w));
       });
-      selectedIds = (matched.length ? matched : opts.cases).map((c) => c.id);
+      const pool = matched.length ? matched : opts.cases;
+      const ordered = [...pool].sort((a, b) => {
+        const rank = (p: string) =>
+          p === 'HIGH' ? 0 : p === 'MEDIUM' ? 1 : 2;
+        return rank(a.priorityLabel) - rank(b.priorityLabel);
+      });
+      selectedIds = ordered.map((c) => c.id);
       for (const id of selectedIds) {
         if (!reasons[id]) reasons[id] = 'Included from Ready library';
       }
+    }
+    if (strategy === 'KANBAN' && selectedIds.length > wip) {
+      selectedIds = selectedIds.slice(0, wip);
     }
     return { selectedIds, reasons, tokensUsed };
   }

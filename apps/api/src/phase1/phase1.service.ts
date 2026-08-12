@@ -76,6 +76,7 @@ import type { SessionUser } from '../auth/auth';
 import { OrgsService } from '../orgs/orgs.service';
 import { QueueService } from '../queue/queue.service';
 import { RunnersService } from '../runners/runners.service';
+import { PlanUsageService } from '../billing/plan-usage.service';
 import { AiGenerateCasesService } from './ai-generate-cases.service';
 import {
   isAllowedRequirementFile,
@@ -109,6 +110,7 @@ export class Phase1Service {
     private readonly audit: AuditService,
     private readonly aiGenerate: AiGenerateCasesService,
     private readonly runners: RunnersService,
+    private readonly planUsage: PlanUsageService,
   ) {}
 
   private async resolveOrgId(userId: string, projectId: string) {
@@ -2036,6 +2038,7 @@ export class Phase1Service {
     body: unknown,
   ) {
     await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    await this.planUsage.assertPlanLimit(orgId, 'TCMS_RUN');
     const input = parseBody(createTcmsRunSchema, body);
     const uniqueIds = await this.resolveRunCaseIds(projectId, {
       testCaseIds: input.testCaseIds ?? [],
@@ -2067,6 +2070,10 @@ export class Phase1Service {
         startedAt,
         selection: selection as never,
       },
+    });
+    await this.planUsage.recordUsage(orgId, 'TCMS_RUN', 1, {
+      executionId: execution.id,
+      projectId,
     });
     return {
       ...execution,
@@ -2112,9 +2119,19 @@ export class Phase1Service {
         'No Ready cases to select. Mark cases Ready first.',
       );
     }
+    await this.planUsage.assertPlanLimit(orgId, 'AI_PLAN_RUN');
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { testStrategy: true, kanbanWipLimit: true },
+    });
+    const strategy =
+      project?.testStrategy === 'KANBAN' ? 'KANBAN' : 'SPRINT';
+    const wipLimit = project?.kanbanWipLimit ?? 8;
     const decorated = await this.decorateCases(projectId, ready);
     const proposed = await this.aiGenerate.proposeRunCases({
       sourceText,
+      strategy,
+      wipLimit,
       cases: decorated.map((c) => ({
         id: c.id,
         externalId: c.externalId,
@@ -2127,10 +2144,16 @@ export class Phase1Service {
     const ordered = sortCasesByPriority(
       decorated.filter((c) => picked.has(c.id)),
     );
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    await this.planUsage.recordUsage(orgId, 'AI_PLAN_RUN', 1, { projectId });
     return {
       name:
         input.name?.trim() ||
-        `AI cycle ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+        (strategy === 'KANBAN'
+          ? `Kanban batch ${stamp}`
+          : `Sprint cycle ${stamp}`),
+      strategy,
+      wipLimit: strategy === 'KANBAN' ? wipLimit : null,
       tokensUsed: proposed.tokensUsed,
       readyCount: ready.length,
       cases: ordered.map((c) => ({
@@ -2201,6 +2224,7 @@ export class Phase1Service {
     projectId: string,
     executionId: string,
     body: unknown,
+    opts?: { usageMode?: 'AI_EXECUTOR' | 'SCRIPT_REPLAY' },
   ) {
     await this.requireProject(userId, orgId, projectId, Role.TESTER);
     const execution = await this.loadManualRun(projectId, executionId);
@@ -2213,6 +2237,22 @@ export class Phase1Service {
       : roster;
     if (!runCaseIds.length) {
       throw new BadRequestException('No cases in this cycle');
+    }
+    const usageMode =
+      opts?.usageMode ??
+      (selection.runKind === 'AUTOMATION' ? 'SCRIPT_REPLAY' : 'AI_EXECUTOR');
+    if (usageMode === 'SCRIPT_REPLAY') {
+      await this.planUsage.assertPlanLimit(
+        orgId,
+        'SCRIPT_REPLAY',
+        runCaseIds.length,
+      );
+    } else {
+      await this.planUsage.assertPlanLimit(
+        orgId,
+        'AI_EXECUTOR_CASE',
+        runCaseIds.length,
+      );
     }
     const caseRows = await prisma.testCase.findMany({
       where: { id: { in: runCaseIds }, deletedAt: null },
@@ -2236,6 +2276,9 @@ export class Phase1Service {
       );
     }
     const target = input.target === 'CLOUD' ? 'CLOUD' : 'LOCAL';
+    if (target === 'CLOUD') {
+      await this.planUsage.assertFeature(orgId, 'cloudRunner');
+    }
     if (target === 'LOCAL') {
       await this.runners.assertUserRunnerOnline(orgId, userId);
     }
@@ -2286,6 +2329,19 @@ export class Phase1Service {
       });
     }
     await this.queue.clearPause(executionId);
+    if (usageMode === 'SCRIPT_REPLAY') {
+      await this.planUsage.recordUsage(orgId, 'SCRIPT_REPLAY', runCaseIds.length, {
+        executionId,
+        projectId,
+      });
+    } else {
+      await this.planUsage.recordUsage(
+        orgId,
+        'AI_EXECUTOR_CASE',
+        runCaseIds.length,
+        { executionId, projectId, target },
+      );
+    }
     return this.getTcmsRun(userId, orgId, projectId, executionId);
   }
 
@@ -2334,6 +2390,11 @@ export class Phase1Service {
           framework: s.framework,
           lastRunId: s.lastRunId,
           lastStatus: s.lastStatus,
+          stabilityStatus: s.stabilityStatus,
+          consecutivePasses: s.consecutivePasses,
+          healCount: s.healCount,
+          recordedBy: s.recordedBy,
+          scriptVersion: s.scriptVersion,
           updatedAt: s.updatedAt,
           externalId: tc?.externalId ?? s.testCase.externalId,
           scenario: tc?.scenario ?? s.testCase.scenario,
@@ -2345,6 +2406,141 @@ export class Phase1Service {
       });
   }
 
+  async listAutomationHeals(
+    userId: string,
+    orgId: string,
+    projectId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    const logs = await prisma.automationHealLog.findMany({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    const caseIds = [...new Set(logs.map((l) => l.testCaseId))];
+    const cases = caseIds.length
+      ? await prisma.testCase.findMany({
+          where: { id: { in: caseIds } },
+          select: { id: true, externalId: true, scenario: true },
+        })
+      : [];
+    const byId = new Map(cases.map((c) => [c.id, c]));
+    return logs.map((l) => ({
+      ...l,
+      externalId: byId.get(l.testCaseId)?.externalId ?? l.testCaseId,
+      scenario: byId.get(l.testCaseId)?.scenario ?? '',
+    }));
+  }
+
+  async decideHeal(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    healId: string,
+    decision: 'approve' | 'reject',
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.LEAD);
+    const log = await prisma.automationHealLog.findFirst({
+      where: { id: healId, projectId },
+    });
+    if (!log) throw new NotFoundException('Heal log not found');
+    if (log.status !== 'PENDING_REVIEW') {
+      throw new BadRequestException('This heal is not awaiting review');
+    }
+    if (decision === 'reject') {
+      await prisma.automationHealLog.update({
+        where: { id: healId },
+        data: { status: 'REJECTED', committed: false },
+      });
+      await prisma.automatedScript.updateMany({
+        where: { projectId, testCaseId: log.testCaseId },
+        data: { stabilityStatus: 'QUARANTINED' },
+      });
+      await this.audit.log({
+        organizationId: orgId,
+        userId,
+        action: 'automation.heal.reject',
+        resource: 'automationHealLog',
+        resourceId: healId,
+      });
+      return { ok: true, status: 'REJECTED' };
+    }
+    const patched = Array.isArray(log.patchedLog) ? log.patchedLog : null;
+    await prisma.automationHealLog.update({
+      where: { id: healId },
+      data: { status: 'COMMITTED', committed: true },
+    });
+    if (patched?.length) {
+      await prisma.automatedScript.updateMany({
+        where: { projectId, testCaseId: log.testCaseId },
+        data: {
+          actionLog: patched as never,
+          recordedBy: 'HEALER',
+          scriptVersion: { increment: 1 },
+          stabilityStatus: 'WATCH',
+          lastVerifiedAt: new Date(),
+        },
+      });
+    }
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'automation.heal.approve',
+      resource: 'automationHealLog',
+      resourceId: healId,
+    });
+    return { ok: true, status: 'COMMITTED' };
+  }
+
+  async clearQuarantine(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    testCaseId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.LEAD);
+    const updated = await prisma.automatedScript.updateMany({
+      where: { projectId, testCaseId },
+      data: { stabilityStatus: 'WATCH', consecutivePasses: 0 },
+    });
+    if (!updated.count) throw new NotFoundException('Script not found');
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'automation.quarantine.clear',
+      resource: 'automatedScript',
+      resourceId: testCaseId,
+    });
+    return { ok: true };
+  }
+
+  async rerecordScript(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    testCaseId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.TESTER);
+    const updated = await prisma.automatedScript.updateMany({
+      where: { projectId, testCaseId },
+      data: {
+        actionLog: [] as never,
+        recordedBy: 'MANUAL',
+        stabilityStatus: 'WATCH',
+        healCount: 0,
+      },
+    });
+    if (!updated.count) throw new NotFoundException('Script not found');
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'automation.script.rerecord',
+      resource: 'automatedScript',
+      resourceId: testCaseId,
+    });
+    return { ok: true };
+  }
+
   async executeAutomatedScripts(
     userId: string,
     orgId: string,
@@ -2353,9 +2549,18 @@ export class Phase1Service {
   ) {
     await this.requireProject(userId, orgId, projectId, Role.TESTER);
     const input = parseBody(aiExecuteRunSchema, body);
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { allowExecuteQuarantined: true },
+    });
     const scripts = await prisma.automatedScript.findMany({
-      where: { projectId },
-      select: { testCaseId: true },
+      where: {
+        projectId,
+        ...(project?.allowExecuteQuarantined
+          ? {}
+          : { stabilityStatus: { not: 'QUARANTINED' } }),
+      },
+      select: { testCaseId: true, stabilityStatus: true },
     });
     const allowed = new Set(scripts.map((s) => s.testCaseId));
     const testCaseIds = (input.testCaseIds?.length
@@ -2365,27 +2570,109 @@ export class Phase1Service {
     if (!testCaseIds.length) {
       throw new BadRequestException('No automated scripts to execute');
     }
+    await this.planUsage.assertPlanLimit(
+      orgId,
+      'SCRIPT_REPLAY',
+      testCaseIds.length,
+    );
     const creds = await this.saveAiEnvironment(projectId, input);
-    const name = `Automation ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
-    const created = await this.createTcmsRun(userId, orgId, projectId, {
-      name,
+    const browserMode = input.browserMode ?? 'HEADLESS';
+    const runId = await this.resolveLivingAutomationRun(
+      projectId,
       testCaseIds,
-      runKind: 'AUTOMATION',
-      browserMode: input.browserMode ?? 'HEADLESS',
-      status: 'PENDING',
-    });
+      browserMode,
+    );
     return this.aiExecuteTcmsRun(
       userId,
       orgId,
       projectId,
-      created.id,
+      runId,
       {
         ...input,
         appUrl: creds.appUrl,
         loginUrl: creds.loginUrl,
         testCaseIds,
       },
+      { usageMode: 'SCRIPT_REPLAY' },
     );
+  }
+
+  /**
+   * Prefer one "living" automation run per project: reopen COMPLETED/FAILED
+   * so Results stay on the same cycle; create only when none exists.
+   */
+  private async resolveLivingAutomationRun(
+    projectId: string,
+    testCaseIds: string[],
+    browserMode: string,
+  ): Promise<string> {
+    const rows = await prisma.execution.findMany({
+      where: {
+        projectId,
+        runMode: 'MANUAL',
+        deletedAt: null,
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 40,
+    });
+    const living = rows.find((row) => {
+      const sel = readSelection(row.selection);
+      return sel.runKind === 'AUTOMATION';
+    });
+
+    if (!living) {
+      const name = `Automation ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
+      const created = await prisma.execution.create({
+        data: {
+          projectId,
+          status: ExecutionStatus.PENDING,
+          phase: 'EXECUTION',
+          runMode: 'MANUAL',
+          startedAt: null,
+          selection: {
+            name,
+            testCaseIds,
+            folderIds: [],
+            runKind: 'AUTOMATION',
+            browserMode,
+          } as never,
+        },
+      });
+      return created.id;
+    }
+
+    if (
+      living.status === ExecutionStatus.RUNNING ||
+      living.status === ExecutionStatus.PENDING
+    ) {
+      throw new BadRequestException(
+        'An automation run is already in progress. Pause/stop it or wait before re-executing.',
+      );
+    }
+
+    const prev = readSelection(living.selection);
+    const nextSelection: TcmsSelection = {
+      ...prev,
+      name: prev.name?.trim() || 'Automation',
+      testCaseIds,
+      runKind: 'AUTOMATION',
+      browserMode,
+      aiExecuteCaseIds: null,
+      claimedByRunnerId: null,
+      localQueuedAt: undefined,
+      localCreds: undefined,
+    };
+    await prisma.execution.update({
+      where: { id: living.id },
+      data: {
+        status: ExecutionStatus.PENDING,
+        finishedAt: null,
+        errorSummary: null,
+        startedAt: null,
+        selection: nextSelection as never,
+      },
+    });
+    return living.id;
   }
 
   async pauseProjectAutomation(
@@ -3019,12 +3306,15 @@ export class Phase1Service {
     executionId?: string,
   ) {
     const project = await this.requireProject(userId, orgId, projectId);
+    const fmt = (format || 'html').toLowerCase();
+    if (fmt !== 'csv' && fmt !== 'json') {
+      await this.planUsage.assertFeature(orgId, 'exportsHtml');
+    }
     const report = await buildTcrPayload(
       projectId,
       project.name,
       executionId ? [executionId] : undefined,
     );
-    const fmt = (format || 'html').toLowerCase();
     const pack =
       fmt === 'docx' || fmt === 'doc' || fmt === 'word'
         ? buildTcmsTcrWord(report)
@@ -3355,6 +3645,7 @@ export class Phase1Service {
     file?: Express.Multer.File,
   ) {
     await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    await this.planUsage.assertPlanLimit(orgId, 'AI_GENERATE');
     const input = parseBody(
       generateTestCasesSchema,
       coerceGenerateBody(body),
@@ -3460,6 +3751,10 @@ export class Phase1Service {
       password,
       storedRequirements,
       pageMap,
+    });
+    await this.planUsage.recordUsage(orgId, 'AI_GENERATE', 1, {
+      projectId,
+      caseCount: generated.cases.length,
     });
     return {
       ...generated,

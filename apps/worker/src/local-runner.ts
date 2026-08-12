@@ -3,18 +3,24 @@ import { BrowserSessionManager } from '@qaforge/browser-session';
 import { caseStartUrl, credsFromCases } from '@qaforge/shared';
 import { buildAutomationHtml, playwrightSpec } from './ai-execute-playwright.js';
 import { executeTestSteps } from './execute-test-steps.js';
+import { parseActionLog } from './replay-action-log.js';
+import { runFailurePipeline } from './failure-pipeline.js';
 
 type LocalJob = {
   executionId: string;
   projectId: string;
   projectName: string;
   runName: string;
+  runKind?: string;
   appUrl: string;
   loginUrl?: string;
   username?: string;
   password?: string;
   browser: 'chromium' | 'firefox' | 'webkit';
   headless: boolean;
+  healRequiresReview?: boolean;
+  llmHealRequiresApproval?: boolean;
+  allowExecuteQuarantined?: boolean;
   cases: Array<{
     id: string;
     externalId: string;
@@ -23,6 +29,9 @@ type LocalJob = {
     steps: string[];
     expected: string;
     testData: Record<string, string>;
+    actionLog?: unknown[];
+    stabilityStatus?: string | null;
+    healCount?: number;
   }>;
 };
 
@@ -182,16 +191,14 @@ async function runJob(client: RunnerClient, job: LocalJob) {
     for (const tc of job.cases) {
       await beat();
       if (cancelled) break;
+      if (
+        tc.stabilityStatus === 'QUARANTINED' &&
+        !job.allowExecuteQuarantined
+      ) {
+        console.log(`[local-runner] SKIP quarantined ${tc.externalId}`);
+        continue;
+      }
       const steps = Array.isArray(tc.steps) ? tc.steps.map(String) : [];
-      const spec = playwrightSpec({
-        externalId: tc.externalId,
-        scenario: tc.scenario,
-        steps,
-        expected: tc.expected,
-        appUrl: job.appUrl,
-        username: job.username,
-        password: job.password,
-      });
       const testData: Record<string, string> = { ...(tc.testData ?? {}) };
       const fromCase = credsFromCases([{ testData, steps }], {});
       if (!testData.username && fromCase.username) testData.username = fromCase.username;
@@ -204,18 +211,104 @@ async function runJob(client: RunnerClient, job: LocalJob) {
         'AI Executor: steps completed without hard failure';
       let screenshotBase64: string | undefined;
       let thumb: string | null = null;
+      let actions: Awaited<ReturnType<typeof executeTestSteps>> = [];
+      let healPayload: Record<string, unknown> | undefined;
+      let stabilityStatus: string | undefined;
+      let consecutivePasses: number | undefined;
+      let healCount: number | undefined;
 
       try {
         const startUrl = caseStartUrl(tc.testData, steps, job.appUrl);
-        await page.goto(startUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: 45_000,
-        });
-        await executeTestSteps(page, steps, startUrl, testData);
+        const recorded = parseActionLog(tc.actionLog);
+        const preferReplay =
+          job.runKind === 'AUTOMATION' && recorded.length > 0;
+        const env = {
+          appUrl: job.appUrl,
+          loginUrl: job.loginUrl,
+          username: testData.username || job.username,
+          password: testData.password || job.password,
+          firstName: testData.firstName,
+          lastName: testData.lastName,
+          postalCode: testData.postalCode,
+        };
+        if (preferReplay) {
+          const pipeline = await runFailurePipeline({
+            page,
+            actions: recorded,
+            env,
+            startUrl,
+            healAttempts: tc.healCount ?? 0,
+            stabilityStatus: tc.stabilityStatus,
+            healRequiresReview: Boolean(job.healRequiresReview),
+            llmHealRequiresApproval: job.llmHealRequiresApproval !== false,
+            isP0: (tc.priorityLabel ?? '').toUpperCase() === 'HIGH',
+            gotoStart: async () => {
+              await page.goto(startUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: 45_000,
+              });
+            },
+          });
+          status = pipeline.status;
+          message = pipeline.message;
+          actions = pipeline.actions;
+          if (pipeline.quarantined) stabilityStatus = 'QUARANTINED';
+          else if (pipeline.committedHeal) {
+            stabilityStatus = 'WATCH';
+            healCount = (tc.healCount ?? 0) + 1;
+          } else if (status === 'PASSED') {
+            consecutivePasses = 1;
+            stabilityStatus = 'STABLE';
+          }
+          if (
+            pipeline.appliedRules.length ||
+            pipeline.pendingReview ||
+            pipeline.quarantined ||
+            pipeline.committedHeal
+          ) {
+            healPayload = {
+              healerKind: 'RULE',
+              status: pipeline.quarantined
+                ? 'QUARANTINED'
+                : pipeline.pendingReview
+                  ? 'PENDING_REVIEW'
+                  : pipeline.committedHeal
+                    ? 'COMMITTED'
+                    : 'VERIFIED',
+              applied: pipeline.appliedRules,
+              verificationRuns: pipeline.verificationRuns,
+              rationale: pipeline.decision.rationale,
+              committed: pipeline.committedHeal,
+              pendingReview: pipeline.pendingReview,
+              patchedLog:
+                pipeline.committedHeal || pipeline.pendingReview
+                  ? (pipeline.patchedActions ?? pipeline.actions)
+                  : undefined,
+            };
+          }
+        } else {
+          await page.goto(startUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: 45_000,
+          });
+          actions = await executeTestSteps(page, steps, startUrl, testData);
+        }
       } catch (err) {
         status = 'FAILED';
         message = err instanceof Error ? err.message : String(err);
       }
+
+      const spec = playwrightSpec({
+        externalId: tc.externalId,
+        scenario: tc.scenario,
+        steps,
+        expected: tc.expected,
+        appUrl: job.appUrl,
+        username: job.username,
+        password: job.password,
+        actions,
+      });
+      const recordScript = job.runKind !== 'AUTOMATION' || !tc.actionLog?.length;
 
       try {
         const shot = await browserManager.screenshot(
@@ -250,8 +343,14 @@ async function runJob(client: RunnerClient, job: LocalJob) {
           status,
           message,
           durationMs,
-          spec,
+          ...(recordScript
+            ? { spec, actionLog: actions }
+            : {}),
           screenshotBase64,
+          ...(stabilityStatus ? { stabilityStatus } : {}),
+          ...(healCount != null ? { healCount } : {}),
+          ...(consecutivePasses != null ? { consecutivePasses } : {}),
+          ...(healPayload ? { heal: healPayload } : {}),
         }),
       });
       console.log(`[local-runner] ${status} ${tc.externalId} ${tc.scenario}`);

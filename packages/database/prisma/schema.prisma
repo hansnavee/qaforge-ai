@@ -139,6 +139,12 @@ model Project {
   environment     String                 @default("QA")
   /// HEADLESS | HEADED — browser mode for execution
   browserMode     String                 @default("HEADLESS")
+  /// SPRINT | KANBAN
+  testStrategy    String                 @default("SPRINT")
+  kanbanWipLimit  Int?
+  healRequiresReview Boolean             @default(false)
+  llmHealRequiresApproval Boolean        @default(true)
+  allowExecuteQuarantined Boolean        @default(false)
   encryptedConfig String?
   requirementText String?                @db.Text
   /// Human gate after Step 2 review — required before STLC Test Planning
@@ -205,6 +211,7 @@ model Project {
   caseTemplates        CaseTemplate[]
   automatedScripts     AutomatedScript[]
   automationReports    AutomationReport[]
+  automationHealLogs   AutomationHealLog[]
 
   @@index([organizationId])
 }
@@ -656,22 +663,57 @@ model Artifact {
 }
 
 model AutomatedScript {
-  id         String   @id @default(cuid())
-  projectId  String
-  testCaseId String
-  path       String
-  source     String   @db.Text
-  language   String   @default("TYPESCRIPT")
-  framework  String   @default("PLAYWRIGHT")
-  lastRunId  String?
-  lastStatus String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  testCase   TestCase @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+  id              String    @id @default(cuid())
+  projectId       String
+  testCaseId      String
+  path            String
+  source          String    @db.Text
+  language        String    @default("TYPESCRIPT")
+  framework       String    @default("PLAYWRIGHT")
+  lastRunId       String?
+  lastStatus      String?
+  /// STABLE | WATCH | FLAKY | QUARANTINED
+  stabilityStatus String    @default("STABLE")
+  consecutivePasses Int     @default(0)
+  healCount       Int       @default(0)
+  lastVerifiedAt  DateTime?
+  scriptVersion   Int       @default(1)
+  /// EXECUTOR | HEALER | MANUAL
+  recordedBy      String?
+  /// Structured ActionEntry[] used for 0-LLM replay
+  actionLog       Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testCase        TestCase  @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
 
   @@unique([projectId, testCaseId])
   @@index([projectId])
+  @@index([stabilityStatus])
+}
+
+model AutomationHealLog {
+  id               String   @id @default(cuid())
+  projectId        String
+  testCaseId       String
+  scriptVersion    Int
+  /// RULE | LLM
+  healerKind       String   @default("RULE")
+  /// PENDING_REVIEW | COMMITTED | REJECTED | QUARANTINED | VERIFIED
+  status           String   @default("VERIFIED")
+  patchDiff        String?  @db.Text
+  /// ActionEntry[] proposed by healer — applied on human approve
+  patchedLog       Json?
+  verificationRuns Json?
+  rationale        Json?
+  committed        Boolean  @default(false)
+  tokensUsed       Int      @default(0)
+  createdAt        DateTime @default(now())
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, testCaseId])
+  @@index([projectId, status])
+  @@index([createdAt])
 }
 
 model AutomationReport {
