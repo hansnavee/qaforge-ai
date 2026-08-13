@@ -1,15 +1,17 @@
 import { prisma } from '@qaforge/database';
+import { BrowserSessionManager, createPlaywrightBrowserProvider } from '@qaforge/browser-session';
 import {
   ArtifactType,
   ExecutionStatus,
+  QA_TOOL_PROVIDER,
   caseStartUrl,
   classifyAiFailureMessage,
+  createQaToolRegistry,
   credsFromCases,
   isUsableAppUrl,
   normalizePriorityLabel,
   sortCasesByPriority,
 } from '@qaforge/shared';
-import { BrowserSessionManager } from '@qaforge/browser-session';
 import { buildZipPackage } from '@qaforge/report-engine';
 import { createAgentContext, putBinaryArtifact } from './context.js';
 import { buildAutomationHtml, playwrightSpec } from './ai-execute-playwright.js';
@@ -198,6 +200,11 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
     throw new Error('Browser session failed');
   }
 
+  const tools = createQaToolRegistry([
+    createPlaywrightBrowserProvider(browserManager, launched.sessionId),
+  ]);
+  const browserTool = tools.get(QA_TOOL_PROVIDER.PLAYWRIGHT)?.browser;
+
   await prisma.execution.update({
     where: { id: executionId },
     data: {
@@ -349,18 +356,36 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
               });
             }
           } else {
+            if (browserTool?.open) await browserTool.open(startUrl);
+            else {
+              await casePage.goto(startUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: 45_000,
+              });
+            }
+            actions = await executeTestSteps(
+              casePage,
+              steps,
+              startUrl,
+              testData,
+              browserTool,
+            );
+          }
+        } else {
+          if (browserTool?.open) await browserTool.open(startUrl);
+          else {
             await casePage.goto(startUrl, {
               waitUntil: 'domcontentloaded',
               timeout: 45_000,
             });
-            actions = await executeTestSteps(casePage, steps, startUrl, testData);
           }
-        } else {
-          await casePage.goto(startUrl, {
-            waitUntil: 'domcontentloaded',
-            timeout: 45_000,
-          });
-          actions = await executeTestSteps(casePage, steps, startUrl, testData);
+          actions = await executeTestSteps(
+            casePage,
+            steps,
+            startUrl,
+            testData,
+            browserTool,
+          );
         }
       } catch (err) {
         status = 'FAILED';
@@ -423,10 +448,16 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
       }
 
       try {
-        const shot = await browserManager.screenshot(
-          launched.sessionId,
-          `${status.toLowerCase()}-${tc.externalId}`,
-        );
+        const shotBytes = browserTool?.screenshot
+          ? await browserTool.screenshot(
+              `${status.toLowerCase()}-${tc.externalId}`,
+            )
+          : await browserManager.screenshot(
+              launched.sessionId,
+              `${status.toLowerCase()}-${tc.externalId}`,
+            );
+        const shot = shotBytes ? Buffer.from(shotBytes) : Buffer.alloc(0);
+        if (!shot.length) throw new Error('empty screenshot');
         const shotName = `screenshots/${tc.externalId}-${status.toLowerCase()}.png`;
         zipFiles[shotName] = shot;
         const key = await putBinaryArtifact({

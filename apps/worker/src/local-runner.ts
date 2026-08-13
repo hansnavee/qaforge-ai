@@ -1,6 +1,15 @@
 import os from 'node:os';
-import { BrowserSessionManager } from '@qaforge/browser-session';
-import { caseStartUrl, classifyAiFailureMessage, credsFromCases } from '@qaforge/shared';
+import {
+  BrowserSessionManager,
+  createPlaywrightBrowserProvider,
+} from '@qaforge/browser-session';
+import {
+  QA_TOOL_PROVIDER,
+  caseStartUrl,
+  classifyAiFailureMessage,
+  createQaToolRegistry,
+  credsFromCases,
+} from '@qaforge/shared';
 import { buildAutomationHtml, playwrightSpec } from './ai-execute-playwright.js';
 import { executeTestSteps } from './execute-test-steps.js';
 import { parseActionLog } from './replay-action-log.js';
@@ -187,6 +196,10 @@ async function runJob(client: RunnerClient, job: LocalJob) {
       browser: job.browser,
     });
     const page = await browserManager.getPage(launched.sessionId);
+    const tools = createQaToolRegistry([
+      createPlaywrightBrowserProvider(browserManager, launched.sessionId),
+    ]);
+    const browserTool = tools.get(QA_TOOL_PROVIDER.PLAYWRIGHT)?.browser;
 
     for (const tc of job.cases) {
       await beat();
@@ -243,10 +256,13 @@ async function runJob(client: RunnerClient, job: LocalJob) {
             llmHealRequiresApproval: job.llmHealRequiresApproval !== false,
             isP0: (tc.priorityLabel ?? '').toUpperCase() === 'HIGH',
             gotoStart: async () => {
-              await page.goto(startUrl, {
-                waitUntil: 'domcontentloaded',
-                timeout: 45_000,
-              });
+              if (browserTool?.open) await browserTool.open(startUrl);
+              else {
+                await page.goto(startUrl, {
+                  waitUntil: 'domcontentloaded',
+                  timeout: 45_000,
+                });
+              }
             },
           });
           status = pipeline.status;
@@ -287,11 +303,20 @@ async function runJob(client: RunnerClient, job: LocalJob) {
             };
           }
         } else {
-          await page.goto(startUrl, {
-            waitUntil: 'domcontentloaded',
-            timeout: 45_000,
-          });
-          actions = await executeTestSteps(page, steps, startUrl, testData);
+          if (browserTool?.open) await browserTool.open(startUrl);
+          else {
+            await page.goto(startUrl, {
+              waitUntil: 'domcontentloaded',
+              timeout: 45_000,
+            });
+          }
+          actions = await executeTestSteps(
+            page,
+            steps,
+            startUrl,
+            testData,
+            browserTool,
+          );
         }
       } catch (err) {
         status = 'FAILED';
@@ -312,11 +337,16 @@ async function runJob(client: RunnerClient, job: LocalJob) {
       const recordScript = job.runKind !== 'AUTOMATION' || !tc.actionLog?.length;
 
       try {
-        const shot = await browserManager.screenshot(
-          launched.sessionId,
-          `${status.toLowerCase()}-${tc.externalId}`,
-        );
-        if (shot.length < 400_000) {
+        const shotBytes = browserTool?.screenshot
+          ? await browserTool.screenshot(
+              `${status.toLowerCase()}-${tc.externalId}`,
+            )
+          : await browserManager.screenshot(
+              launched.sessionId,
+              `${status.toLowerCase()}-${tc.externalId}`,
+            );
+        const shot = shotBytes ? Buffer.from(shotBytes) : Buffer.alloc(0);
+        if (shot.length && shot.length < 400_000) {
           screenshotBase64 = shot.toString('base64');
           thumb = `data:image/png;base64,${screenshotBase64}`;
         }

@@ -59,6 +59,9 @@ export function parsePlanLimitError(body: unknown): PlanLimitErrorBody | null {
 
 export function planLimitMessage(err: PlanLimitErrorBody): string {
   if (err.code === 'PLAN_FEATURE' && err.feature) {
+    if (err.feature === 'qaAgentFull') {
+      return 'AI QA Engineer Execute requires the Enterprise plan. Suggest (preview) stays available on lower plans.';
+    }
     return `${err.feature} requires a Pro plan. Upgrade to unlock automation features.`;
   }
   if (err.usageType) {

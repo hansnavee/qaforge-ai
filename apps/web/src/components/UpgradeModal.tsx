@@ -47,16 +47,18 @@ export function UpgradeModal({
 
 export function ProFeatureNotice({
   feature,
+  planName = 'Pro',
   children,
 }: {
   feature: string;
+  planName?: string;
   children?: ReactNode;
 }) {
   return (
     <p className="rounded-md border border-border bg-bg-elevated px-3 py-2 text-sm text-muted">
       <span className="font-medium text-fg">{feature}</span> is available on{' '}
       <Link href="/app/billing" className="text-accent underline">
-        Pro
+        {planName}
       </Link>
       . {children}
     </p>

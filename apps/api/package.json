@@ -17,6 +17,7 @@
     "@nestjs/platform-ws": "^11.0.11",
     "@nestjs/websockets": "^11.0.11",
     "@qaforge/agent-sdk": "workspace:*",
+    "@qaforge/browser-session": "workspace:*",
     "@qaforge/database": "workspace:*",
     "@qaforge/report-engine": "workspace:*",
     "@qaforge/shared": "workspace:*",

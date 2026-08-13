@@ -217,6 +217,44 @@ export class BrowserSessionManager {
     return this.requireSession(sessionId).page;
   }
 
+  async open(sessionId: string, url: string): Promise<void> {
+    const page = await this.getPage(sessionId);
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000,
+    });
+  }
+
+  async click(sessionId: string, target: string): Promise<void> {
+    const page = await this.getPage(sessionId);
+    try {
+      await page.locator(target).first().click({ timeout: 5_000 });
+      return;
+    } catch {
+      /* target may be a label, not a CSS selector */
+    }
+    const loc = page
+      .getByRole('button', { name: target })
+      .or(page.getByRole('link', { name: target }))
+      .or(page.getByText(target, { exact: false }));
+    await loc.first().click({ timeout: 15_000 });
+  }
+
+  async fill(sessionId: string, target: string, value: string): Promise<void> {
+    const page = await this.getPage(sessionId);
+    try {
+      await page.locator(target).first().fill(value, { timeout: 5_000 });
+      return;
+    } catch {
+      /* target may be a label, not a CSS selector */
+    }
+    const loc = page
+      .getByLabel(target)
+      .or(page.getByPlaceholder(target))
+      .or(page.locator(`input[name="${target}"], textarea[name="${target}"]`));
+    await loc.first().fill(value, { timeout: 15_000 });
+  }
+
   /** Fresh page for the next case so prior session state does not poison results. */
   async freshPage(sessionId: string): Promise<Page> {
     const session = this.requireSession(sessionId);

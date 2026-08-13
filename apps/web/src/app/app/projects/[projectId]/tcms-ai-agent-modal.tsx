@@ -4,9 +4,10 @@ import { useState } from 'react';
 import { ApiError, api } from '@/lib/api';
 import { parsePlanLimitError } from '@/lib/plan';
 import { getDefaultOrgId } from '@/lib/org';
+import { usePlan } from '@/lib/use-plan';
 import { Button } from '@/components/Button';
 import { Modal } from '@/components/Modal';
-import { UpgradeModal } from '@/components/UpgradeModal';
+import { ProFeatureNotice, UpgradeModal } from '@/components/UpgradeModal';
 import { areaClass, fieldClass } from './tcms-board';
 import type { FolderOption } from './tcms-case-modal';
 
@@ -50,6 +51,7 @@ export function TcmsAiAgentModal({
   onClose: () => void;
   onApplied: () => void;
 }) {
+  const { canQaAgent } = usePlan();
   const [intent, setIntent] = useState('');
   const [permissionLevel, setPermissionLevel] = useState<'SUGGEST' | 'EXECUTE'>(
     'SUGGEST',
@@ -68,6 +70,14 @@ export function TcmsAiAgentModal({
     const text = intent.trim();
     if (!text) {
       setError('Describe what you want the AI QA Engineer to do.');
+      return;
+    }
+    if (permissionLevel === 'EXECUTE' && !canQaAgent) {
+      setUpgradeError({
+        code: 'PLAN_FEATURE',
+        feature: 'qaAgentFull',
+        upgradeUrl: '/app/billing',
+      });
       return;
     }
     setBusy(true);
@@ -91,7 +101,8 @@ export function TcmsAiAgentModal({
       setResult(data);
       if (data.applied) onApplied();
     } catch (err) {
-      const planErr = parsePlanLimitError(err);
+      const planErr =
+        err instanceof ApiError ? parsePlanLimitError(err.body) : null;
       if (planErr) {
         setUpgradeError(planErr);
         return;
@@ -142,6 +153,14 @@ export function TcmsAiAgentModal({
             Describe a QA goal. Suggest returns a plan and case preview. Execute
             generates and applies cases through the Internal TCMS tool provider.
           </p>
+          {!canQaAgent ? (
+            <ProFeatureNotice
+              feature="Execute (write to TCMS)"
+              planName="Enterprise"
+            >
+              Suggest (preview) stays available on your current plan.
+            </ProFeatureNotice>
+          ) : null}
           <label className="block text-xs text-muted">
             Intent
             <textarea

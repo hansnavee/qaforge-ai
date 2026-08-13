@@ -4025,6 +4025,9 @@ export class Phase1Service {
     await this.requireProject(userId, orgId, projectId, Role.MEMBER);
     const input = parseBody(aiAgentIntentSchema, body);
     const permissionLevel = input.permissionLevel ?? 'SUGGEST';
+    if (permissionLevel === 'EXECUTE') {
+      await this.planUsage.assertFeature(orgId, 'qaAgentFull', userId);
+    }
 
     const generated = await this.generateTestCases(
       userId,

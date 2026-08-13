@@ -1,4 +1,4 @@
-import type { ActionEntry } from '@qaforge/shared';
+import type { ActionEntry, QaToolProvider } from '@qaforge/shared';
 
 function push(log: ActionEntry[], entry: ActionEntry) {
   log.push(entry);
@@ -9,6 +9,7 @@ export async function executeTestSteps(
   steps: string[],
   appUrl: string,
   testData?: Record<string, string> | null,
+  browser?: QaToolProvider['browser'],
 ): Promise<ActionEntry[]> {
   const data = testData ?? {};
   const log: ActionEntry[] = [];
@@ -23,10 +24,14 @@ export async function executeTestSteps(
     if (/^navigate|^open|^go to|^visit/i.test(s)) {
       const urlMatch = s.match(/https?:\/\/\S+/);
       const url = urlMatch?.[0] ?? appUrl;
-      await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 45_000,
-      });
+      if (browser?.open) {
+        await browser.open(url);
+      } else {
+        await page.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 45_000,
+        });
+      }
       push(log, {
         kind: 'goto',
         urlEnv: 'APP_URL',

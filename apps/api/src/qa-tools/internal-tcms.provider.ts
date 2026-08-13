@@ -1,5 +1,7 @@
 import { prisma } from '@qaforge/database';
+import { buildTcmsTcrHtml } from '@qaforge/report-engine';
 import {
+  ArtifactType,
   QA_TOOL_PROVIDER,
   classifyAgainstExisting,
   type QaTestCase,
@@ -7,6 +9,7 @@ import {
   type QaToolContext,
   type QaToolProvider,
 } from '@qaforge/shared';
+import { buildTcrPayload } from '../phase1/tcms-support.js';
 
 /**
  * Internal TCMS as the default QA tool provider (Agent → tools → TCMS).
@@ -15,6 +18,27 @@ import {
 export function createInternalTcmsProvider(): QaToolProvider {
   return {
     id: QA_TOOL_PROVIDER.INTERNAL_TCMS,
+    requirement: {
+      async list(ctx: QaToolContext) {
+        const rows = await prisma.requirement.findMany({
+          where: { projectId: ctx.projectId },
+          orderBy: { requirementKey: 'asc' },
+          take: 200,
+          select: {
+            id: true,
+            requirementKey: true,
+            title: true,
+            description: true,
+          },
+        });
+        return rows.map((r) => ({
+          id: r.id,
+          key: r.requirementKey,
+          title: r.title,
+          description: r.description,
+        }));
+      },
+    },
     testcase: {
       async list(ctx: QaToolContext): Promise<QaTestCase[]> {
         const rows = await prisma.testCase.findMany({
@@ -188,6 +212,70 @@ export function createInternalTcmsProvider(): QaToolProvider {
                 ? (created.testData as Record<string, string>)
                 : null,
           },
+        };
+      },
+    },
+    defect: {
+      async create(ctx, input) {
+        const created = await prisma.bug.create({
+          data: {
+            projectId: ctx.projectId,
+            executionId: input.executionId ?? null,
+            testCaseId: input.testCaseId ?? null,
+            title: input.title.trim(),
+            description: input.description ?? '',
+            severity: input.severity ?? 'medium',
+          },
+        });
+        return {
+          id: created.id,
+          title: created.title,
+          description: created.description,
+          severity: created.severity,
+          testCaseId: created.testCaseId ?? undefined,
+          executionId: created.executionId ?? undefined,
+        };
+      },
+    },
+    report: {
+      async generate(ctx, executionId) {
+        const project = await prisma.project.findFirst({
+          where: { id: ctx.projectId },
+          select: { name: true },
+        });
+        const payload = await buildTcrPayload(
+          ctx.projectId,
+          project?.name ?? 'Project',
+          [executionId],
+        );
+        const pack = buildTcmsTcrHtml(payload);
+        const body = Buffer.from(pack.body, 'utf8');
+        const key = `${executionId}/reports/${pack.filename}`;
+        await prisma.artifact.create({
+          data: {
+            executionId,
+            type: ArtifactType.REPORT_HTML,
+            storageKey: key,
+            mime: pack.contentType,
+            size: body.length,
+          },
+        });
+        await prisma.artifactBlob.upsert({
+          where: { storageKey: key },
+          create: {
+            storageKey: key,
+            mime: pack.contentType,
+            size: body.length,
+            body: body as never,
+          },
+          update: {
+            mime: pack.contentType,
+            size: body.length,
+            body: body as never,
+          },
+        });
+        return {
+          url: `/api/v1/orgs/${ctx.orgId}/projects/${ctx.projectId}/tcms/runs/${executionId}/tcr?format=html`,
         };
       },
     },
