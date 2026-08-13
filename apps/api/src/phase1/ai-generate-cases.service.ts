@@ -96,7 +96,7 @@ export class AiGenerateCasesService {
         `LLM generate failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       throw new BadRequestException(
-        'AI could not generate test cases. Check the prompt and try again.',
+        `AI generate timed out or failed (${err instanceof Error ? err.message.slice(0, 240) : String(err)}). Try a shorter prompt, or retry.`,
       );
     }
 

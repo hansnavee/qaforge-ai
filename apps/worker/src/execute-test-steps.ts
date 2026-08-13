@@ -428,9 +428,9 @@ export async function executeTestSteps(
         !text ||
         /documented outcome|specified behavior|observe the/i.test(text)
       ) {
-        await page.waitForTimeout(400);
-        push(log, { kind: 'wait', timeoutMs: 400, comment: s.slice(0, 120) });
-        continue;
+        throw new Error(
+          `[UI] Unsupported/vague assert step (refusing soft-pass): ${s.slice(0, 160)}`,
+        );
       }
       if (
         /saucedemo/i.test(appUrl) &&
@@ -488,8 +488,9 @@ export async function executeTestSteps(
       continue;
     }
 
-    await page.waitForTimeout(400);
-    push(log, { kind: 'wait', timeoutMs: 400, comment: s.slice(0, 120) });
+    throw new Error(
+      `[UI] Unsupported step (refusing soft-pass): ${s.slice(0, 160)}`,
+    );
   }
 
   return log;

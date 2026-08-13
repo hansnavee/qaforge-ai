@@ -1,6 +1,6 @@
 import os from 'node:os';
 import { BrowserSessionManager } from '@qaforge/browser-session';
-import { caseStartUrl, credsFromCases } from '@qaforge/shared';
+import { caseStartUrl, classifyAiFailureMessage, credsFromCases } from '@qaforge/shared';
 import { buildAutomationHtml, playwrightSpec } from './ai-execute-playwright.js';
 import { executeTestSteps } from './execute-test-steps.js';
 import { parseActionLog } from './replay-action-log.js';
@@ -295,7 +295,8 @@ async function runJob(client: RunnerClient, job: LocalJob) {
         }
       } catch (err) {
         status = 'FAILED';
-        message = err instanceof Error ? err.message : String(err);
+        const raw = err instanceof Error ? err.message : String(err);
+        message = classifyAiFailureMessage(raw);
       }
 
       const spec = playwrightSpec({

@@ -565,7 +565,13 @@ export class OpenRouterLlmClient implements LlmClient {
 
     let response: Response | null = null;
     let lastErr = '';
+    let lastModel = '';
+    const perAttemptMs = Math.max(
+      15_000,
+      Number(process.env.OPENROUTER_TIMEOUT_MS ?? 90_000) || 90_000,
+    );
     for (const model of candidates) {
+      lastModel = model;
       const body: Record<string, unknown> = {
         model,
         messages,
@@ -581,24 +587,36 @@ export class OpenRouterLlmClient implements LlmClient {
         body.response_format = { type: 'json_object' };
       }
 
-      response = await fetch(this.baseUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-      });
+      try {
+        response = await fetch(this.baseUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(perAttemptMs),
+        });
+      } catch (err) {
+        const reason =
+          err instanceof Error && err.name === 'TimeoutError'
+            ? `timeout after ${perAttemptMs}ms`
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        lastErr = `model=${model} ${reason}`;
+        response = null;
+        continue;
+      }
       if (response.ok) break;
       lastErr = await response.text().catch(() => '');
+      lastErr = `model=${model} status=${response.status} ${lastErr || response.statusText}`;
       // Retry next candidate on model-not-found / unavailable / rate-limit
       if (![404, 400, 429, 502, 503].includes(response.status)) {
-        throw new Error(
-          `OpenRouter request failed (${response.status}): ${lastErr || response.statusText}`,
-        );
+        throw new Error(`OpenRouter request failed (${lastErr})`);
       }
     }
 
     if (!response?.ok) {
       throw new Error(
-        `OpenRouter request failed (${response?.status ?? 'n/a'}): ${lastErr || response?.statusText}`,
+        `OpenRouter request failed (${response?.status ?? 'n/a'} last=${lastModel}): ${lastErr || response?.statusText}`,
       );
     }
 

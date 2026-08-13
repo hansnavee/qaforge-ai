@@ -421,6 +421,8 @@ export const generateApplySchema = z.object({
   templateId: z.string().min(1).nullable().optional(),
   /** Prefer updating these existing case ids (order maps to cases[] when lengths match). */
   caseIds: z.array(z.string().min(1)).max(200).optional(),
+  /** When true, skip fingerprint upsert and always insert (AI apply defaults to upsert). */
+  forceCreate: z.boolean().optional(),
   cases: z.array(testCaseWriteSchema).min(1).max(200),
 });
 
@@ -560,6 +562,8 @@ export const aiExecuteRunSchema = z.object({
   target: z.enum(['LOCAL', 'CLOUD']).optional(),
   confirmProduction: z.boolean().optional(),
   testCaseIds: z.array(z.string().min(1)).max(500).optional(),
+  /** RECORD re-runs NL steps; REPLAY uses ActionLog when present. */
+  executeMode: z.enum(['RECORD', 'REPLAY']).optional(),
 });
 
 export type AiExecuteRunInput = z.infer<typeof aiExecuteRunSchema>;

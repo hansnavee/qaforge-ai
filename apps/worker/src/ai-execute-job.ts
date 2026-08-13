@@ -3,6 +3,7 @@ import {
   ArtifactType,
   ExecutionStatus,
   caseStartUrl,
+  classifyAiFailureMessage,
   credsFromCases,
   isUsableAppUrl,
   normalizePriorityLabel,
@@ -38,41 +39,9 @@ type Selection = {
   name?: string;
   testCaseIds?: string[];
   runKind?: string;
+  /** RECORD forces NL re-record; REPLAY uses ActionLog when present; omit = legacy AUTOMATION heuristic */
+  executeMode?: 'RECORD' | 'REPLAY';
 };
-
-/** Prefix failure messages for cockpit "Update cases from findings". */
-export function classifyAiFailureMessage(
-  raw: string,
-  durationMs?: number,
-): string {
-  const msg = (raw || 'Unknown failure').trim();
-  if (
-    msg.startsWith('[UI]') ||
-    msg.startsWith('[FUNCTIONAL]') ||
-    msg.startsWith('[PERF]')
-  ) {
-    return msg;
-  }
-  const lower = msg.toLowerCase();
-  if (
-    /button|getbyrole\(\s*['"]button|click.*not (found|visible|enabled)|unable to click/i.test(
-      lower,
-    )
-  ) {
-    return `[FUNCTIONAL] ${msg}`;
-  }
-  if (
-    /locator|timeout|waiting for|strict mode|element|selector|not found|not visible|detached|intercepts pointer/i.test(
-      lower,
-    )
-  ) {
-    return `[UI] ${msg}`;
-  }
-  if (typeof durationMs === 'number' && durationMs >= 10_000) {
-    return `[PERF] Slow step (${Math.round(durationMs / 1000)}s): ${msg}`;
-  }
-  return msg;
-}
 
 function readSelection(raw: unknown): Selection {
   if (!raw || typeof raw !== 'object') return {};
@@ -253,12 +222,13 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
   const zipFiles: Record<string, Buffer | string> = {};
 
   try {
-    const page = await browserManager.getPage(launched.sessionId);
-
     for (const tc of ordered) {
       await throwIfCancelled(executionId);
       await waitWhilePaused(executionId);
       await throwIfCancelled(executionId);
+
+      // Isolate each case on a fresh page so prior auth/cart state does not cascade.
+      const casePage = await browserManager.freshPage(launched.sessionId);
 
       const steps = Array.isArray(tc.steps) ? (tc.steps as string[]) : [];
       const started = Date.now();
@@ -279,7 +249,11 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
       if (!testData.password && data.password) testData.password = data.password;
 
       let actions: Awaited<ReturnType<typeof executeTestSteps>> = [];
-      const preferReplay = selection.runKind === 'AUTOMATION';
+      const forceRecord = selection.executeMode === 'RECORD';
+      const forceReplay = selection.executeMode === 'REPLAY';
+      const preferReplay =
+        !forceRecord &&
+        (forceReplay || selection.runKind === 'AUTOMATION');
       try {
         const startUrl = caseStartUrl(tc.testData, steps, appUrl as string);
         if (preferReplay) {
@@ -303,7 +277,7 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
               postalCode: testData.postalCode,
             };
             const pipeline = await runFailurePipeline({
-              page,
+              page: casePage,
               actions: recorded,
               env,
               startUrl,
@@ -317,7 +291,7 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
                   .llmHealRequiresApproval !== false,
               isP0: (tc.priorityLabel ?? '').toUpperCase() === 'HIGH',
               gotoStart: async () => {
-                await page.goto(startUrl, {
+                await casePage.goto(startUrl, {
                   waitUntil: 'domcontentloaded',
                   timeout: 45_000,
                 });
@@ -375,18 +349,18 @@ export async function runAiExecuteJob(data: AiExecuteJobData): Promise<void> {
               });
             }
           } else {
-            await page.goto(startUrl, {
+            await casePage.goto(startUrl, {
               waitUntil: 'domcontentloaded',
               timeout: 45_000,
             });
-            actions = await executeTestSteps(page, steps, startUrl, testData);
+            actions = await executeTestSteps(casePage, steps, startUrl, testData);
           }
         } else {
-          await page.goto(startUrl, {
+          await casePage.goto(startUrl, {
             waitUntil: 'domcontentloaded',
             timeout: 45_000,
           });
-          actions = await executeTestSteps(page, steps, startUrl, testData);
+          actions = await executeTestSteps(casePage, steps, startUrl, testData);
         }
       } catch (err) {
         status = 'FAILED';

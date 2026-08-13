@@ -217,6 +217,14 @@ export class BrowserSessionManager {
     return this.requireSession(sessionId).page;
   }
 
+  /** Fresh page for the next case so prior session state does not poison results. */
+  async freshPage(sessionId: string): Promise<Page> {
+    const session = this.requireSession(sessionId);
+    await session.page.close().catch(() => undefined);
+    session.page = await session.context.newPage();
+    return session.page;
+  }
+
   async screenshot(sessionId: string, name: string): Promise<Buffer> {
     const session = this.requireSession(sessionId);
     const buffer = await session.page.screenshot({

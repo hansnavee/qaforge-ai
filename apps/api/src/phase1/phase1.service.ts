@@ -28,6 +28,7 @@ import {
   credsFromCases,
   extractAppUrlFromText,
   reviewApplicationByFetch,
+  classifyAgainstExisting,
   proposeTcmsRunSchema,
   importTestCasesSchema,
   isLikelyProductionUrl,
@@ -2293,6 +2294,7 @@ export class Phase1Service {
       testCaseIds: roster.length ? roster : runCaseIds,
       aiExecuteCaseIds: runCaseIds,
       runKind: 'AUTOMATION',
+      executeMode: input.executeMode,
       browserMode,
       browser: input.browser ?? 'chromium',
       runnerTarget: runOnServer && target === 'LOCAL' ? 'SERVER' : target,
@@ -3891,26 +3893,29 @@ export class Phase1Service {
     const casesOut: Array<{ id: string; externalId: string; scenario: string }> =
       [];
 
-    const existingCases =
-      input.mode === 'update'
-        ? await prisma.testCase.findMany({
-            where: { projectId, deletedAt: null },
-            select: {
-              id: true,
-              externalId: true,
-              scenario: true,
-              module: true,
-            },
-          })
-        : [];
+    const existingCases = await prisma.testCase.findMany({
+      where: { projectId, deletedAt: null },
+      select: {
+        id: true,
+        externalId: true,
+        scenario: true,
+        module: true,
+        designTechnique: true,
+        requirementKey: true,
+        steps: true,
+        expected: true,
+      },
+    });
 
     const byId = new Map(existingCases.map((c) => [c.id, c]));
     const usedIds = new Set<string>();
+    const forceCreate = Boolean(input.forceCreate);
 
     const matchExisting = (
       row: (typeof input.cases)[number],
       index: number,
     ) => {
+      if (forceCreate && input.mode === 'create') return null;
       const preferredId = input.caseIds?.[index];
       if (preferredId && byId.has(preferredId) && !usedIds.has(preferredId)) {
         return byId.get(preferredId)!;
@@ -3924,16 +3929,31 @@ export class Phase1Service {
         );
         if (hit) return hit;
       }
-      const scenario = row.scenario?.trim().toLowerCase() ?? '';
-      const moduleName = (row.module ?? 'General').trim().toLowerCase();
-      return (
-        existingCases.find(
-          (c) =>
-            !usedIds.has(c.id) &&
-            c.scenario.trim().toLowerCase() === scenario &&
-            (c.module ?? 'General').trim().toLowerCase() === moduleName,
-        ) ?? null
-      );
+      // Always upsert by fingerprint (create or update mode) unless forceCreate
+      const classified = classifyAgainstExisting({
+        candidate: {
+          scenario: row.scenario,
+          module: row.module,
+          designTechnique: row.designTechnique,
+          requirementKey: row.requirementKey,
+          steps: row.steps,
+          expected: row.expected,
+        },
+        existing: existingCases.map((c) => ({
+          id: c.id,
+          scenario: c.scenario,
+          module: c.module,
+          designTechnique: c.designTechnique,
+          requirementKey: c.requirementKey,
+          steps: Array.isArray(c.steps) ? (c.steps as string[]) : [],
+          expected: c.expected,
+        })),
+        usedIds,
+      });
+      if (classified.matchId && byId.has(classified.matchId)) {
+        return byId.get(classified.matchId)!;
+      }
+      return null;
     };
 
     let count = await prisma.testCase.count({ where: { projectId } });
@@ -3955,8 +3975,7 @@ export class Phase1Service {
       const folderId =
         row.folderId !== undefined ? row.folderId : input.folderId;
       const placement = await this.folderPlacement(projectId, folderId);
-      const matched =
-        input.mode === 'update' ? matchExisting(row, i) : null;
+      const matched = matchExisting(row, i);
 
       if (matched) {
         usedIds.add(matched.id);

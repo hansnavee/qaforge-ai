@@ -1,5 +1,6 @@
 import {
   applyRuleHeal,
+  classifyAiFailureMessage,
   classifyFailure,
   routeQaAgent,
   specFromActionLog,
@@ -199,7 +200,9 @@ export async function runFailurePipeline(opts: {
       });
       return {
         status: 'FAILED',
-        message: `Rule heal verify ${verificationRuns.filter(Boolean).length}/${VERIFY_N} — not committed`,
+        message: classifyAiFailureMessage(
+          `Rule heal verify ${verificationRuns.filter(Boolean).length}/${VERIFY_N} — not committed`,
+        ),
         actions: opts.actions,
         patchedActions: patched,
         decision: after.skill === 'LLM_HEAL' ? after : decision,
@@ -241,7 +244,7 @@ export async function runFailurePipeline(opts: {
 
   return {
     status: 'FAILED',
-    message: attempt.error ?? 'Replay failed',
+    message: classifyAiFailureMessage(attempt.error ?? 'Replay failed'),
     actions: opts.actions,
     decision,
     committedHeal: false,

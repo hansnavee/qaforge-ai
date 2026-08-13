@@ -9,3 +9,4 @@ export * from './prompt-facts.js';
 export * from './import-cases.js';
 export * from './review-app.js';
 export * from './execution-creds.js';
+export * from './case-fingerprint.js';

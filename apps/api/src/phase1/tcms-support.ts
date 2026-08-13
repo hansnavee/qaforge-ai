@@ -8,6 +8,8 @@ export type TcmsSelection = {
   testCaseIds?: string[];
   folderIds?: string[];
   runKind?: string;
+  /** RECORD | REPLAY — overrides ActionLog auto-replay when set */
+  executeMode?: 'RECORD' | 'REPLAY';
   browserMode?: string;
   browser?: string;
   featureKey?: string | null;

@@ -12,6 +12,7 @@ import {
 import { normalizePriorityLabel } from './priority.js';
 import type { AppPageMap } from './review-app.js';
 import { formatPageMapForLlm } from './review-app.js';
+import { caseFingerprint } from './case-fingerprint.js';
 
 const SOURCE_CHAR_CAP = 12_000;
 const MAX_CASES = 80;
@@ -499,10 +500,6 @@ export function assembleGeneratedCases(opts: {
   const previews: GeneratedCasePreview[] = [];
   for (const row of llmParsed) {
     if (!row.scenario || !row.expected || !(row.steps?.length)) continue;
-    const key = row.scenario.toLowerCase().replace(/\s+/g, ' ');
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const requirementKey = attachRequirementKey(row, requirements);
     const technique = (DESIGN_TECHNIQUES as readonly string[]).includes(
       String(row.designTechnique ?? '').toUpperCase(),
     )
@@ -515,6 +512,15 @@ export function assembleGeneratedCases(opts: {
         : /log\s*in|sign\s*in|password|username|account/i.test(row.scenario)
           ? 'Login'
           : 'General');
+    const requirementKey = attachRequirementKey(row, requirements);
+    const key = caseFingerprint({
+      scenario: row.scenario,
+      module: moduleGuess,
+      designTechnique: technique,
+      requirementKey,
+    });
+    if (seen.has(key)) continue;
+    seen.add(key);
     previews.push({
       scenario: row.scenario,
       preconditions: row.preconditions ?? '',
@@ -563,7 +569,12 @@ export function assembleGeneratedCases(opts: {
   });
   if (fillMissing) {
     for (const tc of expanded.testCases) {
-      const key = tc.scenario.toLowerCase().replace(/\s+/g, ' ');
+      const key = caseFingerprint({
+        scenario: tc.scenario,
+        module: tc.module || 'General',
+        designTechnique: tc.designTechnique,
+        requirementKey: tc.requirementKey,
+      });
       if (seen.has(key)) continue;
       seen.add(key);
       cases.push({
