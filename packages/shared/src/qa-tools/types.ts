@@ -29,6 +29,10 @@ export type QaTestCaseInput = {
   type?: string | null;
   testData?: Record<string, string> | null;
   externalId?: string | null;
+  /** Prefer updating this existing case id when present. */
+  preferredId?: string | null;
+  /** Case ids already claimed in this batch (skip for fingerprint match). */
+  excludeIds?: string[];
   forceCreate?: boolean;
 };
 

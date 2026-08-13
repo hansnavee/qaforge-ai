@@ -4,6 +4,7 @@ import {
   SENIOR_QA_GENERATE_SYSTEM,
   assembleGeneratedCases,
   buildLlmGeneratePrompt,
+  caseFingerprint,
   parseJsonFromLlm,
   requirementsFromSource,
   resolveGenerateTechniques,
@@ -14,6 +15,17 @@ import {
   type StoredRequirementForLlm,
   type TechniqueCoverageReport,
 } from '@qaforge/shared';
+
+function chunkTechniques(
+  techniques: DesignTechnique[],
+  size = 2,
+): DesignTechnique[][] {
+  const chunks: DesignTechnique[][] = [];
+  for (let i = 0; i < techniques.length; i += size) {
+    chunks.push(techniques.slice(i, i + size));
+  }
+  return chunks.length ? chunks : [[]];
+}
 
 @Injectable()
 export class AiGenerateCasesService {
@@ -66,43 +78,84 @@ export class AiGenerateCasesService {
       );
     }
 
-    const userPrompt = buildLlmGeneratePrompt({
-      userPrompt: sourceText,
-      projectName: opts.projectName,
-      appUrl: opts.appUrl,
-      loginUrl: opts.loginUrl,
-      username: opts.username,
-      password: opts.password,
-      storedRequirements: stored,
-      pageMap: opts.pageMap,
-      techniques,
-    });
-
-    let llmCases: unknown = { cases: [] };
+    // Chunk techniques so free models return smaller, reliable JSON batches.
+    const chunks = chunkTechniques(techniques, fullCoverage ? 2 : 3);
+    const mergedRaw: unknown[] = [];
     let tokensUsed = 0;
-    try {
-      const result = await this.llm.complete({
-        system: SENIOR_QA_GENERATE_SYSTEM,
-        prompt: userPrompt,
-        json: true,
-        model: 'reasoning',
-        maxTokens: fullCoverage ? 16_000 : 8_000,
-        temperature: 0.2,
+    const errors: string[] = [];
+
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i]!;
+      const userPrompt = buildLlmGeneratePrompt({
+        userPrompt: [
+          sourceText,
+          chunks.length > 1
+            ? `\n\nBatch ${i + 1}/${chunks.length}: focus only on techniques ${chunk.join(', ')}. Return fewer, high-quality cases for these techniques.`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(''),
+        projectName: opts.projectName,
+        appUrl: opts.appUrl,
+        loginUrl: opts.loginUrl,
+        username: opts.username,
+        password: opts.password,
+        storedRequirements: stored,
+        pageMap: opts.pageMap,
+        techniques: chunk.length ? chunk : techniques,
       });
-      tokensUsed = result.tokensUsed;
-      llmCases = parseJsonFromLlm(result.text);
-    } catch (err) {
-      this.logger.warn(
-        `LLM generate failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+
+      try {
+        const result = await this.llm.complete({
+          system: SENIOR_QA_GENERATE_SYSTEM,
+          prompt: userPrompt,
+          json: true,
+          model: 'reasoning',
+          maxTokens: fullCoverage ? 8_000 : 6_000,
+          temperature: 0.2,
+        });
+        tokensUsed += result.tokensUsed;
+        const parsed = parseJsonFromLlm(result.text) as {
+          cases?: unknown[];
+        };
+        if (Array.isArray(parsed?.cases)) {
+          mergedRaw.push(...parsed.cases);
+        } else if (Array.isArray(parsed)) {
+          mergedRaw.push(...parsed);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`LLM generate chunk ${i + 1} failed: ${msg}`);
+        errors.push(`batch ${i + 1}: ${msg.slice(0, 120)}`);
+      }
+    }
+
+    if (!mergedRaw.length) {
       throw new BadRequestException(
-        `AI generate timed out or failed (${err instanceof Error ? err.message.slice(0, 240) : String(err)}). Try a shorter prompt, or retry.`,
+        `AI generate timed out or failed (${errors.join('; ') || 'no cases'}). Try a shorter prompt, or retry.`,
       );
+    }
+
+    // Deduplicate across chunks before assemble fillers run.
+    const seen = new Set<string>();
+    const dedupedRaw: unknown[] = [];
+    for (const row of mergedRaw) {
+      if (!row || typeof row !== 'object') continue;
+      const r = row as Record<string, unknown>;
+      const key = caseFingerprint({
+        scenario: String(r.scenario ?? ''),
+        module: String(r.module ?? 'General'),
+        designTechnique: String(r.designTechnique ?? 'HAPPY_PATH'),
+        requirementKey: r.requirementKey ? String(r.requirementKey) : null,
+      });
+      if (!key.startsWith('::') && seen.has(key)) continue;
+      if (!key.startsWith('::')) seen.add(key);
+      dedupedRaw.push(row);
     }
 
     const assembled = assembleGeneratedCases({
       sourceText: combinedSource,
-      llmCases,
+      llmCases: { cases: dedupedRaw },
       techniques,
       type: opts.type,
       priorityLabel: opts.priorityLabel,
@@ -118,7 +171,7 @@ export class AiGenerateCasesService {
       cases: assembled.cases,
       coverage: assembled.coverage,
       tokensUsed,
-      requirementCount: assembled.requirements.length,
+      requirementCount: requirements.length,
     };
   }
 

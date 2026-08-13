@@ -428,6 +428,32 @@ export const generateApplySchema = z.object({
 
 export type GenerateApplyInput = z.infer<typeof generateApplySchema>;
 
+/** AI QA Engineer intent shell — Suggest plans; Execute applies via tools. */
+export const aiAgentIntentSchema = z.object({
+  intent: z.string().min(1).max(100_000),
+  permissionLevel: z.enum(['SUGGEST', 'EXECUTE']).default('SUGGEST'),
+  reviewApplication: z.boolean().optional(),
+  includeProjectRequirements: z.boolean().optional(),
+  folderId: z.string().min(1).nullable().optional(),
+  techniques: z
+    .array(
+      z.enum([
+        'HAPPY_PATH',
+        'EQUIVALENCE',
+        'BOUNDARY',
+        'DECISION_TABLE',
+        'STATE_TRANSITION',
+        'NEGATIVE',
+        'ERROR_GUESSING',
+      ]),
+    )
+    .min(1)
+    .max(7)
+    .optional(),
+});
+
+export type AiAgentIntentInput = z.infer<typeof aiAgentIntentSchema>;
+
 export const testCaseBulkCreateSchema = z.object({
   folderId: z.string().min(1).nullable().optional(),
   templateId: z.string().min(1).nullable().optional(),

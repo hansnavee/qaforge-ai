@@ -88,6 +88,7 @@ export function TcmsAiExecutorModal({
   const [browserMode, setBrowserMode] = useState<'HEADLESS' | 'HEADED'>(
     'HEADLESS',
   );
+  const [executeMode, setExecuteMode] = useState<'RECORD' | 'REPLAY'>('RECORD');
   const [target, setTarget] = useState<'LOCAL' | 'CLOUD'>('LOCAL');
   const [confirmProduction, setConfirmProduction] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -301,6 +302,7 @@ export function TcmsAiExecutorModal({
         password: password || undefined,
         browser,
         browserMode,
+        executeMode,
         target,
         confirmProduction,
         testCaseIds: testCaseIds?.length ? testCaseIds : undefined,
@@ -519,6 +521,19 @@ export function TcmsAiExecutorModal({
             </select>
           </label>
         </div>
+        <label className="block text-xs text-muted">
+          Script mode
+          <select
+            className={`${fieldClass} mt-1`}
+            value={executeMode}
+            onChange={(e) =>
+              setExecuteMode(e.target.value as 'RECORD' | 'REPLAY')
+            }
+          >
+            <option value="RECORD">Record (re-walk steps, refresh ActionLog)</option>
+            <option value="REPLAY">Replay (use saved ActionLog when present)</option>
+          </select>
+        </label>
         <fieldset className="space-y-1 text-xs text-muted">
           <legend>Target</legend>
           <label className="flex items-center gap-2">

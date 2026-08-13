@@ -24,11 +24,11 @@ import {
   deleteTcmsFolderSchema,
   evaluateRequirementsReadiness,
   generateApplySchema,
+  aiAgentIntentSchema,
   generateTestCasesSchema,
   credsFromCases,
   extractAppUrlFromText,
   reviewApplicationByFetch,
-  classifyAgainstExisting,
   proposeTcmsRunSchema,
   importTestCasesSchema,
   isLikelyProductionUrl,
@@ -80,6 +80,7 @@ import { OrgsService } from '../orgs/orgs.service';
 import { QueueService } from '../queue/queue.service';
 import { RunnersService } from '../runners/runners.service';
 import { PlanUsageService } from '../billing/plan-usage.service';
+import { createInternalTcmsProvider } from '../qa-tools/internal-tcms.provider';
 import { AiGenerateCasesService } from './ai-generate-cases.service';
 import {
   isAllowedRequirementFile,
@@ -3893,70 +3894,15 @@ export class Phase1Service {
     const casesOut: Array<{ id: string; externalId: string; scenario: string }> =
       [];
 
-    const existingCases = await prisma.testCase.findMany({
-      where: { projectId, deletedAt: null },
-      select: {
-        id: true,
-        externalId: true,
-        scenario: true,
-        module: true,
-        designTechnique: true,
-        requirementKey: true,
-        steps: true,
-        expected: true,
-      },
-    });
-
-    const byId = new Map(existingCases.map((c) => [c.id, c]));
-    const usedIds = new Set<string>();
-    const forceCreate = Boolean(input.forceCreate);
-
-    const matchExisting = (
-      row: (typeof input.cases)[number],
-      index: number,
-    ) => {
-      if (forceCreate && input.mode === 'create') return null;
-      const preferredId = input.caseIds?.[index];
-      if (preferredId && byId.has(preferredId) && !usedIds.has(preferredId)) {
-        return byId.get(preferredId)!;
-      }
-      const externalId = row.externalId?.trim();
-      if (externalId) {
-        const hit = existingCases.find(
-          (c) =>
-            !usedIds.has(c.id) &&
-            c.externalId.toLowerCase() === externalId.toLowerCase(),
-        );
-        if (hit) return hit;
-      }
-      // Always upsert by fingerprint (create or update mode) unless forceCreate
-      const classified = classifyAgainstExisting({
-        candidate: {
-          scenario: row.scenario,
-          module: row.module,
-          designTechnique: row.designTechnique,
-          requirementKey: row.requirementKey,
-          steps: row.steps,
-          expected: row.expected,
-        },
-        existing: existingCases.map((c) => ({
-          id: c.id,
-          scenario: c.scenario,
-          module: c.module,
-          designTechnique: c.designTechnique,
-          requirementKey: c.requirementKey,
-          steps: Array.isArray(c.steps) ? (c.steps as string[]) : [],
-          expected: c.expected,
-        })),
-        usedIds,
-      });
-      if (classified.matchId && byId.has(classified.matchId)) {
-        return byId.get(classified.matchId)!;
-      }
-      return null;
+    const tools = createInternalTcmsProvider();
+    const ctx = {
+      orgId,
+      projectId,
+      userId,
+      permissionLevel: 'EXECUTE' as const,
     };
+    const forceCreate = Boolean(input.forceCreate) && input.mode === 'create';
 
-    let count = await prisma.testCase.count({ where: { projectId } });
     const template = input.templateId
       ? await prisma.caseTemplate.findFirst({
           where: { id: input.templateId, projectId },
@@ -3969,107 +3915,68 @@ export class Phase1Service {
         ? (template.defaults as Record<string, string>)
         : {};
 
+    const usedIds = new Set<string>();
+
     for (let i = 0; i < input.cases.length; i++) {
       const row = input.cases[i]!;
       if (!row.scenario?.trim() || !row.expected?.trim()) continue;
       const folderId =
         row.folderId !== undefined ? row.folderId : input.folderId;
       const placement = await this.folderPlacement(projectId, folderId);
-      const matched = matchExisting(row, i);
-
-      if (matched) {
-        usedIds.add(matched.id);
-        const status = this.statusFields({ caseStatus: 'DRAFT' });
-        const record = await prisma.testCase.update({
-          where: { id: matched.id },
-          data: {
-            module: row.module ?? placement.module ?? 'General',
-            scenario: row.scenario.trim(),
-            preconditions:
-              row.preconditions ?? templateDefaults.preconditions ?? '',
-            steps: (row.steps ?? ['Perform the scenario steps']) as never,
-            expected: row.expected.trim(),
-            priority:
-              row.priority ??
-              priorityFromLabel(
-                row.priorityLabel ??
-                  (templateDefaults.priorityLabel as
-                    | 'HIGH'
-                    | 'MEDIUM'
-                    | 'LOW') ??
-                  'MEDIUM',
-              ),
-            severity: row.severity ?? 'medium',
-            type: row.type ?? templateDefaults.type ?? 'functional',
-            requirementKey:
-              row.requirementKey ?? placement.requirementKey ?? null,
-            designTechnique:
-              row.designTechnique ??
-              templateDefaults.designTechnique ??
-              null,
-            featureKey: row.featureKey ?? placement.featureKey ?? null,
-            folderId: placement.folderId ?? null,
-            priorityLabel:
-              row.priorityLabel ??
-              normalizePriorityLabel(row.priority ?? 'P1'),
-            ...status,
-            testData: (row.testData ?? null) as never,
-            customFields: (row.customFields ?? null) as never,
-            templateId: input.templateId ?? template?.id ?? null,
-          },
-        });
-        updated += 1;
-        casesOut.push({
-          id: record.id,
-          externalId: record.externalId,
-          scenario: record.scenario,
-        });
-        continue;
+      const preferredId = input.caseIds?.[i];
+      if (preferredId && usedIds.has(preferredId)) {
+        // already applied in this batch
       }
 
-      count += 1;
+      const result = await tools.testcase.upsert(ctx, {
+        scenario: row.scenario.trim(),
+        module: row.module ?? placement.module ?? 'General',
+        designTechnique:
+          row.designTechnique ?? templateDefaults.designTechnique ?? null,
+        requirementKey:
+          row.requirementKey ?? placement.requirementKey ?? null,
+        preconditions:
+          row.preconditions ?? templateDefaults.preconditions ?? '',
+        steps: row.steps ?? ['Perform the scenario steps'],
+        expected: row.expected.trim(),
+        priorityLabel:
+          row.priorityLabel ??
+          (templateDefaults.priorityLabel as 'HIGH' | 'MEDIUM' | 'LOW') ??
+          normalizePriorityLabel(row.priority ?? 'P1'),
+        type: row.type ?? templateDefaults.type ?? 'functional',
+        testData: row.testData ?? null,
+        externalId: row.externalId?.trim() || null,
+        preferredId: preferredId && !usedIds.has(preferredId) ? preferredId : null,
+        excludeIds: [...usedIds],
+        forceCreate,
+      });
+
+      usedIds.add(result.case.id);
       const status = this.statusFields({ caseStatus: 'DRAFT' });
-      const record = await prisma.testCase.create({
+      const record = await prisma.testCase.update({
+        where: { id: result.case.id },
         data: {
-          projectId,
-          executionId: null,
-          externalId:
-            row.externalId?.trim() ||
-            `TC-${String(count).padStart(3, '0')}`,
-          module: row.module ?? placement.module ?? 'General',
-          scenario: row.scenario.trim(),
-          preconditions:
-            row.preconditions ?? templateDefaults.preconditions ?? '',
-          steps: (row.steps ?? ['Perform the scenario steps']) as never,
-          expected: row.expected.trim(),
+          folderId: placement.folderId ?? null,
+          featureKey: row.featureKey ?? placement.featureKey ?? null,
           priority:
             row.priority ??
             priorityFromLabel(
               row.priorityLabel ??
-                (templateDefaults.priorityLabel as 'HIGH' | 'MEDIUM' | 'LOW') ??
+                (templateDefaults.priorityLabel as
+                  | 'HIGH'
+                  | 'MEDIUM'
+                  | 'LOW') ??
                 'MEDIUM',
             ),
           severity: row.severity ?? 'medium',
-          type: row.type ?? templateDefaults.type ?? 'functional',
-          requirementKey:
-            row.requirementKey ?? placement.requirementKey ?? null,
-          designTechnique:
-            row.designTechnique ??
-            templateDefaults.designTechnique ??
-            null,
-          featureKey: row.featureKey ?? placement.featureKey ?? null,
-          folderId: placement.folderId ?? null,
-          designMode: 'GENERIC',
-          priorityLabel:
-            row.priorityLabel ??
-            normalizePriorityLabel(row.priority ?? 'P1'),
-          ...status,
-          testData: (row.testData ?? null) as never,
           customFields: (row.customFields ?? null) as never,
           templateId: input.templateId ?? template?.id ?? null,
+          ...status,
         },
       });
-      created += 1;
+
+      if (result.created) created += 1;
+      else updated += 1;
       casesOut.push({
         id: record.id,
         externalId: record.externalId,
@@ -4100,6 +4007,104 @@ export class Phase1Service {
       created,
       updated,
       cases: casesOut,
+      provider: 'internal-tcms',
+    };
+  }
+
+  /**
+   * AI QA Engineer intent shell.
+   * SUGGEST: generate a plan + case preview (no writes).
+   * EXECUTE: generate then apply via Internal TCMS tool provider.
+   */
+  async runAiAgentIntent(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(aiAgentIntentSchema, body);
+    const permissionLevel = input.permissionLevel ?? 'SUGGEST';
+
+    const generated = await this.generateTestCases(
+      userId,
+      orgId,
+      projectId,
+      {
+        prompt: input.intent,
+        includeProjectRequirements: input.includeProjectRequirements,
+        reviewApplication: input.reviewApplication,
+        techniques: input.techniques,
+      },
+    );
+
+    const plan = {
+      permissionLevel,
+      goal: input.intent.slice(0, 500),
+      steps: [
+        'Clarify goal from intent',
+        'Generate candidate test cases (chunked by technique)',
+        permissionLevel === 'EXECUTE'
+          ? 'Apply cases via Internal TCMS tool provider'
+          : 'Return suggestions for human review (no writes)',
+      ],
+      caseCount: generated.cases?.length ?? 0,
+      coverage: generated.coverage ?? null,
+    };
+
+    if (permissionLevel === 'SUGGEST') {
+      return {
+        permissionLevel,
+        applied: false,
+        plan,
+        cases: generated.cases,
+        coverage: generated.coverage,
+        tokensUsed: generated.tokensUsed,
+        requirementCount: generated.requirementCount,
+        pageMap: generated.pageMap ?? null,
+      };
+    }
+
+    const apply = await this.generateApply(userId, orgId, projectId, {
+      mode: 'create',
+      prompt: input.intent,
+      source: 'GENERATE',
+      folderId: input.folderId ?? null,
+      cases: (generated.cases ?? []).map((c: {
+        scenario: string;
+        preconditions?: string;
+        steps?: string[];
+        expected: string;
+        type?: string;
+        designTechnique?: string;
+        requirementKey?: string | null;
+        priorityLabel?: 'HIGH' | 'MEDIUM' | 'LOW';
+        testData?: Record<string, string> | null;
+        module?: string;
+      }) => ({
+        scenario: c.scenario,
+        preconditions: c.preconditions ?? '',
+        steps: c.steps ?? [],
+        expected: c.expected,
+        type: c.type ?? 'functional',
+        designTechnique: c.designTechnique,
+        requirementKey: c.requirementKey ?? null,
+        priorityLabel: c.priorityLabel ?? 'MEDIUM',
+        testData: c.testData ?? null,
+        module: c.module ?? 'General',
+      })),
+    });
+
+    return {
+      permissionLevel,
+      applied: true,
+      plan,
+      cases: generated.cases,
+      coverage: generated.coverage,
+      tokensUsed: generated.tokensUsed,
+      requirementCount: generated.requirementCount,
+      pageMap: generated.pageMap ?? null,
+      apply,
     };
   }
 

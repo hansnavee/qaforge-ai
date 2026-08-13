@@ -53,20 +53,49 @@ export function createInternalTcmsProvider(): QaToolProvider {
             externalId: true,
           },
         });
-        const hit = input.forceCreate
-          ? { disposition: 'new' as const, matchId: null }
-          : classifyAgainstExisting({
-              candidate: input,
-              existing: existing.map((c) => ({
-                id: c.id,
-                scenario: c.scenario,
-                module: c.module,
-                designTechnique: c.designTechnique,
-                requirementKey: c.requirementKey,
-                steps: Array.isArray(c.steps) ? (c.steps as string[]) : [],
-                expected: c.expected,
-              })),
-            });
+        const exclude = new Set(input.excludeIds ?? []);
+        let hit: { disposition: 'new' | 'updateCandidate'; matchId: string | null } =
+          input.forceCreate
+            ? { disposition: 'new', matchId: null }
+            : { disposition: 'new', matchId: null };
+
+        if (!input.forceCreate && input.preferredId && !exclude.has(input.preferredId)) {
+          const preferred = existing.find((c) => c.id === input.preferredId);
+          if (preferred) {
+            hit = { disposition: 'updateCandidate', matchId: preferred.id };
+          }
+        }
+        if (!hit.matchId && !input.forceCreate && input.externalId?.trim()) {
+          const byExt = existing.find(
+            (c) =>
+              !exclude.has(c.id) &&
+              c.externalId.toLowerCase() ===
+                input.externalId!.trim().toLowerCase(),
+          );
+          if (byExt) {
+            hit = { disposition: 'updateCandidate', matchId: byExt.id };
+          }
+        }
+        if (!hit.matchId && !input.forceCreate) {
+          const classified = classifyAgainstExisting({
+            candidate: input,
+            existing: existing.map((c) => ({
+              id: c.id,
+              scenario: c.scenario,
+              module: c.module,
+              designTechnique: c.designTechnique,
+              requirementKey: c.requirementKey,
+              steps: Array.isArray(c.steps) ? (c.steps as string[]) : [],
+              expected: c.expected,
+            })),
+            usedIds: exclude,
+          });
+          hit = {
+            disposition:
+              classified.disposition === 'new' ? 'new' : 'updateCandidate',
+            matchId: classified.matchId,
+          };
+        }
 
         if (hit.matchId) {
           const updated = await prisma.testCase.update({

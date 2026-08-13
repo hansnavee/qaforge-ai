@@ -32,6 +32,7 @@ import {
   TcmsAiGenerateModal,
   type AiGenerateModalDefaults,
 } from './tcms-ai-generate-modal';
+import { TcmsAiAgentModal } from './tcms-ai-agent-modal';
 import {
   TcmsCaseModal,
   type CaseDraft,
@@ -199,6 +200,7 @@ export function DesignCasesPanel({
   const [archiveIds, setArchiveIds] = useState<string[] | null>(null);
   const [purgeIds, setPurgeIds] = useState<string[] | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
+  const [agentOpen, setAgentOpen] = useState(false);
   const [aiDefaults, setAiDefaults] = useState<AiGenerateModalDefaults | null>(
     null,
   );
@@ -807,6 +809,14 @@ export function DesignCasesPanel({
                   type="button"
                   size="sm"
                   variant="secondary"
+                  onClick={() => setAgentOpen(true)}
+                >
+                  AI QA Engineer
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
                   onClick={() => {
                     setAiDefaults(null);
                     setAiOpen(true);
@@ -1028,6 +1038,22 @@ export function DesignCasesPanel({
           setAiDefaults(null);
         }}
         onAdded={() => void invalidate()}
+      />
+
+      <TcmsAiAgentModal
+        open={agentOpen}
+        projectId={projectId}
+        folders={folderOptions}
+        defaultFolderId={
+          folder.sectionId ||
+          (folder.folderId !== '*' &&
+          folder.folderId !== UNGROUPED_FOLDER_KEY &&
+          folder.folderId !== ARCHIVED_KEY
+            ? folder.folderId
+            : '')
+        }
+        onClose={() => setAgentOpen(false)}
+        onApplied={() => void invalidate()}
       />
 
       <TcmsImportModal
