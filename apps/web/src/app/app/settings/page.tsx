@@ -18,7 +18,10 @@ import {
 } from '@/components/ListingTable';
 import { Modal } from '@/components/Modal';
 import { api, ApiError } from '@/lib/api';
+import { parsePlanLimitError, type PlanLimitErrorBody } from '@/lib/plan';
 import { useOrgCaps } from '@/lib/use-org';
+import { usePlan } from '@/lib/use-plan';
+import { ProFeatureNotice, UpgradeModal } from '@/components/UpgradeModal';
 
 type Member = {
   id: string;
@@ -32,6 +35,13 @@ type OrgDetail = {
   slug: string;
   role: string;
   browserstackConfigured?: boolean;
+  jiraConfigured?: boolean;
+  jira?: {
+    baseUrl: string;
+    email: string;
+    projectKey: string;
+    issueType: string;
+  } | null;
   memberships: Member[];
 };
 
@@ -48,9 +58,19 @@ type OrgCaseField = {
 export default function SettingsPage() {
   const qc = useQueryClient();
   const { org, caps, roleLabel: myLabel } = useOrgCaps();
+  const { canJira } = usePlan();
   const [bsUser, setBsUser] = useState('');
   const [bsKey, setBsKey] = useState('');
   const [bsError, setBsError] = useState<string | null>(null);
+  const [jiraBaseUrl, setJiraBaseUrl] = useState('');
+  const [jiraEmail, setJiraEmail] = useState('');
+  const [jiraToken, setJiraToken] = useState('');
+  const [jiraProjectKey, setJiraProjectKey] = useState('');
+  const [jiraIssueType, setJiraIssueType] = useState('Bug');
+  const [jiraError, setJiraError] = useState<string | null>(null);
+  const [upgradeError, setUpgradeError] = useState<PlanLimitErrorBody | null>(
+    null,
+  );
   const [inviteOpen, setInviteOpen] = useState(false);
   const [email, setEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<(typeof ASSIGNABLE_ROLES)[number]>(
@@ -83,6 +103,50 @@ export default function SettingsPage() {
     onError: (e) => {
       setBsError(
         e instanceof ApiError ? e.message : 'Could not save BrowserStack keys',
+      );
+    },
+  });
+
+  const saveJira = useMutation({
+    mutationFn: () =>
+      api(`/api/v1/orgs/${org!.id}/jira`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          baseUrl: jiraBaseUrl.trim(),
+          email: jiraEmail.trim(),
+          apiToken: jiraToken.trim(),
+          projectKey: jiraProjectKey.trim(),
+          issueType: jiraIssueType.trim() || 'Bug',
+        }),
+      }),
+    onSuccess: async () => {
+      setJiraToken('');
+      setJiraError(null);
+      await qc.invalidateQueries({ queryKey: ['org', org?.id] });
+    },
+    onError: (e) => {
+      const planErr =
+        e instanceof ApiError ? parsePlanLimitError(e.body) : null;
+      if (planErr) {
+        setUpgradeError(planErr);
+        return;
+      }
+      setJiraError(
+        e instanceof ApiError ? e.message : 'Could not connect Jira',
+      );
+    },
+  });
+
+  const clearJira = useMutation({
+    mutationFn: () =>
+      api(`/api/v1/orgs/${org!.id}/jira`, { method: 'DELETE' }),
+    onSuccess: async () => {
+      setJiraError(null);
+      await qc.invalidateQueries({ queryKey: ['org', org?.id] });
+    },
+    onError: (e) => {
+      setJiraError(
+        e instanceof ApiError ? e.message : 'Could not disconnect Jira',
       );
     },
   });
@@ -329,6 +393,102 @@ export default function SettingsPage() {
           >
             {saveBrowserstack.isPending ? 'Saving…' : 'Save keys'}
           </Button>
+        ) : null}
+      </Card>
+
+      <Card className="space-y-3">
+        <div className="text-xs uppercase tracking-wide text-muted">Jira</div>
+        <p className="text-xs text-muted">
+          Dual-write defects to Jira Cloud. QAForge TCMS stays the canonical
+          record; connected Jira projects receive matching issues.
+        </p>
+        <div className="text-xs">
+          Status:{' '}
+          {orgQuery.data?.jiraConfigured ? (
+            <span className="text-success">Connected</span>
+          ) : (
+            <span className="text-muted">Not connected</span>
+          )}
+          {orgQuery.data?.jira ? (
+            <span className="text-muted">
+              {' '}
+              · {orgQuery.data.jira.projectKey} @ {orgQuery.data.jira.baseUrl}
+            </span>
+          ) : null}
+        </div>
+        {!canJira ? (
+          <ProFeatureNotice feature="Jira dual-write" planName="Enterprise">
+            Connect Jira after upgrading to sync defects outward.
+          </ProFeatureNotice>
+        ) : null}
+        {caps.canManageMembers && canJira ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Input
+              placeholder="https://your-domain.atlassian.net"
+              value={jiraBaseUrl}
+              onChange={(e) => setJiraBaseUrl(e.target.value)}
+              autoComplete="off"
+            />
+            <Input
+              placeholder="Atlassian email"
+              value={jiraEmail}
+              onChange={(e) => setJiraEmail(e.target.value)}
+              autoComplete="off"
+            />
+            <Input
+              type="password"
+              placeholder="API token"
+              value={jiraToken}
+              onChange={(e) => setJiraToken(e.target.value)}
+              autoComplete="off"
+            />
+            <Input
+              placeholder="Project key (e.g. QA)"
+              value={jiraProjectKey}
+              onChange={(e) => setJiraProjectKey(e.target.value)}
+              autoComplete="off"
+            />
+            <Input
+              placeholder="Issue type (Bug)"
+              value={jiraIssueType}
+              onChange={(e) => setJiraIssueType(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+        ) : caps.canManageMembers && !canJira ? null : (
+          <p className="text-xs text-muted">
+            Administrators can connect Jira on Enterprise.
+          </p>
+        )}
+        {jiraError ? <p className="text-sm text-danger">{jiraError}</p> : null}
+        {caps.canManageMembers && canJira ? (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              disabled={
+                saveJira.isPending ||
+                !jiraBaseUrl.trim() ||
+                !jiraEmail.trim() ||
+                !jiraToken.trim() ||
+                !jiraProjectKey.trim()
+              }
+              onClick={() => saveJira.mutate()}
+            >
+              {saveJira.isPending ? 'Connecting…' : 'Connect Jira'}
+            </Button>
+            {orgQuery.data?.jiraConfigured ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={clearJira.isPending}
+                onClick={() => clearJira.mutate()}
+              >
+                {clearJira.isPending ? 'Disconnecting…' : 'Disconnect'}
+              </Button>
+            ) : null}
+          </div>
         ) : null}
       </Card>
 
@@ -810,6 +970,12 @@ export default function SettingsPage() {
       >
         <p>{removing?.user.email} will lose access to this organization.</p>
       </ConfirmDialog>
+
+      <UpgradeModal
+        open={Boolean(upgradeError)}
+        error={upgradeError}
+        onClose={() => setUpgradeError(null)}
+      />
     </div>
   );
 }

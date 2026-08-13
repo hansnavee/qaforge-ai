@@ -1,6 +1,7 @@
 import type { AgentHandler } from '@qaforge/agent-sdk';
 import { ArtifactType } from '@qaforge/shared';
 import { prisma } from '@qaforge/database';
+import { syncBugToJira } from '../jira-sync.js';
 
 type BugAgentInput = {
   projectId: string;
@@ -16,7 +17,10 @@ type BugAgentInput = {
   }>;
 };
 
-export const bugAgent: AgentHandler<BugAgentInput, { bugCount: number }> = {
+export const bugAgent: AgentHandler<
+  BugAgentInput,
+  { bugCount: number; jiraSynced: number }
+> = {
   id: 'BUG_ANALYSIS',
   name: 'Bug Agent',
 
@@ -28,12 +32,14 @@ export const bugAgent: AgentHandler<BugAgentInput, { bugCount: number }> = {
     });
 
     const reports: Array<Record<string, unknown>> = [];
+    let jiraSynced = 0;
 
     for (const fail of input.failures) {
       let title = `Failed: ${fail.scenario}`;
       let description = fail.message;
       let rootCause = 'Observed failure during manual agent execution';
-      let suggestedFix = 'Review steps, selectors, and application state after login';
+      let suggestedFix =
+        'Review steps, selectors, and application state after login';
 
       try {
         const llm = await ctx.llm.complete({
@@ -75,21 +81,42 @@ export const bugAgent: AgentHandler<BugAgentInput, { bugCount: number }> = {
         evidenceKeys: fail.evidenceKeys as never,
       };
 
-      if (existing) {
-        await prisma.bug.update({
-          where: { id: existing.id },
-          data: payload,
+      const bug = existing
+        ? await prisma.bug.update({
+            where: { id: existing.id },
+            data: payload,
+          })
+        : await prisma.bug.create({
+            data: {
+              projectId: input.projectId,
+              executionId: ctx.executionId,
+              testCaseId: fail.testCaseId,
+              testResultId: fail.testResultId,
+              ...payload,
+            },
+          });
+
+      // Dual-write: TCMS is canonical; Jira when org connected + Enterprise.
+      let externalRef = bug.externalRef ?? null;
+      if (!externalRef) {
+        const sync = await syncBugToJira({
+          organizationId: ctx.organizationId,
+          bugId: bug.id,
+          title: payload.title,
+          description: payload.description,
+          severity: payload.severity,
+          stepsToReproduce: payload.stepsToReproduce,
         });
-      } else {
-        await prisma.bug.create({
-          data: {
-            projectId: input.projectId,
-            executionId: ctx.executionId,
-            testCaseId: fail.testCaseId,
-            testResultId: fail.testResultId,
-            ...payload,
-          },
-        });
+        if (sync.externalRef) {
+          externalRef = sync.externalRef;
+          jiraSynced += 1;
+        } else if (sync.error) {
+          await ctx.emit({
+            type: 'bugs.jira_warn',
+            phase: 'BUG_ANALYSIS',
+            message: `Jira sync skipped for ${fail.externalId}: ${sync.error}`,
+          });
+        }
       }
 
       reports.push({
@@ -98,21 +125,25 @@ export const bugAgent: AgentHandler<BugAgentInput, { bugCount: number }> = {
         rootCause,
         suggestedFix,
         evidenceKeys: fail.evidenceKeys,
+        externalRef,
       });
     }
 
     await ctx.putArtifactJson(ArtifactType.FAILURE_ANALYSIS, {
       summary: `${reports.length} bug report(s) filed`,
       failures: reports,
+      jiraSynced,
     });
 
     await ctx.emit({
       type: 'bugs.ready',
       phase: 'BUG_ANALYSIS',
-      message: `Bug Agent filed ${reports.length} report(s)`,
-      data: { bugCount: reports.length },
+      message: `Bug Agent filed ${reports.length} report(s)${
+        jiraSynced ? ` (${jiraSynced} synced to Jira)` : ''
+      }`,
+      data: { bugCount: reports.length, jiraSynced },
     });
 
-    return { bugCount: reports.length };
+    return { bugCount: reports.length, jiraSynced };
   },
 };

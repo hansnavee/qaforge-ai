@@ -9,8 +9,10 @@ import {
   Role,
   addOrgMemberSchema,
   createOrganizationSchema,
+  parseJiraConnectionConfig,
   roleRank,
   updateOrgMemberSchema,
+  verifyJiraConnection,
 } from '@qaforge/shared';
 import { AuditService } from '../common/audit.service';
 import { decrypt, encrypt, hasEncryptionKey } from '../common/encryption';
@@ -18,6 +20,20 @@ import { assertRole } from '../common/rbac';
 import { parseBody } from '../common/parse-body';
 import type { SessionUser } from '../auth/auth';
 import { PlanUsageService } from '../billing/plan-usage.service';
+import { z } from 'zod';
+
+const saveJiraSchema = z.object({
+  baseUrl: z.string().url().max(500),
+  email: z.string().email().max(320),
+  apiToken: z.string().min(8).max(2000),
+  projectKey: z
+    .string()
+    .trim()
+    .min(1)
+    .max(32)
+    .regex(/^[A-Za-z][A-Za-z0-9_]*$/),
+  issueType: z.string().trim().min(1).max(80).optional(),
+});
 
 function slugify(name: string): string {
   const base = name
@@ -126,12 +142,37 @@ export class OrgsService {
       },
     });
     if (!org) throw new NotFoundException('Organization not found');
-    const { browserstackEncrypted, ...rest } = org;
+    const { browserstackEncrypted, jiraEncrypted, ...rest } = org;
+    let jiraSummary: {
+      baseUrl: string;
+      email: string;
+      projectKey: string;
+      issueType: string;
+    } | null = null;
+    if (jiraEncrypted && hasEncryptionKey()) {
+      try {
+        const cfg = parseJiraConnectionConfig(
+          JSON.parse(decrypt(jiraEncrypted)),
+        );
+        if (cfg) {
+          jiraSummary = {
+            baseUrl: cfg.baseUrl,
+            email: cfg.email,
+            projectKey: cfg.projectKey,
+            issueType: cfg.issueType || 'Bug',
+          };
+        }
+      } catch {
+        jiraSummary = null;
+      }
+    }
     return {
       ...rest,
       memberships: canSeeMemberPii ? rest.memberships : [],
       role: membership.role,
       browserstackConfigured: Boolean(browserstackEncrypted),
+      jiraConfigured: Boolean(jiraEncrypted),
+      jira: jiraSummary,
     };
   }
 
@@ -182,6 +223,102 @@ export class OrgsService {
       return { username: parsed.username, accessKey: parsed.accessKey };
     } catch {
       throw new BadRequestException('BrowserStack keys could not be decrypted');
+    }
+  }
+
+  async saveJira(
+    userId: string,
+    orgId: string,
+    body: unknown,
+  ) {
+    await this.requireMembership(userId, orgId, Role.ADMIN);
+    await this.planUsage.assertFeature(orgId, 'jira', userId);
+    if (!hasEncryptionKey()) {
+      throw new BadRequestException('ENCRYPTION_KEY is not configured');
+    }
+    const input = parseBody(saveJiraSchema, body);
+    const config = parseJiraConnectionConfig({
+      baseUrl: input.baseUrl,
+      email: input.email,
+      apiToken: input.apiToken,
+      projectKey: input.projectKey,
+      issueType: input.issueType || 'Bug',
+    });
+    if (!config) {
+      throw new BadRequestException('Jira connection fields are incomplete');
+    }
+    try {
+      await verifyJiraConnection(config);
+    } catch (err) {
+      throw new BadRequestException(
+        err instanceof Error ? err.message : 'Jira connection failed',
+      );
+    }
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: {
+        jiraEncrypted: encrypt(
+          JSON.stringify({
+            baseUrl: config.baseUrl,
+            email: config.email,
+            apiToken: config.apiToken,
+            projectKey: config.projectKey,
+            issueType: config.issueType || 'Bug',
+          }),
+        ),
+      },
+    });
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'org.jira.connect',
+      resource: 'organization',
+      resourceId: orgId,
+      metadata: {
+        baseUrl: config.baseUrl,
+        projectKey: config.projectKey,
+        email: config.email,
+      },
+    });
+    return {
+      ok: true,
+      jiraConfigured: true,
+      jira: {
+        baseUrl: config.baseUrl,
+        email: config.email,
+        projectKey: config.projectKey,
+        issueType: config.issueType || 'Bug',
+      },
+    };
+  }
+
+  async clearJira(userId: string, orgId: string) {
+    await this.requireMembership(userId, orgId, Role.ADMIN);
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: { jiraEncrypted: null },
+    });
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'org.jira.disconnect',
+      resource: 'organization',
+      resourceId: orgId,
+      metadata: {},
+    });
+    return { ok: true, jiraConfigured: false, jira: null };
+  }
+
+  async readJiraConfig(orgId: string) {
+    const org = await prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { jiraEncrypted: true },
+    });
+    if (!org?.jiraEncrypted || !hasEncryptionKey()) return null;
+    try {
+      return parseJiraConnectionConfig(JSON.parse(decrypt(org.jiraEncrypted)));
+    } catch {
+      return null;
     }
   }
 

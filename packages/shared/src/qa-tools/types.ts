@@ -47,6 +47,7 @@ export type QaDefectInput = {
   severity?: string;
   testCaseId?: string;
   executionId?: string;
+  externalRef?: string | null;
 };
 
 export type QaDefect = QaDefectInput & { id: string; externalRef?: string | null };

@@ -34,5 +34,6 @@ export function usePlan() {
     canExportsHtml: Boolean(features?.exportsHtml) || planExempt,
     canEmailNotify: Boolean(features?.emailNotify) || planExempt,
     canQaAgent: Boolean(features?.qaAgentFull) || planExempt,
+    canJira: Boolean(features?.jira) || planExempt,
   };
 }

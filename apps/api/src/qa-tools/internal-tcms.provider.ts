@@ -225,6 +225,7 @@ export function createInternalTcmsProvider(): QaToolProvider {
             title: input.title.trim(),
             description: input.description ?? '',
             severity: input.severity ?? 'medium',
+            externalRef: input.externalRef ?? null,
           },
         });
         return {
@@ -234,6 +235,7 @@ export function createInternalTcmsProvider(): QaToolProvider {
           severity: created.severity,
           testCaseId: created.testCaseId ?? undefined,
           executionId: created.executionId ?? undefined,
+          externalRef: created.externalRef ?? undefined,
         };
       },
     },

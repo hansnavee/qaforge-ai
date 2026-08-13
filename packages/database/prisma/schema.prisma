@@ -77,6 +77,8 @@ model Organization {
   localRunners     LocalRunner[]
   /// AES blob { username, accessKey } for BrowserStack Cloud
   browserstackEncrypted String?
+  /// AES blob { baseUrl, email, apiToken, projectKey, issueType? } for Jira dual-write
+  jiraEncrypted    String?
 }
 
 /// Paired laptop Playwright runner for Local AI execution (no Redis/DB on the PC).
@@ -635,6 +637,8 @@ model Bug {
   description    String      @db.Text
   stepsToReproduce String?   @db.Text
   evidenceKeys   Json?
+  /// External tracker key/URL (e.g. Jira ISSUE-123 or browse URL)
+  externalRef    String?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
   project        Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -644,6 +648,7 @@ model Bug {
 
   @@index([projectId])
   @@index([executionId])
+  @@index([externalRef])
 }
 
 model AgentRun {

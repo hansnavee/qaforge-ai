@@ -8,3 +8,4 @@ export * from './requirement-review/index.js';
 export * from './stlc/index.js';
 export * from './test-design/index.js';
 export * from './qa-tools/index.js';
+export * from './integrations/index.js';

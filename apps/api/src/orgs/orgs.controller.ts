@@ -42,6 +42,23 @@ export class OrgsController {
     return this.orgs.saveBrowserstack(user.id, orgId, body);
   }
 
+  @Patch(':orgId/jira')
+  saveJira(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Body() body: unknown,
+  ) {
+    return this.orgs.saveJira(user.id, orgId, body);
+  }
+
+  @Delete(':orgId/jira')
+  clearJira(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+  ) {
+    return this.orgs.clearJira(user.id, orgId);
+  }
+
   @Post(':orgId/members')
   addMember(
     @CurrentUser() user: SessionUser,

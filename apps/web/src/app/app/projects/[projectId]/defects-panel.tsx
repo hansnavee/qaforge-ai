@@ -17,6 +17,7 @@ type BugRow = {
   evidenceKeys?: string[] | null;
   testCaseId?: string | null;
   executionId?: string | null;
+  externalRef?: string | null;
   testCase?: { externalId?: string | null; scenario?: string | null } | null;
 };
 
@@ -113,6 +114,18 @@ export function DefectsPanel({
               <p className="mt-3 whitespace-pre-wrap text-sm text-muted">
                 {b.description}
               </p>
+              {b.externalRef ? (
+                <p className="mt-2 text-xs">
+                  <a
+                    href={b.externalRef}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-accent underline"
+                  >
+                    Jira: {b.externalRef.replace(/\/browse\//, ' · ')}
+                  </a>
+                </p>
+              ) : null}
               {b.stepsToReproduce ? (
                 <pre className="mt-2 overflow-auto rounded bg-bg-elevated p-2 text-xs text-muted">
                   {b.stepsToReproduce}

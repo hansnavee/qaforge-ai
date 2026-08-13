@@ -62,6 +62,9 @@ export function planLimitMessage(err: PlanLimitErrorBody): string {
     if (err.feature === 'qaAgentFull') {
       return 'AI QA Engineer Execute requires the Enterprise plan. Suggest (preview) stays available on lower plans.';
     }
+    if (err.feature === 'jira') {
+      return 'Jira dual-write requires the Enterprise plan. Upgrade to connect Jira.';
+    }
     return `${err.feature} requires a Pro plan. Upgrade to unlock automation features.`;
   }
   if (err.usageType) {
