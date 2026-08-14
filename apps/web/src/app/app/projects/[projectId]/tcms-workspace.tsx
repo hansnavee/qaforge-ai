@@ -14,8 +14,33 @@ import { TcmsReportsPanel } from './tcms-reports-panel';
 import { TcmsResultsPanel } from './tcms-results-panel';
 import { TcmsRunsPanel } from './tcms-runs-panel';
 
+function TcmsWorkspaceHome({ projectId }: { projectId: string }) {
+  return (
+    <div className="max-w-xl space-y-3 pt-2">
+      <p className="text-sm text-muted">
+        Pick this cycle's work, let the AI agent turn it into cases, then run
+        it. Jira import and BrowserStack run land here in later steps.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Link href={`/app/projects/${projectId}?tab=cases`}>
+          <Button variant="secondary" size="sm">
+            Cases
+          </Button>
+        </Link>
+        <Link href={`/app/projects/${projectId}?tab=runs`}>
+          <Button variant="secondary" size="sm">
+            Runs
+          </Button>
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 function parseTab(raw: string | null): TcmsTabId {
   if (
+    raw === 'workspace' ||
+    raw === 'cases' ||
     raw === 'runs' ||
     raw === 'results' ||
     raw === 'reports' ||
@@ -24,7 +49,7 @@ function parseTab(raw: string | null): TcmsTabId {
   ) {
     return raw;
   }
-  return 'cases';
+  return 'workspace';
 }
 
 export function TcmsWorkspace() {
@@ -80,6 +105,9 @@ export function TcmsWorkspace() {
       description={project.description}
       active={tab}
     >
+      {tab === 'workspace' ? (
+        <TcmsWorkspaceHome projectId={projectId} />
+      ) : null}
       {tab === 'cases' ? (
         <DesignCasesPanel projectId={projectId} canEdit={caps.canDesign} />
       ) : null}

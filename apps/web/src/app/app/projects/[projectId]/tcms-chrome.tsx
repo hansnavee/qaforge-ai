@@ -8,6 +8,7 @@ import { cn } from '@/lib/cn';
 import { useOrgCaps } from '@/lib/use-org';
 
 export const TCMS_TABS = [
+  { id: 'workspace', label: 'Workspace' },
   { id: 'cases', label: 'Cases' },
   { id: 'runs', label: 'Runs' },
   { id: 'results', label: 'Results' },
@@ -45,7 +46,7 @@ export function TcmsProjectChrome({
           </Link>
           <span>/</span>
           <Link
-            href={`/app/projects/${projectId}?tab=cases`}
+            href={`/app/projects/${projectId}?tab=workspace`}
             className="hover:text-fg"
           >
             {projectName}
