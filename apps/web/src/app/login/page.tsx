@@ -5,7 +5,9 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { Button } from '@/components/Button';
 import { Input } from '@/components/Input';
+import { api } from '@/lib/api';
 import { authClient } from '@/lib/auth-client';
+import { pathAfterOrgs, type OrgSummary } from '@/lib/org';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -27,7 +29,12 @@ export default function LoginPage() {
         setError(err.message ?? 'Login failed');
         return;
       }
-      router.push('/app/orgs');
+      try {
+        const orgs = await api<OrgSummary[]>('/api/v1/orgs');
+        router.push(pathAfterOrgs(Array.isArray(orgs) ? orgs : []));
+      } catch {
+        router.push('/app/orgs');
+      }
     } catch {
       setError('Unable to reach auth service. Try again when the API is up.');
     } finally {

@@ -5,6 +5,8 @@ import { usePathname, useSearchParams } from 'next/navigation';
 import { STLC_PHASES } from '@qaforge/shared';
 import { cn } from '@/lib/cn';
 import { SHOW_AI_STLC_UI } from '@/lib/product-flags';
+import { useOrgCaps } from '@/lib/use-org';
+import { orgWorkspacePath } from '@/lib/org';
 import { ThemeToggle } from './ThemeToggle';
 
 const TCMS_TABS = [
@@ -19,7 +21,9 @@ const TCMS_TABS = [
 export function Sidebar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const onDashboard =
+  const { org } = useOrgCaps();
+  const workspaceHref = org ? orgWorkspacePath(org.id) : '/app/orgs';
+  const onProjects =
     pathname === '/app/projects' || pathname === '/app' || pathname === '/app/';
   const projectMatch = pathname.match(/^\/app\/projects\/([^/]+)/);
   const projectId =
@@ -30,11 +34,12 @@ export function Sidebar() {
   const phaseParam = (searchParams.get('phase') ?? '').toUpperCase();
   const onSettings = pathname.startsWith('/app/settings');
   const onBilling = pathname.startsWith('/app/billing');
-  const onOrgs = pathname.startsWith('/app/orgs');
+  const onWorkspace = pathname.includes('/workspace');
+  const onOrgs = pathname.startsWith('/app/orgs') && !onWorkspace;
 
   return (
     <aside className="flex w-full shrink-0 flex-col border-b border-border bg-bg-elevated/60 px-3 py-3 md:w-56 md:border-b-0 md:border-r md:py-4">
-      <Link href="/app/projects" className="mb-3 px-2 md:mb-6">
+      <Link href={workspaceHref} className="mb-3 px-2 md:mb-6">
         <div className="text-sm font-semibold tracking-tight text-fg">
           QAForge
         </div>
@@ -45,15 +50,26 @@ export function Sidebar() {
 
       <nav className="flex flex-row gap-1 overflow-x-auto md:flex-1 md:flex-col md:overflow-visible">
         <Link
-          href="/app/projects"
+          href={workspaceHref}
           className={cn(
             'whitespace-nowrap rounded-lg px-2.5 py-2 text-sm transition',
-            onDashboard
+            onWorkspace
               ? 'bg-accent/10 text-accent'
               : 'text-muted hover:bg-surface hover:text-fg',
           )}
         >
-          Dashboard
+          Workspace
+        </Link>
+        <Link
+          href="/app/projects"
+          className={cn(
+            'whitespace-nowrap rounded-lg px-2.5 py-2 text-sm transition',
+            onProjects
+              ? 'bg-accent/10 text-accent'
+              : 'text-muted hover:bg-surface hover:text-fg',
+          )}
+        >
+          Projects
         </Link>
 
         <div className="mt-3 hidden px-2.5 text-[10px] font-semibold uppercase tracking-wide text-muted md:block">

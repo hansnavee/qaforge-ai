@@ -10,6 +10,7 @@ import { Card } from '@/components/Card';
 import { Input } from '@/components/Input';
 import { api, ApiError } from '@/lib/api';
 import {
+  orgWorkspacePath,
   pickOrg,
   setSelectedOrgId,
   type OrgSummary,
@@ -42,7 +43,7 @@ export default function OrganizationsPage() {
   function enterOrg(org: OrgSummary) {
     setSelectedOrgId(org.id);
     void queryClient.invalidateQueries({ queryKey: ['orgs'] });
-    router.push('/app/projects');
+    router.push(orgWorkspacePath(org.id));
   }
 
   async function createOrg(e: React.FormEvent) {
@@ -62,7 +63,7 @@ export default function OrganizationsPage() {
       setSelectedOrgId(org.id);
       setOrgName('');
       await queryClient.invalidateQueries({ queryKey: ['orgs'] });
-      router.push('/app/projects');
+      router.push(orgWorkspacePath(org.id));
     } catch (err) {
       setFormError(
         err instanceof ApiError

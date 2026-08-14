@@ -31,10 +31,23 @@ export function setSelectedOrgId(orgId: string) {
   }
 }
 
+export function orgWorkspacePath(orgId: string) {
+  return `/app/orgs/${orgId}/workspace`;
+}
+
 export function pickOrg(orgs: OrgSummary[]): OrgSummary | undefined {
   if (orgs.length === 0) return undefined;
   const stored = readStoredOrgId();
   return (stored ? orgs.find((o) => o.id === stored) : undefined) ?? orgs[0];
+}
+
+/** One org → its Workspace. Zero or many → org picker. */
+export function pathAfterOrgs(orgs: OrgSummary[]): string {
+  if (orgs.length === 1) {
+    setSelectedOrgId(orgs[0].id);
+    return orgWorkspacePath(orgs[0].id);
+  }
+  return '/app/orgs';
 }
 
 /** Selected org for the signed-in user (localStorage, then first org). */

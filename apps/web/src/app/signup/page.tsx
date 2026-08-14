@@ -7,7 +7,7 @@ import { Button } from '@/components/Button';
 import { Input } from '@/components/Input';
 import { ApiError, api } from '@/lib/api';
 import { authClient } from '@/lib/auth-client';
-import { setSelectedOrgId } from '@/lib/org';
+import { orgWorkspacePath, setSelectedOrgId } from '@/lib/org';
 
 export default function SignupPage() {
   const router = useRouter();
@@ -55,7 +55,11 @@ export default function SignupPage() {
         router.push('/login');
         return;
       }
-      router.push('/app/orgs');
+      router.push(
+        created.organization?.id
+          ? orgWorkspacePath(created.organization.id)
+          : '/app/orgs',
+      );
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setError(err.message);
