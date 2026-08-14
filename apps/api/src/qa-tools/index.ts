@@ -4,4 +4,5 @@ export {
   createJiraProvider,
   dualWriteDefectExternalRef,
   jiraConfigFromEncrypted,
+  listJiraTicketCandidates,
 } from './jira.provider.js';

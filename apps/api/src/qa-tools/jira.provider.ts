@@ -1,24 +1,44 @@
 import { prisma } from '@qaforge/database';
 import {
   QA_TOOL_PROVIDER,
+  browseJiraProjectIssues,
   createJiraIssue,
+  expandJiraEpic,
+  fetchJiraIssuesByKeys,
   parseJiraConnectionConfig,
+  searchJiraIssuesByPrompt,
   type JiraConnectionConfig,
+  type JiraTicketCandidate,
+  type JiraTicketSelectionMode,
   type QaDefect,
   type QaDefectInput,
+  type QaRequirement,
   type QaToolContext,
   type QaToolProvider,
 } from '@qaforge/shared';
 
 /**
- * Jira as an external defect sink (Agent → tools → Jira).
- * Does not own TCMS memory — dual-write callers create TCMS first, then this.
+ * Jira as an external tool provider (requirements in + defects out).
+ * TCMS remains canonical memory.
  */
 export function createJiraProvider(
   config: JiraConnectionConfig,
 ): QaToolProvider {
   return {
     id: QA_TOOL_PROVIDER.JIRA,
+    requirement: {
+      async list(_ctx: QaToolContext): Promise<QaRequirement[]> {
+        const rows = await browseJiraProjectIssues(config, 50);
+        return rows
+          .filter((r) => r.selectable)
+          .map((r) => ({
+            id: r.id,
+            key: r.key,
+            title: r.summary,
+            description: r.description,
+          }));
+      },
+    },
     testcase: {
       async list() {
         return [];
@@ -28,7 +48,10 @@ export function createJiraProvider(
       },
     },
     defect: {
-      async create(_ctx: QaToolContext, input: QaDefectInput): Promise<QaDefect> {
+      async create(
+        _ctx: QaToolContext,
+        input: QaDefectInput,
+      ): Promise<QaDefect> {
         const issue = await createJiraIssue(config, {
           title: input.title,
           description: input.description,
@@ -48,9 +71,30 @@ export function createJiraProvider(
   };
 }
 
+export async function listJiraTicketCandidates(
+  config: JiraConnectionConfig,
+  opts: {
+    mode: JiraTicketSelectionMode;
+    prompt?: string;
+    keys?: string[];
+    epicKey?: string;
+  },
+): Promise<JiraTicketCandidate[]> {
+  switch (opts.mode) {
+    case 'PROMPT':
+      return searchJiraIssuesByPrompt(config, opts.prompt ?? '', 50);
+    case 'KEYS':
+      return fetchJiraIssuesByKeys(config, opts.keys ?? []);
+    case 'EPIC':
+      return expandJiraEpic(config, opts.epicKey ?? '');
+    case 'BROWSE':
+    default:
+      return browseJiraProjectIssues(config, 50);
+  }
+}
+
 export type OrgJiraConfig = JiraConnectionConfig;
 
-/** Decrypt org Jira config when present. Caller supplies decrypt fn. */
 export function jiraConfigFromEncrypted(
   encrypted: string | null | undefined,
   decryptFn: (payload: string) => string,
@@ -64,11 +108,6 @@ export function jiraConfigFromEncrypted(
   }
 }
 
-/**
- * Dual-write: TCMS bug is canonical; optional Jira issue when configured.
- * Updates Bug.externalRef with the Jira browse URL on success.
- * Jira failures are returned as warnings — TCMS write is never rolled back.
- */
 export async function dualWriteDefectExternalRef(opts: {
   bugId: string;
   orgId: string;
@@ -78,7 +117,6 @@ export async function dualWriteDefectExternalRef(opts: {
   severity?: string;
   stepsToReproduce?: string;
   decryptFn: (payload: string) => string;
-  /** When false, skip Jira even if configured (Suggest / no plan). */
   syncJira: boolean;
 }): Promise<{ externalRef: string | null; jiraError?: string }> {
   if (!opts.syncJira) return { externalRef: null };

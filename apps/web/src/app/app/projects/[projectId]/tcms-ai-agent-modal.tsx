@@ -152,6 +152,8 @@ export function TcmsAiAgentModal({
           <p className="text-muted text-xs">
             Describe a QA goal. Suggest returns a plan and case preview. Execute
             generates and applies cases through the Internal TCMS tool provider.
+            Tip: Import from Jira first, then keep “Include project requirements”
+            on so the agent uses those tickets.
           </p>
           {!canQaAgent ? (
             <ProFeatureNotice

@@ -33,6 +33,7 @@ import {
   type AiGenerateModalDefaults,
 } from './tcms-ai-generate-modal';
 import { TcmsAiAgentModal } from './tcms-ai-agent-modal';
+import { TcmsJiraImportModal } from './tcms-jira-import-modal';
 import {
   TcmsCaseModal,
   type CaseDraft,
@@ -201,6 +202,7 @@ export function DesignCasesPanel({
   const [purgeIds, setPurgeIds] = useState<string[] | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
+  const [jiraImportOpen, setJiraImportOpen] = useState(false);
   const [aiDefaults, setAiDefaults] = useState<AiGenerateModalDefaults | null>(
     null,
   );
@@ -809,6 +811,14 @@ export function DesignCasesPanel({
                   type="button"
                   size="sm"
                   variant="secondary"
+                  onClick={() => setJiraImportOpen(true)}
+                >
+                  Import from Jira
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
                   onClick={() => setAgentOpen(true)}
                 >
                   AI QA Engineer
@@ -1054,6 +1064,13 @@ export function DesignCasesPanel({
         }
         onClose={() => setAgentOpen(false)}
         onApplied={() => void invalidate()}
+      />
+
+      <TcmsJiraImportModal
+        open={jiraImportOpen}
+        projectId={projectId}
+        onClose={() => setJiraImportOpen(false)}
+        onImported={() => void invalidate()}
       />
 
       <TcmsImportModal

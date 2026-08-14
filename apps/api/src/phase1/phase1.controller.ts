@@ -267,6 +267,26 @@ export class Phase1Controller {
     return this.phase1.runAiAgentIntent(user.id, orgId, projectId, body);
   }
 
+  @Post('orgs/:orgId/projects/:projectId/integrations/jira/tickets')
+  listJiraTickets(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    return this.phase1.listJiraTickets(user.id, orgId, projectId, body);
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/integrations/jira/import-requirements')
+  importJiraRequirements(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    return this.phase1.importJiraRequirements(user.id, orgId, projectId, body);
+  }
+
   @Get('orgs/:orgId/projects/:projectId/ai-prompts')
   listAiPrompts(
     @CurrentUser() user: SessionUser,

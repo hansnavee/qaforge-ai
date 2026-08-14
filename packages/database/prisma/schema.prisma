@@ -304,6 +304,8 @@ model Requirement {
   sourcePage           Int?
   sourceSection        String?
   sourceText           String?  @db.Text
+  /// External tracker URL (e.g. Jira browse link)
+  externalRef          String?
   acceptanceCriteria   Json?
   businessRules        Json?
   dependencies         Json?
@@ -347,6 +349,7 @@ model Requirement {
   @@index([reviewStatus])
   @@index([featureGroupId])
   @@index([businessImpact])
+  @@index([externalRef])
 }
 
 /// Clarification questions from Business + Functional review (not STLC ClarificationRound).

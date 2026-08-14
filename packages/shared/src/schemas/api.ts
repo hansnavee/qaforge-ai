@@ -454,6 +454,23 @@ export const aiAgentIntentSchema = z.object({
 
 export type AiAgentIntentInput = z.infer<typeof aiAgentIntentSchema>;
 
+export const jiraTicketListSchema = z.object({
+  mode: z.enum(['BROWSE', 'PROMPT', 'KEYS', 'EPIC']).default('BROWSE'),
+  prompt: z.string().max(2000).optional(),
+  keys: z.array(z.string().min(1).max(32)).max(50).optional(),
+  epicKey: z.string().min(1).max(32).optional(),
+});
+
+export type JiraTicketListInput = z.infer<typeof jiraTicketListSchema>;
+
+export const jiraImportRequirementsSchema = z.object({
+  keys: z.array(z.string().min(1).max(32)).min(1).max(50),
+});
+
+export type JiraImportRequirementsInput = z.infer<
+  typeof jiraImportRequirementsSchema
+>;
+
 export const testCaseBulkCreateSchema = z.object({
   folderId: z.string().min(1).nullable().optional(),
   templateId: z.string().min(1).nullable().optional(),

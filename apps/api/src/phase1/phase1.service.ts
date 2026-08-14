@@ -25,6 +25,8 @@ import {
   evaluateRequirementsReadiness,
   generateApplySchema,
   aiAgentIntentSchema,
+  jiraTicketListSchema,
+  jiraImportRequirementsSchema,
   generateTestCasesSchema,
   credsFromCases,
   extractAppUrlFromText,
@@ -55,9 +57,11 @@ import {
   updateTcmsFolderSchema,
   updateTcmsRunSchema,
   upsertPhaseDoc,
+  isJiraEpicType,
   type CaseStatus,
   type DesignTechnique,
   type ImportedCaseRow,
+  type JiraTicketCandidate,
   type StlcPhaseDocsMap,
 } from '@qaforge/shared';
 import {
@@ -81,6 +85,7 @@ import { QueueService } from '../queue/queue.service';
 import { RunnersService } from '../runners/runners.service';
 import { PlanUsageService } from '../billing/plan-usage.service';
 import { createInternalTcmsProvider } from '../qa-tools/internal-tcms.provider';
+import { listJiraTicketCandidates } from '../qa-tools/jira.provider';
 import { AiGenerateCasesService } from './ai-generate-cases.service';
 import {
   isAllowedRequirementFile,
@@ -4008,6 +4013,282 @@ export class Phase1Service {
       updated,
       cases: casesOut,
       provider: 'internal-tcms',
+    };
+  }
+
+  /**
+   * List Jira tickets from the connected org project (browse / prompt / keys / epic).
+   */
+  async listJiraTickets(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    await this.planUsage.assertFeature(orgId, 'jira', userId);
+    if (!hasEncryptionKey()) {
+      throw new BadRequestException('ENCRYPTION_KEY is not configured');
+    }
+    const input = parseBody(jiraTicketListSchema, body);
+    const config = await this.orgs.readJiraConfig(orgId);
+    if (!config) {
+      throw new BadRequestException(
+        'Connect Jira in Settings before browsing tickets.',
+      );
+    }
+    try {
+      const tickets = await listJiraTicketCandidates(config, {
+        mode: input.mode,
+        prompt: input.prompt,
+        keys: input.keys,
+        epicKey: input.epicKey,
+      });
+      return {
+        projectKey: config.projectKey,
+        mode: input.mode,
+        tickets,
+      };
+    } catch (err) {
+      throw new BadRequestException(
+        err instanceof Error ? err.message : 'Jira ticket list failed',
+      );
+    }
+  }
+
+  /**
+   * Import selected Jira keys into TCMS requirements (canonical), with hierarchy.
+   */
+  async importJiraRequirements(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    await this.planUsage.assertFeature(orgId, 'jira', userId);
+    if (!hasEncryptionKey()) {
+      throw new BadRequestException('ENCRYPTION_KEY is not configured');
+    }
+    const input = parseBody(jiraImportRequirementsSchema, body);
+    const config = await this.orgs.readJiraConfig(orgId);
+    if (!config) {
+      throw new BadRequestException(
+        'Connect Jira in Settings before importing requirements.',
+      );
+    }
+
+    let tickets: JiraTicketCandidate[];
+    try {
+      tickets = await listJiraTicketCandidates(config, {
+        mode: 'KEYS',
+        keys: input.keys,
+      });
+    } catch (err) {
+      throw new BadRequestException(
+        err instanceof Error ? err.message : 'Jira fetch failed',
+      );
+    }
+
+    // Auto-include direct parents of sub-tasks so hierarchy is not orphaned.
+    const parentKeys = [
+      ...new Set(
+        tickets
+          .map((t) => t.parentKey)
+          .filter((k): k is string => Boolean(k)),
+      ),
+    ];
+    const missingParents = parentKeys.filter(
+      (k) => !tickets.some((t) => t.key === k),
+    );
+    if (missingParents.length) {
+      const parents = await listJiraTicketCandidates(config, {
+        mode: 'KEYS',
+        keys: missingParents,
+      });
+      const byKey = new Map(tickets.map((t) => [t.key, t]));
+      for (const p of parents) byKey.set(p.key, p);
+      tickets = [...byKey.values()];
+    }
+
+    const skippedBugs: string[] = [];
+    const importable = tickets.filter((t) => {
+      if (t.isBug) {
+        skippedBugs.push(t.key);
+        return false;
+      }
+      return true;
+    });
+    if (!importable.length) {
+      throw new BadRequestException(
+        skippedBugs.length
+          ? `No importable requirements (skipped bugs: ${skippedBugs.join(', ')})`
+          : 'No Jira issues found for the selected keys',
+      );
+    }
+
+    const featureGroupIdByEpic = new Map<string, string>();
+    const requirementIdByKey = new Map<string, string>();
+    let created = 0;
+    let updated = 0;
+
+    // Epics first so FeatureGroups exist before children.
+    const ordered = [...importable].sort((a, b) => {
+      const ae = isJiraEpicType(a.issueType) ? 0 : a.parentKey ? 2 : 1;
+      const be = isJiraEpicType(b.issueType) ? 0 : b.parentKey ? 2 : 1;
+      return ae - be;
+    });
+
+    for (const ticket of ordered) {
+      let featureGroupId: string | null = null;
+      const epicKey =
+        ticket.epicKey && ticket.epicKey !== ticket.key
+          ? ticket.epicKey
+          : isJiraEpicType(ticket.issueType)
+            ? ticket.key
+            : null;
+
+      if (epicKey) {
+        const cached = featureGroupIdByEpic.get(epicKey);
+        if (cached) {
+          featureGroupId = cached;
+        } else {
+          const epicTicket =
+            ordered.find((t) => t.key === epicKey) ??
+            (ticket.key === epicKey ? ticket : null);
+          const name = epicTicket?.summary ?? epicKey;
+          const fg = await prisma.featureGroup.upsert({
+            where: {
+              projectId_featureKey: { projectId, featureKey: epicKey },
+            },
+            create: {
+              projectId,
+              featureKey: epicKey,
+              name,
+              businessArea: 'Jira',
+            },
+            update: { name },
+          });
+          featureGroupIdByEpic.set(epicKey, fg.id);
+          featureGroupId = fg.id;
+        }
+      }
+
+      const description =
+        ticket.description ||
+        `Imported from Jira ${ticket.key} (${ticket.issueType}).`;
+      const existing = await prisma.requirement.findUnique({
+        where: {
+          projectId_requirementKey: {
+            projectId,
+            requirementKey: ticket.key,
+          },
+        },
+      });
+
+      if (existing) {
+        const row = await prisma.requirement.update({
+          where: { id: existing.id },
+          data: {
+            title: ticket.summary,
+            description,
+            type: 'FUNCTIONAL',
+            primaryType: 'FUNCTIONAL',
+            secondaryType: ticket.issueType,
+            status: 'EXTRACTED',
+            intentSource: 'EXPLICIT',
+            externalRef: ticket.url,
+            sourceSection: ticket.issueType,
+            featureGroupId,
+            analysisStale: true,
+          },
+        });
+        requirementIdByKey.set(ticket.key, row.id);
+        updated += 1;
+      } else {
+        const row = await prisma.requirement.create({
+          data: {
+            projectId,
+            requirementKey: ticket.key,
+            title: ticket.summary,
+            description,
+            type: 'FUNCTIONAL',
+            primaryType: 'FUNCTIONAL',
+            secondaryType: ticket.issueType,
+            status: 'EXTRACTED',
+            intentSource: 'EXPLICIT',
+            externalRef: ticket.url,
+            sourceSection: ticket.issueType,
+            featureGroupId,
+          },
+        });
+        requirementIdByKey.set(ticket.key, row.id);
+        created += 1;
+      }
+    }
+
+    // Parent ↔ child relations (child DEPENDS_ON parent).
+    let relations = 0;
+    for (const ticket of importable) {
+      if (!ticket.parentKey) continue;
+      const fromId = requirementIdByKey.get(ticket.key);
+      const toId = requirementIdByKey.get(ticket.parentKey);
+      if (!fromId || !toId) continue;
+      try {
+        await prisma.requirementRelation.upsert({
+          where: {
+            fromRequirementId_toRequirementId_relationType: {
+              fromRequirementId: fromId,
+              toRequirementId: toId,
+              relationType: 'DEPENDS_ON',
+            },
+          },
+          create: {
+            projectId,
+            fromRequirementId: fromId,
+            toRequirementId: toId,
+            relationType: 'DEPENDS_ON',
+            source: 'EXTRACTION',
+            detail: `Jira parent ${ticket.parentKey}`,
+            confidence: 1,
+          },
+          update: {
+            detail: `Jira parent ${ticket.parentKey}`,
+          },
+        });
+        relations += 1;
+      } catch {
+        /* ignore unique races */
+      }
+    }
+
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'jira.requirements.import',
+      resource: 'project',
+      resourceId: projectId,
+      metadata: {
+        created,
+        updated,
+        relations,
+        skippedBugs,
+        keys: importable.map((t) => t.key),
+      },
+    });
+
+    return {
+      created,
+      updated,
+      relations,
+      skippedBugs,
+      requirements: importable.map((t) => ({
+        key: t.key,
+        title: t.summary,
+        issueType: t.issueType,
+        externalRef: t.url,
+        id: requirementIdByKey.get(t.key) ?? null,
+      })),
     };
   }
 
