@@ -27,7 +27,7 @@ export default function LoginPage() {
         setError(err.message ?? 'Login failed');
         return;
       }
-      router.push('/app/projects');
+      router.push('/app/orgs');
     } catch {
       setError('Unable to reach auth service. Try again when the API is up.');
     } finally {
