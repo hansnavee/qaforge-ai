@@ -54,7 +54,28 @@ const ISSUE_FIELD_LIST = [
 ];
 
 function normalizeBaseUrl(raw: string): string {
-  return raw.trim().replace(/\/+$/, '');
+  return normalizeJiraSiteUrl(raw) ?? raw.trim().replace(/\/+$/, '');
+}
+
+/** Site origin only, with https if the user omitted the scheme. */
+export function normalizeJiraSiteUrl(raw: string): string | null {
+  let s = raw.trim();
+  if (!s) return null;
+  if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
+  try {
+    const u = new URL(s);
+    if (!u.hostname) return null;
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
+/** Project key (QA), not an issue key (QA-12). */
+export function normalizeJiraProjectKey(raw: string): string | null {
+  const t = raw.trim().toUpperCase().replace(/^["']|["']$/g, '');
+  const m = t.match(/^([A-Z][A-Z0-9_]*)/);
+  return m?.[1] ?? null;
 }
 
 function toBase64(value: string): string {
@@ -135,18 +156,24 @@ export function parseJiraConnectionConfig(
 ): JiraConnectionConfig | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
-  const baseUrl = typeof o.baseUrl === 'string' ? o.baseUrl.trim() : '';
+  const baseUrl =
+    typeof o.baseUrl === 'string' ? normalizeJiraSiteUrl(o.baseUrl) : null;
   const email = typeof o.email === 'string' ? o.email.trim() : '';
-  const apiToken = typeof o.apiToken === 'string' ? o.apiToken.trim() : '';
+  const apiToken =
+    typeof o.apiToken === 'string'
+      ? o.apiToken.trim().replace(/^["']|["']$/g, '')
+      : '';
   const projectKey =
-    typeof o.projectKey === 'string' ? o.projectKey.trim().toUpperCase() : '';
+    typeof o.projectKey === 'string'
+      ? normalizeJiraProjectKey(o.projectKey)
+      : null;
   const issueType =
     typeof o.issueType === 'string' && o.issueType.trim()
       ? o.issueType.trim()
       : 'Bug';
   if (!baseUrl || !email || !apiToken || !projectKey) return null;
   return {
-    baseUrl: normalizeBaseUrl(baseUrl),
+    baseUrl,
     email,
     apiToken,
     projectKey,

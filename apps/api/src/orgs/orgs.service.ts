@@ -9,6 +9,8 @@ import {
   Role,
   addOrgMemberSchema,
   createOrganizationSchema,
+  normalizeJiraProjectKey,
+  normalizeJiraSiteUrl,
   parseJiraConnectionConfig,
   roleRank,
   updateOrgMemberSchema,
@@ -23,15 +25,45 @@ import { PlanUsageService } from '../billing/plan-usage.service';
 import { z } from 'zod';
 
 const saveJiraSchema = z.object({
-  baseUrl: z.string().url().max(500),
-  email: z.string().email().max(320),
-  apiToken: z.string().min(8).max(2000),
+  baseUrl: z
+    .string()
+    .trim()
+    .min(1, 'Site URL is required')
+    .max(500)
+    .transform((v) => normalizeJiraSiteUrl(v) ?? v)
+    .pipe(
+      z.string().url({
+        message:
+          'Use your Jira site, e.g. https://your-domain.atlassian.net',
+      }),
+    ),
+  email: z
+    .string()
+    .trim()
+    .min(3)
+    .max(320)
+    .refine((v) => v.includes('@'), {
+      message: 'Use the Atlassian account email for this API token',
+    }),
+  apiToken: z
+    .string()
+    .trim()
+    .transform((v) => v.replace(/^["']|["']$/g, ''))
+    .pipe(z.string().min(8, 'API token looks too short').max(4000)),
   projectKey: z
     .string()
     .trim()
-    .min(1)
-    .max(32)
-    .regex(/^[A-Za-z][A-Za-z0-9_]*$/),
+    .min(1, 'Project key is required')
+    .max(64)
+    .transform((v) => normalizeJiraProjectKey(v) ?? v)
+    .pipe(
+      z
+        .string()
+        .regex(
+          /^[A-Z][A-Z0-9_]*$/,
+          'Use the project key (e.g. QA), not the project name',
+        ),
+    ),
   issueType: z.string().trim().min(1).max(80).optional(),
 });
 

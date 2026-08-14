@@ -400,7 +400,9 @@ export default function SettingsPage() {
         <div className="text-xs uppercase tracking-wide text-muted">Jira</div>
         <p className="text-xs text-muted">
           Dual-write defects to Jira Cloud. QAForge TCMS stays the canonical
-          record; connected Jira projects receive matching issues.
+          record; connected Jira projects receive matching issues. Use the
+          site host (your-domain.atlassian.net) and the project key (QA), not
+          an issue key like QA-12.
         </p>
         <div className="text-xs">
           Status:{' '}

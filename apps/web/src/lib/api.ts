@@ -19,11 +19,22 @@ function errorMessage(data: unknown, fallback: string): string {
   if (typeof msg === 'string') return msg;
   if (Array.isArray(msg)) return msg.map(String).join(', ');
   if (msg && typeof msg === 'object') {
-    const nested = msg as { message?: unknown; blockers?: unknown };
+    const nested = msg as {
+      message?: unknown;
+      blockers?: unknown;
+      issues?: { fieldErrors?: Record<string, string[] | undefined> };
+    };
     const parts: string[] = [];
     if (typeof nested.message === 'string') parts.push(nested.message);
     if (Array.isArray(nested.blockers) && nested.blockers.length) {
       parts.push(nested.blockers.map(String).join('; '));
+    }
+    const fieldErrors = nested.issues?.fieldErrors;
+    if (fieldErrors) {
+      const fields = Object.entries(fieldErrors).flatMap(([k, v]) =>
+        (v ?? []).map((m) => `${k}: ${m}`),
+      );
+      if (fields.length) parts.push(fields.join('; '));
     }
     if (parts.length) return parts.join(' — ');
   }
