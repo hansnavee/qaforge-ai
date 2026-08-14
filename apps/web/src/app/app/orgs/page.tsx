@@ -23,7 +23,17 @@ export default function OrganizationsPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const query = useQuery({
     queryKey: ['orgs'],
-    queryFn: () => api<OrgSummary[]>('/api/v1/orgs'),
+    queryFn: async () => {
+      try {
+        return await api<OrgSummary[]>('/api/v1/orgs');
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 401) {
+          router.replace('/login');
+          return [];
+        }
+        throw e;
+      }
+    },
   });
 
   const orgs = Array.isArray(query.data) ? query.data : [];

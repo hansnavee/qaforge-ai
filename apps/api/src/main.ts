@@ -19,15 +19,33 @@ async function bootstrap() {
   });
 
   const logger = new Logger('Bootstrap');
-  const webOrigin = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
   const port = Number(process.env.PORT || 4000);
+  const webOrigin = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  const allowedOrigins = [
+    webOrigin.replace(/\/$/, ''),
+    'https://qaforge-ai-tau.vercel.app',
+    'http://localhost:3000',
+  ];
 
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(cookieParser());
   app.use(rateLimit({ windowMs: 60_000, max: 180 }));
 
   app.enableCors({
-    origin: webOrigin,
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      if (
+        allowedOrigins.includes(origin) ||
+        /^https:\/\/qaforge[-a-z0-9]*-testing-agent\.vercel\.app$/.test(origin)
+      ) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error(`CORS blocked origin ${origin}`));
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],

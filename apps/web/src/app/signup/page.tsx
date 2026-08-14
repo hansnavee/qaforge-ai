@@ -28,44 +28,44 @@ export default function SignupPage() {
     setLoading(true);
     setError(null);
     try {
-      const { error: err } = await authClient.signUp.email({
-        name,
-        email,
-        password,
+      const created = await api<{
+        userId: string;
+        organization: { id: string; name: string };
+      }>('/api/v1/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          email,
+          password,
+          organizationName: orgName,
+        }),
       });
-      if (err) {
-        setError(err.message ?? 'Signup failed');
-        return;
+      if (created.organization?.id) {
+        setSelectedOrgId(created.organization.id);
       }
+
       const { error: signInErr } = await authClient.signIn.email({
         email,
         password,
       });
       if (signInErr) {
         setError(
-          'Account created. Sign in to finish creating your organization.',
+          'Account and organization created. Please sign in to continue.',
         );
         router.push('/login');
         return;
       }
-      try {
-        const org = await api<{ id: string }>('/api/v1/orgs', {
-          method: 'POST',
-          body: JSON.stringify({ name: orgName }),
-        });
-        if (org?.id) setSelectedOrgId(org.id);
-      } catch (createErr) {
-        setError(
-          createErr instanceof ApiError
-            ? `Account created, but organization failed: ${createErr.message}`
-            : 'Account created. Create your organization on the next screen.',
-        );
-        router.push('/app/orgs');
+      router.push('/app/orgs');
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setError(err.message);
         return;
       }
-      router.push('/app/orgs');
-    } catch {
-      setError('Unable to reach auth service. Try again when the API is up.');
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : 'Unable to reach auth service. Try again when the API is up.',
+      );
     } finally {
       setLoading(false);
     }

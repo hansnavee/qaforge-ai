@@ -13,12 +13,14 @@ export const auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000',
   basePath: '/api/auth',
   // Web (Vercel) and API (Railway) are different sites — cookies must be
-  // SameSite=None so credentialed browser calls include the session.
+  // SameSite=None + Partitioned so the browser stores the session.
   advanced: {
+    useSecureCookies: true,
     defaultCookieAttributes: {
       sameSite: 'none',
       secure: true,
       httpOnly: true,
+      partitioned: true,
     },
   },
 });
