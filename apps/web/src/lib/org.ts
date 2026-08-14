@@ -43,9 +43,10 @@ export function pickOrg(orgs: OrgSummary[]): OrgSummary | undefined {
 
 /** One org → its Workspace. Zero or many → org picker. */
 export function pathAfterOrgs(orgs: OrgSummary[]): string {
-  if (orgs.length === 1) {
-    setSelectedOrgId(orgs[0].id);
-    return orgWorkspacePath(orgs[0].id);
+  const only = orgs.length === 1 ? orgs[0] : undefined;
+  if (only) {
+    setSelectedOrgId(only.id);
+    return orgWorkspacePath(only.id);
   }
   return '/app/orgs';
 }
