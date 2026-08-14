@@ -37,6 +37,17 @@ export default function SignupPage() {
         setError(err.message ?? 'Signup failed');
         return;
       }
+      const { error: signInErr } = await authClient.signIn.email({
+        email,
+        password,
+      });
+      if (signInErr) {
+        setError(
+          'Account created. Sign in to finish creating your organization.',
+        );
+        router.push('/login');
+        return;
+      }
       try {
         const org = await api<{ id: string }>('/api/v1/orgs', {
           method: 'POST',
