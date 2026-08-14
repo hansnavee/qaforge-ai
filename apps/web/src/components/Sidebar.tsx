@@ -30,6 +30,7 @@ export function Sidebar() {
   const phaseParam = (searchParams.get('phase') ?? '').toUpperCase();
   const onSettings = pathname.startsWith('/app/settings');
   const onBilling = pathname.startsWith('/app/billing');
+  const onOrgs = pathname.startsWith('/app/orgs');
 
   return (
     <aside className="flex w-full shrink-0 flex-col border-b border-border bg-bg-elevated/60 px-3 py-3 md:w-56 md:border-b-0 md:border-r md:py-4">
@@ -132,6 +133,17 @@ export function Sidebar() {
 
         <div className="mt-3 hidden border-t border-border pt-3 md:block" />
 
+        <Link
+          href="/app/orgs"
+          className={cn(
+            'whitespace-nowrap rounded-lg px-2.5 py-2 text-sm transition',
+            onOrgs
+              ? 'bg-accent/10 text-accent'
+              : 'text-muted hover:bg-surface hover:text-fg',
+          )}
+        >
+          Organizations
+        </Link>
         <Link
           href="/app/settings"
           className={cn(

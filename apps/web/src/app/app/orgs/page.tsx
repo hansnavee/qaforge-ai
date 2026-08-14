@@ -1,0 +1,94 @@
+'use client';
+
+import { useRouter } from 'next/navigation';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { roleLabel } from '@qaforge/shared';
+import { Badge } from '@/components/Badge';
+import { Button } from '@/components/Button';
+import { Card } from '@/components/Card';
+import { api, ApiError } from '@/lib/api';
+import {
+  pickOrg,
+  setSelectedOrgId,
+  type OrgSummary,
+} from '@/lib/org';
+
+export default function OrganizationsPage() {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const query = useQuery({
+    queryKey: ['orgs'],
+    queryFn: () => api<OrgSummary[]>('/api/v1/orgs'),
+  });
+
+  const orgs = Array.isArray(query.data) ? query.data : [];
+  const selected = pickOrg(orgs);
+
+  function enterOrg(org: OrgSummary) {
+    setSelectedOrgId(org.id);
+    void queryClient.invalidateQueries({ queryKey: ['orgs'] });
+    router.push('/app/projects');
+  }
+
+  return (
+    <div className="mx-auto max-w-2xl space-y-6">
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Organizations
+        </h1>
+        <p className="mt-1 text-sm text-muted">
+          Pick the company to work in. Workspace for that org comes next.
+        </p>
+      </div>
+
+      {query.isLoading ? (
+        <p className="text-sm text-muted">Loading organizations…</p>
+      ) : null}
+
+      {query.error ? (
+        <p className="text-sm text-danger">
+          {query.error instanceof ApiError
+            ? query.error.message
+            : 'Could not load organizations.'}
+        </p>
+      ) : null}
+
+      {!query.isLoading && orgs.length === 0 ? (
+        <Card className="border-dashed">
+          <h2 className="font-medium">No organizations</h2>
+          <p className="mt-1 text-sm text-muted">
+            This account is not in an organization yet.
+          </p>
+        </Card>
+      ) : (
+        <div className="grid gap-2">
+          {orgs.map((org) => {
+            const isCurrent = org.id === selected?.id;
+            return (
+              <Card key={org.id} className="py-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{org.name}</span>
+                      {isCurrent ? <Badge tone="accent">Current</Badge> : null}
+                    </div>
+                    <p className="mt-1 text-xs text-muted">
+                      {roleLabel(org.role ?? 'VIEWER')}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant={isCurrent ? 'secondary' : 'primary'}
+                    onClick={() => enterOrg(org)}
+                  >
+                    {isCurrent ? 'Continue' : 'Select'}
+                  </Button>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
