@@ -41,7 +41,7 @@ export default function NewProjectPage() {
       router.push(
         SHOW_AI_STLC_UI
           ? `/app/projects/${project.id}?tab=requirements&view=source`
-          : `/app/projects/${project.id}?tab=workspace`,
+          : `/app/projects/${project.id}?tab=cases`,
       );
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {

@@ -8,7 +8,6 @@ import { SHOW_AI_STLC_UI } from '@/lib/product-flags';
 import { ThemeToggle } from './ThemeToggle';
 
 const TCMS_TABS = [
-  { id: 'workspace', label: 'Workspace' },
   { id: 'cases', label: 'Cases' },
   { id: 'runs', label: 'Runs' },
   { id: 'results', label: 'Results' },
@@ -27,7 +26,7 @@ export function Sidebar() {
     projectMatch && projectMatch[1] !== 'new' ? projectMatch[1] : null;
   const onRunPage = Boolean(projectId && pathname.includes('/runs/'));
   const tab =
-    searchParams.get('tab') ?? (SHOW_AI_STLC_UI ? 'overview' : 'workspace');
+    searchParams.get('tab') ?? (SHOW_AI_STLC_UI ? 'overview' : 'cases');
   const phaseParam = (searchParams.get('phase') ?? '').toUpperCase();
   const onSettings = pathname.startsWith('/app/settings');
   const onBilling = pathname.startsWith('/app/billing');
