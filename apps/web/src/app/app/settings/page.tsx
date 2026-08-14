@@ -344,7 +344,7 @@ export default function SettingsPage() {
         </div>
       </Card>
 
-      <Card className="space-y-3">
+      <Card id="browserstack" className="scroll-mt-6 space-y-3">
         <div className="text-xs uppercase tracking-wide text-muted">
           BrowserStack
         </div>
@@ -396,7 +396,7 @@ export default function SettingsPage() {
         ) : null}
       </Card>
 
-      <Card className="space-y-3">
+      <Card id="jira" className="scroll-mt-6 space-y-3">
         <div className="text-xs uppercase tracking-wide text-muted">Jira</div>
         <p className="text-xs text-muted">
           Dual-write defects to Jira Cloud. QAForge TCMS stays the canonical
