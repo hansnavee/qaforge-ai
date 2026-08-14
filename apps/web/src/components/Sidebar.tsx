@@ -10,6 +10,7 @@ import { orgWorkspacePath } from '@/lib/org';
 import { ThemeToggle } from './ThemeToggle';
 
 const TCMS_TABS = [
+  { id: 'dashboard', label: 'Dashboard' },
   { id: 'cases', label: 'Cases' },
   { id: 'runs', label: 'Runs' },
   { id: 'results', label: 'Results' },
@@ -30,7 +31,7 @@ export function Sidebar() {
     projectMatch && projectMatch[1] !== 'new' ? projectMatch[1] : null;
   const onRunPage = Boolean(projectId && pathname.includes('/runs/'));
   const tab =
-    searchParams.get('tab') ?? (SHOW_AI_STLC_UI ? 'overview' : 'cases');
+    searchParams.get('tab') ?? (SHOW_AI_STLC_UI ? 'overview' : 'dashboard');
   const phaseParam = (searchParams.get('phase') ?? '').toUpperCase();
   const onSettings = pathname.startsWith('/app/settings');
   const onBilling = pathname.startsWith('/app/billing');

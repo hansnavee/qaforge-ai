@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/Button';
+import { Card } from '@/components/Card';
 import { api, ApiError } from '@/lib/api';
 import { useOrgCaps } from '@/lib/use-org';
 import { DesignCasesPanel } from './design-cases-panel';
@@ -14,8 +15,58 @@ import { TcmsReportsPanel } from './tcms-reports-panel';
 import { TcmsResultsPanel } from './tcms-results-panel';
 import { TcmsRunsPanel } from './tcms-runs-panel';
 
+function TcmsProjectDashboard({ projectId }: { projectId: string }) {
+  return (
+    <div className="space-y-4 pt-2">
+      <p className="text-sm text-muted">
+        Analysis for this project. Live graphs and AI suggestions come in later
+        steps.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Card>
+          <h2 className="text-sm font-medium">Progress</h2>
+          <p className="mt-1 text-sm text-muted">
+            Cases designed vs executed vs remaining will show here.
+          </p>
+        </Card>
+        <Card>
+          <h2 className="text-sm font-medium">Results</h2>
+          <p className="mt-1 text-sm text-muted">
+            Latest run and BrowserStack outcomes will show here.
+          </p>
+        </Card>
+        <Card>
+          <h2 className="text-sm font-medium">Graphs</h2>
+          <p className="mt-1 text-sm text-muted">
+            Pass/fail over time, coverage, and defect trend will show here.
+          </p>
+        </Card>
+        <Card>
+          <h2 className="text-sm font-medium">AI suggestions</h2>
+          <p className="mt-1 text-sm text-muted">
+            Coverage gaps, what to run next, and ship risk will show here.
+          </p>
+        </Card>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Link href={`/app/projects/${projectId}?tab=cases`}>
+          <Button size="sm" variant="secondary">
+            Cases
+          </Button>
+        </Link>
+        <Link href={`/app/projects/${projectId}?tab=runs`}>
+          <Button size="sm" variant="secondary">
+            Runs
+          </Button>
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 function parseTab(raw: string | null): TcmsTabId {
   if (
+    raw === 'dashboard' ||
     raw === 'cases' ||
     raw === 'runs' ||
     raw === 'results' ||
@@ -25,7 +76,7 @@ function parseTab(raw: string | null): TcmsTabId {
   ) {
     return raw;
   }
-  return 'cases';
+  return 'dashboard';
 }
 
 export function TcmsWorkspace() {
@@ -81,6 +132,9 @@ export function TcmsWorkspace() {
       description={project.description}
       active={tab}
     >
+      {tab === 'dashboard' ? (
+        <TcmsProjectDashboard projectId={projectId} />
+      ) : null}
       {tab === 'cases' ? (
         <DesignCasesPanel projectId={projectId} canEdit={caps.canDesign} />
       ) : null}

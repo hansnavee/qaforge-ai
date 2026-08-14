@@ -58,7 +58,7 @@ function analysisLabel(status?: string | null) {
 }
 
 function openHref(id: string) {
-  return `/app/projects/${id}?tab=${SHOW_AI_STLC_UI ? 'overview' : 'cases'}`;
+  return `/app/projects/${id}?tab=${SHOW_AI_STLC_UI ? 'overview' : 'dashboard'}`;
 }
 
 export default function ProjectsPage() {
