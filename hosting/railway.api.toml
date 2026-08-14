@@ -11,6 +11,7 @@ watchPatterns = [
   "/packages/shared/**",
   "/packages/database/**",
   "/packages/agent-sdk/**",
+  "/packages/browser-session/**",
   "/packages/report-engine/**",
   "/docker/api.Dockerfile",
   "/docker/api-entrypoint.sh",

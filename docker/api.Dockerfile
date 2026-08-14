@@ -24,6 +24,7 @@ RUN pnpm --filter @qaforge/shared build \
  && pnpm --filter @qaforge/database generate \
  && pnpm --filter @qaforge/database build \
  && pnpm --filter @qaforge/agent-sdk build \
+ && pnpm --filter @qaforge/browser-session build \
  && pnpm --filter @qaforge/report-engine build \
  && pnpm --filter @qaforge/api build
 
