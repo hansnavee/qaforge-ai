@@ -79,6 +79,14 @@ export function normalizeJiraProjectKey(raw: string): string | null {
 }
 
 function toBase64(value: string): string {
+  const g = globalThis as {
+    Buffer?: {
+      from: (v: string, enc: string) => { toString: (enc: string) => string };
+    };
+  };
+  if (typeof g.Buffer?.from === 'function') {
+    return g.Buffer.from(value, 'utf8').toString('base64');
+  }
   const bytes = new TextEncoder().encode(value);
   let binary = '';
   for (let i = 0; i < bytes.length; i += 1) {
@@ -87,8 +95,12 @@ function toBase64(value: string): string {
   return btoa(binary);
 }
 
+export function normalizeJiraApiToken(raw: string): string {
+  return raw.replace(/^["'\s]+|["'\s]+$/g, '').replace(/\s+/g, '');
+}
+
 function authHeader(email: string, apiToken: string): string {
-  return `Basic ${toBase64(`${email}:${apiToken}`)}`;
+  return `Basic ${toBase64(`${email.trim()}:${normalizeJiraApiToken(apiToken)}`)}`;
 }
 
 function jiraHeaders(config: JiraConnectionConfig): Record<string, string> {
@@ -96,7 +108,23 @@ function jiraHeaders(config: JiraConnectionConfig): Record<string, string> {
     Authorization: authHeader(config.email, config.apiToken),
     Accept: 'application/json',
     'Content-Type': 'application/json',
+    'User-Agent': 'QAForge-AI',
   };
+}
+
+async function jiraAuthedFetch(
+  url: string,
+  headers: Record<string, string>,
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop < 5; hop += 1) {
+    const res = await fetch(current, { headers, redirect: 'manual' });
+    if (res.status < 300 || res.status >= 400) return res;
+    const loc = res.headers.get('location');
+    if (!loc) return res;
+    current = new URL(loc, current).toString();
+  }
+  return fetch(url, { headers });
 }
 
 function severityLabel(severity?: string): string {
@@ -160,9 +188,7 @@ export function parseJiraConnectionConfig(
     typeof o.baseUrl === 'string' ? normalizeJiraSiteUrl(o.baseUrl) : null;
   const email = typeof o.email === 'string' ? o.email.trim() : '';
   const apiToken =
-    typeof o.apiToken === 'string'
-      ? o.apiToken.trim().replace(/^["']|["']$/g, '')
-      : '';
+    typeof o.apiToken === 'string' ? normalizeJiraApiToken(o.apiToken) : '';
   const projectKey =
     typeof o.projectKey === 'string'
       ? normalizeJiraProjectKey(o.projectKey)
@@ -427,16 +453,22 @@ export async function verifyJiraConnection(
   const headers = {
     Authorization: authHeader(config.email, config.apiToken),
     Accept: 'application/json',
+    'User-Agent': 'QAForge-AI',
   };
-  const me = await fetch(`${base}/rest/api/3/myself`, { headers });
+  const me = await jiraAuthedFetch(`${base}/rest/api/3/myself`, headers);
   if (!me.ok) {
+    if (me.status === 401 || me.status === 403) {
+      throw new Error(
+        'Jira rejected the email and API token. Use the Atlassian account email for this site, and an API token from https://id.atlassian.com/manage-profile/security/api-tokens (not your Jira password). Create a new token, paste it once, and retry.',
+      );
+    }
     const text = await me.text().catch(() => '');
     throw new Error(`Jira auth failed (${me.status}): ${text.slice(0, 160)}`);
   }
   const meJson = (await me.json()) as { accountId?: string };
-  const project = await fetch(
+  const project = await jiraAuthedFetch(
     `${base}/rest/api/3/project/${encodeURIComponent(config.projectKey)}`,
-    { headers },
+    headers,
   );
   if (!project.ok) {
     const text = await project.text().catch(() => '');

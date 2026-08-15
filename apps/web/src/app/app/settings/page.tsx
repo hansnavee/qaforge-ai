@@ -401,8 +401,9 @@ export default function SettingsPage() {
         <p className="text-xs text-muted">
           Dual-write defects to Jira Cloud. QAForge TCMS stays the canonical
           record; connected Jira projects receive matching issues. Use the
-          site host (your-domain.atlassian.net) and the project key (QA), not
-          an issue key like QA-12.
+          site host (your-domain.atlassian.net), the Atlassian account email,
+          an API token from id.atlassian.com (not your Jira password), and the
+          project key (QA), not an issue key like QA-12.
         </p>
         <div className="text-xs">
           Status:{' '}
@@ -439,7 +440,7 @@ export default function SettingsPage() {
             />
             <Input
               type="password"
-              placeholder="API token"
+              placeholder="API token from id.atlassian.com (not your password)"
               value={jiraToken}
               onChange={(e) => setJiraToken(e.target.value)}
               autoComplete="off"

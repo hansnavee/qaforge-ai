@@ -9,6 +9,7 @@ import {
   Role,
   addOrgMemberSchema,
   createOrganizationSchema,
+  normalizeJiraApiToken,
   normalizeJiraProjectKey,
   normalizeJiraSiteUrl,
   parseJiraConnectionConfig,
@@ -47,8 +48,7 @@ const saveJiraSchema = z.object({
     }),
   apiToken: z
     .string()
-    .trim()
-    .transform((v) => v.replace(/^["']|["']$/g, ''))
+    .transform((v) => normalizeJiraApiToken(v))
     .pipe(z.string().min(8, 'API token looks too short').max(4000)),
   projectKey: z
     .string()
