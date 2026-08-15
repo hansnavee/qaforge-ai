@@ -380,7 +380,7 @@ async function jiraSearch(
   jql: string,
   maxResults = 50,
 ): Promise<JiraTicketCandidate[]> {
-  const res = await jiraApiFetch(config, '/rest/api/3/search', {
+  const res = await jiraApiFetch(config, '/rest/api/3/search/jql', {
     method: 'POST',
     body: JSON.stringify({
       jql,
