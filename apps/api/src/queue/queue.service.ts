@@ -6,6 +6,7 @@ export const EXECUTIONS_QUEUE = 'executions';
 export const RUN_EXECUTION_JOB = 'run-execution';
 export const GROUND_CASES_JOB = 'ground-cases';
 export const AI_EXECUTE_JOB = 'ai-execute-run';
+export const AI_GENERATE_JOB = 'ai-generate-run';
 
 @Injectable()
 export class QueueService implements OnModuleInit {
@@ -83,6 +84,23 @@ export class QueueService implements OnModuleInit {
       opts,
       {
         jobId: `ai-exec-${opts.executionId}-${Date.now()}`,
+        removeOnComplete: 50,
+        removeOnFail: 50,
+        attempts: 1,
+      },
+    );
+  }
+
+  async enqueueAiGenerate(runId: string) {
+    if (!this.queue) {
+      this.logger.warn(`Queue unavailable; AI generate ${runId} not enqueued`);
+      return null;
+    }
+    return this.queue.add(
+      AI_GENERATE_JOB,
+      { runId },
+      {
+        jobId: `ai-gen-${runId}`,
         removeOnComplete: 50,
         removeOnFail: 50,
         attempts: 1,

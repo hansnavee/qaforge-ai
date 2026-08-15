@@ -152,9 +152,8 @@ export function TcmsAiAgentModal({
           <p className="text-muted text-xs">
             Describe a QA goal. Suggest returns a plan and case preview. Execute
             generates and applies cases through the Internal TCMS tool provider.
-            Tip: AI Generate reads the Jira epic live (e.g. KAN-1). AI Gap only
-            adds cases that are not already in this project.
-            on so the agent uses those tickets.
+            Tip: Use AI Generate for coverage, duplicates, and quality
+            suggestions. This agent is for free-form Suggest / Execute intents.
           </p>
           {!canQaAgent ? (
             <ProFeatureNotice

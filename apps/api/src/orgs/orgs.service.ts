@@ -174,7 +174,13 @@ export class OrgsService {
       },
     });
     if (!org) throw new NotFoundException('Organization not found');
-    const { browserstackEncrypted, jiraEncrypted, ...rest } = org;
+    const {
+      browserstackEncrypted,
+      jiraEncrypted,
+      xrayEncrypted,
+      testrailEncrypted,
+      ...rest
+    } = org;
     let jiraSummary: {
       baseUrl: string;
       email: string;
@@ -205,6 +211,8 @@ export class OrgsService {
       browserstackConfigured: Boolean(browserstackEncrypted),
       jiraConfigured: Boolean(jiraEncrypted),
       jira: jiraSummary,
+      xrayConfigured: Boolean(xrayEncrypted),
+      testrailConfigured: Boolean(testrailEncrypted),
     };
   }
 
@@ -341,6 +349,105 @@ export class OrgsService {
       metadata: {},
     });
     return { ok: true, jiraConfigured: false, jira: null };
+  }
+
+  async saveXray(userId: string, orgId: string, body: unknown) {
+    await this.requireMembership(userId, orgId, Role.ADMIN);
+    if (!hasEncryptionKey()) {
+      throw new BadRequestException('ENCRYPTION_KEY is not configured');
+    }
+    const input = parseBody(
+      z.object({
+        clientId: z.string().trim().min(8).max(400),
+        clientSecret: z.string().trim().min(8).max(400),
+      }),
+      body,
+    );
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: {
+        xrayEncrypted: encrypt(
+          JSON.stringify({
+            clientId: input.clientId,
+            clientSecret: input.clientSecret,
+          }),
+        ),
+      },
+    });
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'org.xray.connect',
+      resource: 'organization',
+      resourceId: orgId,
+      metadata: {},
+    });
+    return { ok: true, xrayConfigured: true };
+  }
+
+  async clearXray(userId: string, orgId: string) {
+    await this.requireMembership(userId, orgId, Role.ADMIN);
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: { xrayEncrypted: null },
+    });
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'org.xray.disconnect',
+      resource: 'organization',
+      resourceId: orgId,
+      metadata: {},
+    });
+    return { ok: true, xrayConfigured: false };
+  }
+
+  async saveTestrail(userId: string, orgId: string, body: unknown) {
+    await this.requireMembership(userId, orgId, Role.ADMIN);
+    if (!hasEncryptionKey()) {
+      throw new BadRequestException('ENCRYPTION_KEY is not configured');
+    }
+    const input = parseBody(
+      z.object({
+        baseUrl: z.string().trim().url().max(500),
+        email: z.string().trim().min(3).max(320),
+        apiKey: z.string().trim().min(8).max(400),
+        projectId: z.string().trim().min(1).max(64),
+      }),
+      body,
+    );
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: {
+        testrailEncrypted: encrypt(JSON.stringify(input)),
+      },
+    });
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'org.testrail.connect',
+      resource: 'organization',
+      resourceId: orgId,
+      metadata: { projectId: input.projectId },
+    });
+    return { ok: true, testrailConfigured: true };
+  }
+
+  async clearTestrail(userId: string, orgId: string) {
+    await this.requireMembership(userId, orgId, Role.ADMIN);
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: { testrailEncrypted: null },
+    });
+    await this.audit.log({
+      organizationId: orgId,
+      userId,
+      action: 'org.testrail.disconnect',
+      resource: 'organization',
+      resourceId: orgId,
+      metadata: {},
+    });
+    return { ok: true, testrailConfigured: false };
   }
 
   async readJiraConfig(orgId: string) {

@@ -25,6 +25,16 @@ async function processJob(job: Job<JobData>): Promise<void> {
     return;
   }
 
+  if (job.name === 'ai-generate-run') {
+    const runId = (job.data as { runId?: string }).runId;
+    if (!runId) throw new Error('ai-generate-run job missing runId');
+    const { processAiGenerateRun } = await import('./ai-generate-job.js');
+    console.log(`[worker] AI generate ${runId}`);
+    await processAiGenerateRun(runId);
+    console.log(`[worker] AI generate finished ${runId}`);
+    return;
+  }
+
   if (job.name === 'ai-execute-run') {
     const executionId = job.data.executionId;
     if (!executionId) {

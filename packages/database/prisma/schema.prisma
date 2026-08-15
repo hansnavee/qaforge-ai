@@ -79,6 +79,11 @@ model Organization {
   browserstackEncrypted String?
   /// AES blob { baseUrl, email, apiToken, projectKey, issueType? } for Jira dual-write
   jiraEncrypted    String?
+  /// AES blob { clientId, clientSecret } Xray Cloud
+  xrayEncrypted    String?
+  /// AES blob { baseUrl, email, apiKey, projectId } TestRail
+  testrailEncrypted String?
+  aiGenerateRuns   AiGenerateRun[]
 }
 
 /// Paired laptop Playwright runner for Local AI execution (no Redis/DB on the PC).
@@ -215,6 +220,7 @@ model Project {
   automationReports    AutomationReport[]
   automationHealLogs   AutomationHealLog[]
   aiPromptHistory      AiPromptHistory[]
+  aiGenerateRuns       AiGenerateRun[]
 
   @@index([organizationId])
 }
@@ -232,6 +238,60 @@ model AiPromptHistory {
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId, createdAt])
+}
+
+/// Background AI Generate orchestrator run (suggestions for human review).
+model AiGenerateRun {
+  id               String   @id @default(cuid())
+  organizationId   String
+  projectId        String
+  userId           String
+  /// PENDING | RUNNING | READY | FAILED
+  status           String   @default("PENDING")
+  prompt           String?  @db.Text
+  jiraKeys         Json?
+  includeXray      Boolean  @default(false)
+  includeTestrail  Boolean  @default(false)
+  includeTcms      Boolean  @default(true)
+  folderId         String?
+  error            String?  @db.Text
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project          Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  suggestions      AiGenerateSuggestion[]
+
+  @@index([projectId, createdAt])
+  @@index([organizationId])
+}
+
+model AiGenerateSuggestion {
+  id              String   @id @default(cuid())
+  runId           String
+  scenario        String
+  preconditions   String?  @db.Text
+  steps           Json
+  expected        String   @db.Text
+  type            String?
+  designTechnique String?
+  requirementKey  String?
+  priorityLabel   String?
+  module          String?
+  testData        Json?
+  /// new | duplicate | gap | quality
+  kind            String
+  score           Float    @default(0)
+  reason          String?  @db.Text
+  /// pending | accepted | rejected
+  status          String   @default("pending")
+  embedding       Json?
+  matchCaseId     String?
+  externalRef     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  run             AiGenerateRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, status])
 }
 
 model RequirementDocument {
@@ -547,6 +607,8 @@ model TestCase {
   testData      Json?
   customFields  Json?
   templateId    String?
+  /// Jira / Xray / TestRail id for traceability
+  externalRef   String?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
   deletedAt     DateTime?

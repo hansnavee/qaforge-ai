@@ -59,6 +59,40 @@ export class OrgsController {
     return this.orgs.clearJira(user.id, orgId);
   }
 
+  @Patch(':orgId/xray')
+  saveXray(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Body() body: unknown,
+  ) {
+    return this.orgs.saveXray(user.id, orgId, body);
+  }
+
+  @Delete(':orgId/xray')
+  clearXray(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+  ) {
+    return this.orgs.clearXray(user.id, orgId);
+  }
+
+  @Patch(':orgId/testrail')
+  saveTestrail(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Body() body: unknown,
+  ) {
+    return this.orgs.saveTestrail(user.id, orgId, body);
+  }
+
+  @Delete(':orgId/testrail')
+  clearTestrail(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+  ) {
+    return this.orgs.clearTestrail(user.id, orgId);
+  }
+
   @Post(':orgId/members')
   addMember(
     @CurrentUser() user: SessionUser,

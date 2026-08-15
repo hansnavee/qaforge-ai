@@ -28,6 +28,8 @@ import {
   jiraTicketListSchema,
   jiraImportRequirementsSchema,
   generateTestCasesSchema,
+  startAiGenerateRunSchema,
+  patchAiSuggestionSchema,
   classifyAgainstExisting,
   credsFromCases,
   extractAppUrlFromText,
@@ -88,6 +90,7 @@ import { PlanUsageService } from '../billing/plan-usage.service';
 import { createInternalTcmsProvider } from '../qa-tools/internal-tcms.provider';
 import { listJiraTicketCandidates } from '../qa-tools/jira.provider';
 import { AiGenerateCasesService } from './ai-generate-cases.service';
+import { processAiGenerateRun } from './ai-generate-run.processor';
 import {
   isAllowedRequirementFile,
   parseRequirementFile,
@@ -4085,6 +4088,13 @@ export class Phase1Service {
           severity: row.severity ?? 'medium',
           customFields: (row.customFields ?? null) as never,
           templateId: input.templateId ?? template?.id ?? null,
+          externalRef:
+            row.externalId?.trim() ||
+            (row.testData && typeof row.testData === 'object'
+              ? String(
+                  (row.testData as Record<string, string>).externalRef ?? '',
+                ) || null
+              : null),
           ...status,
         },
       });
@@ -4123,6 +4133,156 @@ export class Phase1Service {
       cases: casesOut,
       provider: 'internal-tcms',
     };
+  }
+
+  async startAiGenerateRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    await this.planUsage.assertPlanLimit(orgId, 'AI_GENERATE', 1, userId);
+    const input = parseBody(startAiGenerateRunSchema, body ?? {});
+    const jiraKeys = input.jiraKeys ?? [];
+    const promptParts = [input.prompt?.trim(), input.documentText?.trim()].filter(
+      Boolean,
+    );
+    const prompt = promptParts.join('\n\n');
+    if (!prompt && !jiraKeys.length) {
+      throw new BadRequestException(
+        'Add a prompt, upload a document, or select at least one Jira ticket',
+      );
+    }
+    const run = await prisma.aiGenerateRun.create({
+      data: {
+        organizationId: orgId,
+        projectId,
+        userId,
+        status: 'PENDING',
+        prompt: prompt || null,
+        jiraKeys: jiraKeys as never,
+        includeXray: Boolean(input.includeXray),
+        includeTestrail: Boolean(input.includeTestrail),
+        includeTcms: input.includeTcms !== false,
+        folderId: input.folderId ?? null,
+      },
+    });
+    const job = await this.queue.enqueueAiGenerate(run.id);
+    if (!job) {
+      await processAiGenerateRun(run.id);
+    }
+    return this.getAiGenerateRun(userId, orgId, projectId, run.id);
+  }
+
+  async getAiGenerateRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    runId: string,
+  ) {
+    await this.requireProject(userId, orgId, projectId);
+    const run = await prisma.aiGenerateRun.findFirst({
+      where: { id: runId, projectId, organizationId: orgId },
+      include: { suggestions: { orderBy: { score: 'desc' } } },
+    });
+    if (!run) throw new NotFoundException('Generate run not found');
+    const { suggestions, ...rest } = run;
+    return {
+      ...rest,
+      suggestions: suggestions.map(({ embedding: _e, ...row }) => ({
+        ...row,
+        steps: Array.isArray(row.steps) ? row.steps.map(String) : [],
+      })),
+    };
+  }
+
+  async patchAiSuggestion(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    runId: string,
+    suggestionId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const input = parseBody(patchAiSuggestionSchema, body ?? {});
+    const row = await prisma.aiGenerateSuggestion.findFirst({
+      where: { id: suggestionId, runId, run: { projectId, organizationId: orgId } },
+    });
+    if (!row) throw new NotFoundException('Suggestion not found');
+    return prisma.aiGenerateSuggestion.update({
+      where: { id: suggestionId },
+      data: {
+        ...(input.status ? { status: input.status } : {}),
+        ...(input.scenario ? { scenario: input.scenario } : {}),
+        ...(input.preconditions !== undefined
+          ? { preconditions: input.preconditions }
+          : {}),
+        ...(input.steps ? { steps: input.steps as never } : {}),
+        ...(input.expected ? { expected: input.expected } : {}),
+      },
+    });
+  }
+
+  async applyAiGenerateRun(
+    userId: string,
+    orgId: string,
+    projectId: string,
+    runId: string,
+    body: unknown,
+  ) {
+    await this.requireProject(userId, orgId, projectId, Role.MEMBER);
+    const run = await prisma.aiGenerateRun.findFirst({
+      where: { id: runId, projectId, organizationId: orgId },
+    });
+    if (!run) throw new NotFoundException('Generate run not found');
+    const accepted = await prisma.aiGenerateSuggestion.findMany({
+      where: { runId, status: 'accepted' },
+    });
+    if (!accepted.length) {
+      throw new BadRequestException('Accept at least one suggestion');
+    }
+    const folderId =
+      body && typeof body === 'object' && 'folderId' in body
+        ? ((body as { folderId?: string | null }).folderId ?? run.folderId)
+        : run.folderId;
+    return this.generateApply(userId, orgId, projectId, {
+      mode: 'create',
+      source: 'GENERATE',
+      folderId: folderId ?? null,
+      forceCreate: true,
+      prompt: run.prompt ?? undefined,
+      cases: accepted.map((s) => ({
+        scenario: s.scenario,
+        preconditions: s.preconditions ?? '',
+        steps: Array.isArray(s.steps) ? s.steps.map(String) : [],
+        expected: s.expected,
+        type: s.type ?? 'functional',
+        designTechnique: s.designTechnique ?? 'HAPPY_PATH',
+        requirementKey: s.requirementKey,
+        priorityLabel: (s.priorityLabel as 'HIGH' | 'MEDIUM' | 'LOW') ?? 'MEDIUM',
+        module: s.module ?? 'General',
+        testData: Object.fromEntries(
+          Object.entries({
+            ...((s.testData && typeof s.testData === 'object'
+              ? s.testData
+              : {}) as Record<string, unknown>),
+            ...(s.externalRef ? { externalRef: s.externalRef } : {}),
+          }).map(([k, v]) => [k, String(v ?? '')]),
+        ),
+      })),
+    }).then(async (result) => {
+      for (let i = 0; i < result.cases.length; i += 1) {
+        const ext = accepted[i]?.externalRef;
+        if (!ext || !result.cases[i]) continue;
+        await prisma.testCase.update({
+          where: { id: result.cases[i]!.id },
+          data: { externalRef: ext, requirementKey: accepted[i]?.requirementKey },
+        });
+      }
+      return result;
+    });
   }
 
   /**

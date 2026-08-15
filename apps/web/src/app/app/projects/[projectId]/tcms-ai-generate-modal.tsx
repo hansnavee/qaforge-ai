@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { ApiError, api, apiForm } from '@/lib/api';
+import { ApiError, api } from '@/lib/api';
 import { parsePlanLimitError } from '@/lib/plan';
 import { getDefaultOrgId } from '@/lib/org';
 import { Button } from '@/components/Button';
@@ -9,53 +9,6 @@ import { Modal } from '@/components/Modal';
 import { UpgradeModal } from '@/components/UpgradeModal';
 import { fieldClass, areaClass } from './tcms-board';
 import type { FolderOption } from './tcms-case-modal';
-
-export type GeneratedPreviewCase = {
-  scenario: string;
-  preconditions: string;
-  steps: string[];
-  expected: string;
-  type: string;
-  designTechnique: string;
-  requirementKey: string | null;
-  priorityLabel: 'HIGH' | 'MEDIUM' | 'LOW';
-  testData: Record<string, string> | null;
-  module: string;
-};
-
-type GenerateResponse = {
-  cases: GeneratedPreviewCase[];
-  coverage: {
-    requirementCount: number;
-    caseCount: number;
-    complete: boolean;
-    requirementsWithMultiTechnique?: number;
-    byRequirement?: Record<
-      string,
-      { techniques: string[]; missingTechniques: string[]; caseCount: number }
-    >;
-  };
-  tokensUsed: number;
-  requirementCount: number;
-  skippedDuplicates?: number;
-  pageMap?: {
-    url: string;
-    title: string;
-    headings: string[];
-    buttons: string[];
-    inputs: Array<{ name: string; type: string; id: string; placeholder: string }>;
-    links: string[];
-    error?: string;
-  } | null;
-};
-
-type PromptHistoryItem = {
-  id: string;
-  prompt: string;
-  source: string;
-  caseCount: number | null;
-  createdAt: string;
-};
 
 export type AiGenerateModalDefaults = {
   prompt?: string;
@@ -65,6 +18,43 @@ export type AiGenerateModalDefaults = {
   caseIds?: string[];
   intent?: 'generate' | 'gap';
   jiraEpicKey?: string;
+};
+
+type Suggestion = {
+  id: string;
+  scenario: string;
+  preconditions: string | null;
+  steps: string[];
+  expected: string;
+  type: string | null;
+  designTechnique: string | null;
+  requirementKey: string | null;
+  priorityLabel: string | null;
+  module: string | null;
+  kind: string;
+  score: number;
+  reason: string | null;
+  status: string;
+};
+
+type GenerateRun = {
+  id: string;
+  status: string;
+  error: string | null;
+  suggestions: Suggestion[];
+};
+
+type JiraTicket = {
+  key: string;
+  summary: string;
+  issueType: string;
+  selectable: boolean;
+};
+
+type OrgFlags = {
+  xrayConfigured?: boolean;
+  testrailConfigured?: boolean;
+  jiraConfigured?: boolean;
 };
 
 export function TcmsAiGenerateModal({
@@ -86,194 +76,204 @@ export function TcmsAiGenerateModal({
   onClose: () => void;
   onAdded: () => void;
 }) {
-  const [step, setStep] = useState<'form' | 'preview'>('form');
-  const [mode, setMode] = useState<'prompt' | 'upload'>('prompt');
-  const [applyMode, setApplyMode] = useState<'create' | 'update'>('create');
+  const [step, setStep] = useState<'form' | 'review'>('form');
   const [prompt, setPrompt] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [folderId, setFolderId] = useState(defaultFolderId);
-  const [includeReqs, setIncludeReqs] = useState(true);
-  const [reviewApp, setReviewApp] = useState(true);
-  const [jiraEpicKey, setJiraEpicKey] = useState('');
-  const [intent, setIntent] = useState<'generate' | 'gap'>('generate');
+  const [includeTcms, setIncludeTcms] = useState(true);
+  const [includeXray, setIncludeXray] = useState(false);
+  const [includeTestrail, setIncludeTestrail] = useState(false);
+  const [orgFlags, setOrgFlags] = useState<OrgFlags>({});
+  const [tickets, setTickets] = useState<JiraTicket[]>([]);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [ticketFilter, setTicketFilter] = useState('');
+  const [ticketsLoading, setTicketsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [preview, setPreview] = useState<GenerateResponse | null>(null);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [upgradeError, setUpgradeError] = useState<ReturnType<typeof parsePlanLimitError>>(null);
-  const [history, setHistory] = useState<PromptHistoryItem[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [clearConfirm, setClearConfirm] = useState(false);
-  const [applySource, setApplySource] = useState<
-    'GENERATE' | 'UPDATE' | 'ENV_REFRESH'
-  >('GENERATE');
-  const [targetCaseIds, setTargetCaseIds] = useState<string[]>([]);
+  const [run, setRun] = useState<GenerateRun | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState({
+    scenario: '',
+    expected: '',
+    steps: '',
+  });
+  const [showDuplicates, setShowDuplicates] = useState(false);
+  const [upgradeError, setUpgradeError] = useState<
+    ReturnType<typeof parsePlanLimitError>
+  >(null);
 
-  const selectedCases = useMemo(
-    () => (preview?.cases ?? []).filter((_, i) => selected.has(i)),
-    [preview, selected],
-  );
+  const visibleTickets = useMemo(() => {
+    const q = ticketFilter.trim().toLowerCase();
+    if (!q) return tickets;
+    return tickets.filter(
+      (t) =>
+        t.key.toLowerCase().includes(q) ||
+        t.summary.toLowerCase().includes(q),
+    );
+  }, [tickets, ticketFilter]);
 
-  async function loadHistory() {
-    setHistoryLoading(true);
-    try {
-      const orgId = await getDefaultOrgId();
-      const data = await api<{ items: PromptHistoryItem[] }>(
-        `/api/v1/orgs/${orgId}/projects/${projectId}/ai-prompts`,
-      );
-      setHistory(data.items ?? []);
-    } catch {
-      setHistory([]);
-    } finally {
-      setHistoryLoading(false);
-    }
-  }
+  const visibleSuggestions = useMemo(() => {
+    const rows = run?.suggestions ?? [];
+    if (showDuplicates) return rows;
+    return rows.filter((s) => s.kind !== 'duplicate');
+  }, [run, showDuplicates]);
+
+  const acceptedCount = (run?.suggestions ?? []).filter(
+    (s) => s.status === 'accepted',
+  ).length;
 
   useEffect(() => {
     if (!open) return;
-    setFolderId(defaultFolderId);
-    setApplyMode(defaults?.applyMode ?? 'create');
-    setPrompt(defaults?.prompt ?? '');
-    setReviewApp(defaults?.reviewApplication ?? true);
-    setIntent(defaults?.intent ?? 'generate');
-    setJiraEpicKey(defaults?.jiraEpicKey ?? '');
-    setIncludeReqs(!defaults?.jiraEpicKey && defaults?.intent !== 'gap');
-    setApplySource(defaults?.source ?? (defaults?.applyMode === 'update' ? 'UPDATE' : 'GENERATE'));
-    setTargetCaseIds(defaults?.caseIds ?? []);
     setStep('form');
+    setPrompt(defaults?.prompt ?? '');
+    setFile(null);
+    setFolderId(defaultFolderId);
     setError(null);
-    setPreview(null);
-    setSelected(new Set());
-    setClearConfirm(false);
-    void loadHistory();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset when modal opens / defaults change
+    setRun(null);
+    setSelectedKeys(
+      defaults?.jiraEpicKey ? new Set([defaults.jiraEpicKey]) : new Set(),
+    );
+    setIncludeXray(false);
+    setIncludeTestrail(false);
+    void loadOrgAndTickets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, projectId, defaultFolderId, defaults]);
+
+  async function loadOrgAndTickets() {
+    try {
+      const orgId = await getDefaultOrgId();
+      const org = await api<OrgFlags>(`/api/v1/orgs/${orgId}`);
+      setOrgFlags(org);
+      if (!org.jiraConfigured) return;
+      setTicketsLoading(true);
+      const data = await api<{ tickets: JiraTicket[] }>(
+        `/api/v1/orgs/${orgId}/projects/${projectId}/integrations/jira/tickets`,
+        { method: 'POST', body: JSON.stringify({ mode: 'BROWSE' }) },
+      );
+      setTickets(data.tickets ?? []);
+    } catch {
+      setTickets([]);
+    } finally {
+      setTicketsLoading(false);
+    }
+  }
 
   function reset() {
     setStep('form');
+    setPrompt('');
+    setFile(null);
+    setRun(null);
     setError(null);
-    setPreview(null);
-    setSelected(new Set());
     setGenerating(false);
     setAdding(false);
-    setClearConfirm(false);
+    setEditingId(null);
   }
 
-  async function clearHistory() {
-    try {
-      const orgId = await getDefaultOrgId();
-      await api(`/api/v1/orgs/${orgId}/projects/${projectId}/ai-prompts`, {
-        method: 'DELETE',
-      });
-      setHistory([]);
-      setPrompt('');
-      setClearConfirm(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not clear history');
-    }
-  }
-
-  async function generate() {
+  async function startGenerate() {
     setError(null);
-    if (mode === 'prompt' && !prompt.trim() && !includeReqs && !reviewApp && !jiraEpicKey.trim()) {
-      setError('Enter a Jira epic (e.g. KAN-1), paste requirements, or include project requirements');
-      return;
+    let documentText = '';
+    if (file) {
+      documentText = (await file.text()).slice(0, 100_000);
     }
-    if (mode === 'upload' && !file) {
-      setError('Choose a requirements file');
+    const jiraKeys = [...selectedKeys];
+    if (!prompt.trim() && !documentText && !jiraKeys.length) {
+      setError('Add a prompt, upload a document, or select Jira tickets.');
       return;
     }
     setGenerating(true);
     try {
       const orgId = await getDefaultOrgId();
-      let data: GenerateResponse;
-      if (mode === 'upload' && file) {
-        const form = new FormData();
-        form.append('file', file);
-        form.append('folderId', folderId);
-        form.append('includeProjectRequirements', includeReqs ? 'true' : 'false');
-        form.append('reviewApplication', reviewApp ? 'true' : 'false');
-        if (jiraEpicKey.trim()) form.append('jiraEpicKey', jiraEpicKey.trim());
-        form.append('gapOnly', intent === 'gap' ? 'true' : 'false');
-        data = await apiForm<GenerateResponse>(
-          `/api/v1/orgs/${orgId}/projects/${projectId}/test-cases/generate`,
-          form,
-        );
-      } else {
-        data = await api<GenerateResponse>(
-          `/api/v1/orgs/${orgId}/projects/${projectId}/test-cases/generate`,
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              prompt: prompt.trim(),
-              folderId: folderId || null,
-              includeProjectRequirements: includeReqs,
-              reviewApplication: reviewApp,
-              jiraEpicKey: jiraEpicKey.trim() || undefined,
-              gapOnly: intent === 'gap',
-            }),
-          },
-        );
-      }
-      setPreview(data);
-      setSelected(new Set(data.cases.map((_, i) => i)));
-      setStep('preview');
-      void loadHistory();
+      const started = await api<GenerateRun>(
+        `/api/v1/orgs/${orgId}/projects/${projectId}/ai-generate/runs`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            prompt: prompt.trim() || undefined,
+            documentText: documentText || undefined,
+            jiraKeys,
+            includeXray,
+            includeTestrail,
+            includeTcms,
+            folderId: folderId || null,
+          }),
+        },
+      );
+      setRun(started);
+      setStep('review');
+      await pollRun(orgId, started.id);
     } catch (err) {
       const planErr =
         err instanceof ApiError ? parsePlanLimitError(err.body) : null;
       if (planErr) {
         setUpgradeError(planErr);
-        setError(null);
-      } else {
-        setError(err instanceof Error ? err.message : 'Generate failed');
+        return;
       }
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Generate failed',
+      );
     } finally {
       setGenerating(false);
     }
   }
 
-  async function addSelected() {
-    if (!selectedCases.length) {
-      setError('Select at least one case');
-      return;
+  async function pollRun(orgId: string, runId: string) {
+    for (let i = 0; i < 90; i += 1) {
+      const next = await api<GenerateRun>(
+        `/api/v1/orgs/${orgId}/projects/${projectId}/ai-generate/runs/${runId}`,
+      );
+      setRun(next);
+      if (next.status === 'READY' || next.status === 'FAILED') return;
+      await new Promise((r) => setTimeout(r, 2000));
     }
+    setError('Generate is still running. Refresh later from Cases.');
+  }
+
+  async function patchSuggestion(
+    suggestionId: string,
+    body: Record<string, unknown>,
+  ) {
+    if (!run) return;
+    const orgId = await getDefaultOrgId();
+    const updated = await api<Suggestion>(
+      `/api/v1/orgs/${orgId}/projects/${projectId}/ai-generate/runs/${run.id}/suggestions/${suggestionId}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    );
+    setRun((prev) =>
+      prev
+        ? {
+            ...prev,
+            suggestions: prev.suggestions.map((s) =>
+              s.id === updated.id
+                ? {
+                    ...s,
+                    ...updated,
+                    steps: Array.isArray(updated.steps)
+                      ? updated.steps
+                      : s.steps,
+                  }
+                : s,
+            ),
+          }
+        : prev,
+    );
+  }
+
+  async function applyAccepted() {
+    if (!run) return;
     setAdding(true);
     setError(null);
     try {
       const orgId = await getDefaultOrgId();
       await api(
-        `/api/v1/orgs/${orgId}/projects/${projectId}/test-cases/generate-apply`,
+        `/api/v1/orgs/${orgId}/projects/${projectId}/ai-generate/runs/${run.id}/apply`,
         {
           method: 'POST',
-          body: JSON.stringify({
-            mode: applyMode,
-            // Avoid duplicate history after generate already saved the prompt
-            prompt:
-              applyMode === 'update' || applySource !== 'GENERATE'
-                ? prompt.trim() || undefined
-                : undefined,
-            source: applySource,
-            folderId: folderId || null,
-            caseIds:
-              applyMode === 'update' && targetCaseIds.length
-                ? targetCaseIds
-                : undefined,
-            cases: selectedCases.map((c) => ({
-              scenario: c.scenario,
-              preconditions: c.preconditions,
-              steps: c.steps,
-              expected: c.expected,
-              type: c.type,
-              designTechnique: c.designTechnique,
-              requirementKey: c.requirementKey,
-              priorityLabel: c.priorityLabel,
-              testData: c.testData,
-              module: c.module,
-              caseStatus: 'DRAFT',
-            })),
-          }),
+          body: JSON.stringify({ folderId: folderId || null }),
         },
       );
       reset();
@@ -288,339 +288,304 @@ export function TcmsAiGenerateModal({
 
   return (
     <>
-    <Modal
-      open={open}
-      title={
-        step === 'form'
-          ? intent === 'gap'
-            ? 'AI Gap'
-            : applyMode === 'update'
-              ? 'Update cases with AI'
-              : 'AI Generate'
-          : applyMode === 'update'
-            ? 'Select cases to update'
-            : 'Select cases to add'
-      }
-      size="xl"
-      onClose={() => {
-        reset();
-        onClose();
-      }}
-      footer={
-        step === 'form' ? (
-          <>
-            <Button type="button" size="sm" variant="ghost" onClick={onClose}>
+      <Modal
+        open={open}
+        title={step === 'form' ? 'AI Generate' : 'Review suggestions'}
+        size="xl"
+        onClose={() => {
+          reset();
+          onClose();
+        }}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                reset();
+                onClose();
+              }}
+            >
               Cancel
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={generating || busy}
-              onClick={() => void generate()}
-            >
-              {generating ? 'Generating…' : 'Generate'}
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => setStep('form')}
-            >
-              Back
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={adding || !selectedCases.length}
-              onClick={() => void addSelected()}
-            >
-              {adding
-                ? applyMode === 'update'
-                  ? 'Updating…'
-                  : 'Adding…'
-                : applyMode === 'update'
-                  ? `Update ${selectedCases.length} matching`
-                  : `Add ${selectedCases.length} as Draft`}
-            </Button>
-          </>
-        )
-      }
-    >
-      {step === 'form' ? (
-        <div className="grid gap-4 md:grid-cols-[1fr_220px]">
-          <div className="space-y-3">
-          <p className="text-xs text-muted">
-            {intent === 'gap'
-              ? 'Reads the Jira epic live, then shows only cases that are not already in this project.'
-              : 'Reads the Jira epic live and generates cases. You do not need Import from Jira first.'}
-          </p>
-          <input
-            className={fieldClass}
-            placeholder="Jira epic or story key (e.g. KAN-1)"
-            value={jiraEpicKey}
-            onChange={(e) => setJiraEpicKey(e.target.value)}
-            autoComplete="off"
-          />
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant={applyMode === 'create' ? 'primary' : 'secondary'}
-              onClick={() => {
-                setApplyMode('create');
-                setApplySource('GENERATE');
-              }}
-            >
-              Add as Draft
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={applyMode === 'update' ? 'primary' : 'secondary'}
-              onClick={() => {
-                setApplyMode('update');
-                setApplySource((s) => (s === 'GENERATE' ? 'UPDATE' : s));
-              }}
-            >
-              Update matching
-            </Button>
-          </div>
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant={mode === 'prompt' ? 'primary' : 'secondary'}
-              onClick={() => setMode('prompt')}
-            >
-              Prompt
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={mode === 'upload' ? 'primary' : 'secondary'}
-              onClick={() => setMode('upload')}
-            >
-              Upload
-            </Button>
-          </div>
-          {mode === 'prompt' ? (
-            <textarea
-              className={`${areaClass} min-h-[140px]`}
-              placeholder="Example: Test login positive path on https://www.saucedemo.com/ with username standard_user and password secret_sauce. Verify the user is logged in successfully."
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-          ) : (
-            <input
-              type="file"
-              accept=".pdf,.docx,.txt,.md,.text"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
-          )}
-          <label className="flex items-center gap-2 text-xs text-muted">
-            <input
-              type="checkbox"
-              checked={includeReqs}
-              onChange={(e) => setIncludeReqs(e.target.checked)}
-            />
-            Include project requirements
-          </label>
-          <label className="flex items-center gap-2 text-xs text-muted">
-            <input
-              type="checkbox"
-              checked={reviewApp}
-              onChange={(e) => setReviewApp(e.target.checked)}
-            />
-            Review application URL
-          </label>
-          <label className="block space-y-1 text-xs text-muted">
-            Folder
-            <select
-              className={fieldClass}
-              value={folderId}
-              onChange={(e) => setFolderId(e.target.value)}
-            >
-              <option value="">Ungrouped</option>
-              {folders.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          </div>
-          <aside className="space-y-2 rounded-lg border border-border bg-panel/40 p-3">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-xs font-medium text-fg">Prompt history</p>
-              {history.length ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setClearConfirm(true)}
-                >
-                  Clear
-                </Button>
-              ) : null}
-            </div>
-            {clearConfirm ? (
-              <div className="space-y-2 rounded-md border border-border bg-bg-elevated p-2 text-xs text-muted">
-                <p>
-                  Clear prompt history only — existing test cases are not deleted.
-                </p>
-                <div className="flex gap-2">
-                  <Button type="button" size="sm" onClick={() => void clearHistory()}>
-                    Confirm clear
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setClearConfirm(false)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-            {historyLoading ? (
-              <p className="text-xs text-muted">Loading…</p>
-            ) : history.length === 0 ? (
-              <p className="text-xs text-muted">No prompts yet.</p>
-            ) : (
-              <ul className="max-h-64 space-y-1 overflow-y-auto">
-                {history.map((h) => (
-                  <li key={h.id}>
-                    <button
-                      type="button"
-                      className="w-full rounded-md px-2 py-1.5 text-left text-xs text-fg hover:bg-bg-elevated"
-                      onClick={() => {
-                        setMode('prompt');
-                        setPrompt(h.prompt);
-                      }}
-                      title={h.prompt}
-                    >
-                      <span className="line-clamp-2">{h.prompt}</span>
-                      <span className="mt-0.5 block text-[10px] text-muted">
-                        {h.source} · {new Date(h.createdAt).toLocaleString()}
-                        {h.caseCount != null ? ` · ${h.caseCount} cases` : ''}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </aside>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {(() => {
-            const modules = new Map<string, number>();
-            const techniques = new Map<string, number>();
-            for (const c of preview?.cases ?? []) {
-              const mod = c.module || 'General';
-              modules.set(mod, (modules.get(mod) ?? 0) + 1);
-              const tech = c.designTechnique || 'OTHER';
-              techniques.set(tech, (techniques.get(tech) ?? 0) + 1);
-            }
-            return (
-              <>
-                <p className="text-xs text-muted">
-                  {preview?.cases.length ?? 0} cases
-                  {preview?.coverage?.requirementCount
-                    ? ` · ${preview.coverage.requirementCount} requirements`
-                    : ''}
-                  {preview?.skippedDuplicates
-                    ? ` · skipped ${preview.skippedDuplicates} already in this project`
-                    : ''}
-                </p>
-                {modules.size > 0 ? (
-                  <p className="text-xs text-muted">
-                    Modules:{' '}
-                    {[...modules.entries()]
-                      .map(([k, n]) => `${k} (${n})`)
-                      .join(', ')}
-                  </p>
-                ) : null}
-                {techniques.size > 0 ? (
-                  <p className="text-xs text-muted">
-                    Techniques:{' '}
-                    {[...techniques.entries()]
-                      .map(([k, n]) => `${k} (${n})`)
-                      .join(', ')}
-                  </p>
-                ) : null}
-              </>
-            );
-          })()}
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              onClick={() =>
-                setSelected(new Set((preview?.cases ?? []).map((_, i) => i)))
-              }
-            >
-              Select all
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => setSelected(new Set())}
-            >
-              Clear selection
-            </Button>
-          </div>
-          <ul className="max-h-[360px] space-y-2 overflow-y-auto">
-            {(preview?.cases ?? []).map((c, i) => (
-              <li
-                key={`${c.scenario}-${i}`}
-                className="rounded-lg border border-border bg-panel/30 p-3"
+            {step === 'form' ? (
+              <Button
+                type="button"
+                disabled={generating || busy}
+                onClick={() => void startGenerate()}
               >
-                <label className="flex items-start gap-2">
+                {generating ? 'Queuing…' : 'Generate'}
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                disabled={adding || acceptedCount === 0 || run?.status !== 'READY'}
+                onClick={() => void applyAccepted()}
+              >
+                {adding ? 'Applying…' : `Apply ${acceptedCount} accepted`}
+              </Button>
+            )}
+          </div>
+        }
+      >
+        {error ? <p className="mb-3 text-sm text-danger">{error}</p> : null}
+        {step === 'form' ? (
+          <div className="space-y-3 text-sm">
+            <p className="text-xs text-muted">
+              Collect sources, then review ranked suggestions. Nothing is written
+              until you Accept and Apply.
+            </p>
+            <label className="block text-xs text-muted">
+              Prompt
+              <textarea
+                className={`${areaClass} mt-1 min-h-[100px]`}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Describe the product, epic, or risk you want coverage for"
+              />
+            </label>
+            <label className="block text-xs text-muted">
+              Upload document
+              <input
+                className="mt-1 block text-xs"
+                type="file"
+                accept=".txt,.md,.csv,.json,.html"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+            <div>
+              <div className="mb-1 text-xs text-muted">
+                Jira tickets (multi-select)
+                {ticketsLoading ? ' · loading…' : ''}
+              </div>
+              {!orgFlags.jiraConfigured ? (
+                <p className="text-xs text-muted">
+                  Connect Jira in Settings to include tickets.
+                </p>
+              ) : (
+                <>
                   <input
-                    type="checkbox"
-                    className="mt-1"
-                    checked={selected.has(i)}
-                    onChange={(e) => {
-                      setSelected((prev) => {
-                        const next = new Set(prev);
-                        if (e.target.checked) next.add(i);
-                        else next.delete(i);
-                        return next;
-                      });
-                    }}
+                    className={`${fieldClass} mb-2`}
+                    placeholder="Filter tickets"
+                    value={ticketFilter}
+                    onChange={(e) => setTicketFilter(e.target.value)}
                   />
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm font-medium text-fg">
-                      {c.scenario}
+                  <div className="max-h-40 overflow-auto rounded border border-border">
+                    {visibleTickets.length === 0 ? (
+                      <p className="p-2 text-xs text-muted">No tickets</p>
+                    ) : (
+                      visibleTickets.map((t) => (
+                        <label
+                          key={t.key}
+                          className="flex items-start gap-2 border-b border-border px-2 py-1 text-xs last:border-b-0"
+                        >
+                          <input
+                            type="checkbox"
+                            disabled={!t.selectable}
+                            checked={selectedKeys.has(t.key)}
+                            onChange={(e) => {
+                              setSelectedKeys((prev) => {
+                                const next = new Set(prev);
+                                if (e.target.checked) next.add(t.key);
+                                else next.delete(t.key);
+                                return next;
+                              });
+                            }}
+                          />
+                          <span>
+                            <span className="font-medium">{t.key}</span>{' '}
+                            {t.summary}
+                            <span className="text-muted"> · {t.issueType}</span>
+                          </span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-3 text-xs">
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={includeTcms}
+                  onChange={(e) => setIncludeTcms(e.target.checked)}
+                />
+                Use QAForge cases for duplicates
+              </label>
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={includeXray}
+                  disabled={!orgFlags.xrayConfigured}
+                  onChange={(e) => setIncludeXray(e.target.checked)}
+                />
+                Include Xray library
+                {!orgFlags.xrayConfigured ? ' (connect in Settings)' : ''}
+              </label>
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={includeTestrail}
+                  disabled={!orgFlags.testrailConfigured}
+                  onChange={(e) => setIncludeTestrail(e.target.checked)}
+                />
+                Include TestRail library
+                {!orgFlags.testrailConfigured ? ' (connect in Settings)' : ''}
+              </label>
+            </div>
+            <label className="block text-xs text-muted">
+              Folder
+              <select
+                className={`${fieldClass} mt-1`}
+                value={folderId}
+                onChange={(e) => setFolderId(e.target.value)}
+              >
+                <option value="">Default</option>
+                {folders.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ) : (
+          <div className="space-y-3 text-sm">
+            {run?.status === 'PENDING' || run?.status === 'RUNNING' ? (
+              <p className="text-xs text-muted">
+                Orchestrator is analyzing coverage, duplicates, and quality…
+              </p>
+            ) : null}
+            {run?.status === 'FAILED' ? (
+              <p className="text-sm text-danger">{run.error ?? 'Generate failed'}</p>
+            ) : null}
+            <label className="flex items-center gap-2 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={showDuplicates}
+                onChange={(e) => setShowDuplicates(e.target.checked)}
+              />
+              Show duplicates (hidden by default)
+            </label>
+            <div className="max-h-[420px] space-y-2 overflow-auto">
+              {visibleSuggestions.map((s) => (
+                <div
+                  key={s.id}
+                  className="rounded border border-border p-2"
+                >
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <span className="text-xs uppercase text-muted">
+                      {s.kind}
                     </span>
-                    <span className="mt-0.5 block text-xs text-muted">
-                      {c.module || 'General'} · {c.designTechnique || '—'} ·{' '}
-                      {c.priorityLabel}
+                    <span className="text-xs text-muted">
+                      score {s.score.toFixed(2)}
                     </span>
-                    <span className="mt-1 block text-xs text-muted line-clamp-2">
-                      {c.expected}
-                    </span>
-                  </span>
-                </label>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {error ? <p className="mt-3 text-sm text-danger">{error}</p> : null}
-    </Modal>
-    <UpgradeModal
-      open={Boolean(upgradeError)}
-      error={upgradeError}
-      onClose={() => setUpgradeError(null)}
-    />
+                    {s.requirementKey ? (
+                      <span className="text-xs">{s.requirementKey}</span>
+                    ) : null}
+                    <span className="ml-auto text-xs">{s.status}</span>
+                  </div>
+                  <div className="font-medium">{s.scenario}</div>
+                  <p className="text-xs text-muted">{s.reason}</p>
+                  {editingId === s.id ? (
+                    <div className="mt-2 space-y-2">
+                      <input
+                        className={fieldClass}
+                        value={editDraft.scenario}
+                        onChange={(e) =>
+                          setEditDraft((d) => ({
+                            ...d,
+                            scenario: e.target.value,
+                          }))
+                        }
+                      />
+                      <textarea
+                        className={areaClass}
+                        value={editDraft.steps}
+                        onChange={(e) =>
+                          setEditDraft((d) => ({ ...d, steps: e.target.value }))
+                        }
+                      />
+                      <textarea
+                        className={areaClass}
+                        value={editDraft.expected}
+                        onChange={(e) =>
+                          setEditDraft((d) => ({
+                            ...d,
+                            expected: e.target.value,
+                          }))
+                        }
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => {
+                          void patchSuggestion(s.id, {
+                            status: 'accepted',
+                            scenario: editDraft.scenario,
+                            expected: editDraft.expected,
+                            steps: editDraft.steps
+                              .split('\n')
+                              .map((x) => x.trim())
+                              .filter(Boolean),
+                          });
+                          setEditingId(null);
+                        }}
+                      >
+                        Save
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={s.kind === 'duplicate'}
+                        onClick={() =>
+                          void patchSuggestion(s.id, { status: 'accepted' })
+                        }
+                      >
+                        Accept
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          setEditingId(s.id);
+                          setEditDraft({
+                            scenario: s.scenario,
+                            expected: s.expected,
+                            steps: (s.steps ?? []).join('\n'),
+                          });
+                        }}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() =>
+                          void patchSuggestion(s.id, { status: 'rejected' })
+                        }
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Modal>
+      <UpgradeModal
+        open={Boolean(upgradeError)}
+        error={upgradeError}
+        onClose={() => setUpgradeError(null)}
+      />
     </>
   );
 }

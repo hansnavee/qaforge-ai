@@ -400,6 +400,27 @@ export const generateTestCasesSchema = z.object({
 
 export type GenerateTestCasesInput = z.infer<typeof generateTestCasesSchema>;
 
+export const startAiGenerateRunSchema = z.object({
+  prompt: z.string().max(100_000).optional(),
+  documentText: z.string().max(100_000).optional(),
+  jiraKeys: z.array(z.string().trim().min(1).max(40)).max(50).optional(),
+  includeXray: z.boolean().optional(),
+  includeTestrail: z.boolean().optional(),
+  includeTcms: z.boolean().optional(),
+  folderId: z.string().min(1).nullable().optional(),
+  reviewApplication: z.boolean().optional(),
+});
+
+export type StartAiGenerateRunInput = z.infer<typeof startAiGenerateRunSchema>;
+
+export const patchAiSuggestionSchema = z.object({
+  status: z.enum(['pending', 'accepted', 'rejected']).optional(),
+  scenario: z.string().max(500).optional(),
+  preconditions: z.string().max(4000).optional(),
+  steps: z.array(z.string().max(500)).max(40).optional(),
+  expected: z.string().max(4000).optional(),
+});
+
 export const aiPromptSourceSchema = z.enum([
   'GENERATE',
   'UPDATE',

@@ -36,6 +36,8 @@ type OrgDetail = {
   role: string;
   browserstackConfigured?: boolean;
   jiraConfigured?: boolean;
+  xrayConfigured?: boolean;
+  testrailConfigured?: boolean;
   jira?: {
     baseUrl: string;
     email: string;
@@ -68,6 +70,14 @@ export default function SettingsPage() {
   const [jiraProjectKey, setJiraProjectKey] = useState('');
   const [jiraIssueType, setJiraIssueType] = useState('Bug');
   const [jiraError, setJiraError] = useState<string | null>(null);
+  const [xrayClientId, setXrayClientId] = useState('');
+  const [xrayClientSecret, setXrayClientSecret] = useState('');
+  const [xrayError, setXrayError] = useState<string | null>(null);
+  const [testrailBaseUrl, setTestrailBaseUrl] = useState('');
+  const [testrailEmail, setTestrailEmail] = useState('');
+  const [testrailApiKey, setTestrailApiKey] = useState('');
+  const [testrailProjectId, setTestrailProjectId] = useState('');
+  const [testrailError, setTestrailError] = useState<string | null>(null);
   const [upgradeError, setUpgradeError] = useState<PlanLimitErrorBody | null>(
     null,
   );
@@ -147,6 +157,78 @@ export default function SettingsPage() {
     onError: (e) => {
       setJiraError(
         e instanceof ApiError ? e.message : 'Could not disconnect Jira',
+      );
+    },
+  });
+
+  const saveXray = useMutation({
+    mutationFn: () =>
+      api(`/api/v1/orgs/${org!.id}/xray`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          clientId: xrayClientId.trim(),
+          clientSecret: xrayClientSecret.trim(),
+        }),
+      }),
+    onSuccess: async () => {
+      setXrayClientSecret('');
+      setXrayError(null);
+      await qc.invalidateQueries({ queryKey: ['org', org?.id] });
+    },
+    onError: (e) => {
+      setXrayError(
+        e instanceof ApiError ? e.message : 'Could not connect Xray',
+      );
+    },
+  });
+
+  const clearXray = useMutation({
+    mutationFn: () =>
+      api(`/api/v1/orgs/${org!.id}/xray`, { method: 'DELETE' }),
+    onSuccess: async () => {
+      setXrayError(null);
+      await qc.invalidateQueries({ queryKey: ['org', org?.id] });
+    },
+    onError: (e) => {
+      setXrayError(
+        e instanceof ApiError ? e.message : 'Could not disconnect Xray',
+      );
+    },
+  });
+
+  const saveTestrail = useMutation({
+    mutationFn: () =>
+      api(`/api/v1/orgs/${org!.id}/testrail`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          baseUrl: testrailBaseUrl.trim(),
+          email: testrailEmail.trim(),
+          apiKey: testrailApiKey.trim(),
+          projectId: testrailProjectId.trim(),
+        }),
+      }),
+    onSuccess: async () => {
+      setTestrailApiKey('');
+      setTestrailError(null);
+      await qc.invalidateQueries({ queryKey: ['org', org?.id] });
+    },
+    onError: (e) => {
+      setTestrailError(
+        e instanceof ApiError ? e.message : 'Could not connect TestRail',
+      );
+    },
+  });
+
+  const clearTestrail = useMutation({
+    mutationFn: () =>
+      api(`/api/v1/orgs/${org!.id}/testrail`, { method: 'DELETE' }),
+    onSuccess: async () => {
+      setTestrailError(null);
+      await qc.invalidateQueries({ queryKey: ['org', org?.id] });
+    },
+    onError: (e) => {
+      setTestrailError(
+        e instanceof ApiError ? e.message : 'Could not disconnect TestRail',
       );
     },
   });
@@ -490,6 +572,153 @@ export default function SettingsPage() {
                 onClick={() => clearJira.mutate()}
               >
                 {clearJira.isPending ? 'Disconnecting…' : 'Disconnect'}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+      </Card>
+
+      <Card id="xray" className="scroll-mt-6 space-y-3">
+        <div className="text-xs uppercase tracking-wide text-muted">Xray</div>
+        <p className="text-xs text-muted">
+          Connect Xray Cloud (client id and secret) so AI Generate can treat
+          those tests as a library for duplicate and coverage analysis. Cases
+          are not imported until you Accept suggestions.
+        </p>
+        <div className="text-xs">
+          Status:{' '}
+          {orgQuery.data?.xrayConfigured ? (
+            <span className="text-success">Connected</span>
+          ) : (
+            <span className="text-muted">Not connected</span>
+          )}
+        </div>
+        {caps.canManageMembers ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Input
+              placeholder="Xray client id"
+              value={xrayClientId}
+              onChange={(e) => setXrayClientId(e.target.value)}
+              autoComplete="off"
+            />
+            <Input
+              type="password"
+              placeholder="Xray client secret"
+              value={xrayClientSecret}
+              onChange={(e) => setXrayClientSecret(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+        ) : (
+          <p className="text-xs text-muted">Administrators can connect Xray.</p>
+        )}
+        {xrayError ? <p className="text-sm text-danger">{xrayError}</p> : null}
+        {caps.canManageMembers ? (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              disabled={
+                saveXray.isPending ||
+                !xrayClientId.trim() ||
+                !xrayClientSecret.trim()
+              }
+              onClick={() => saveXray.mutate()}
+            >
+              {saveXray.isPending ? 'Connecting…' : 'Connect Xray'}
+            </Button>
+            {orgQuery.data?.xrayConfigured ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={clearXray.isPending}
+                onClick={() => clearXray.mutate()}
+              >
+                {clearXray.isPending ? 'Disconnecting…' : 'Disconnect'}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+      </Card>
+
+      <Card id="testrail" className="scroll-mt-6 space-y-3">
+        <div className="text-xs uppercase tracking-wide text-muted">
+          TestRail
+        </div>
+        <p className="text-xs text-muted">
+          Host, email, API key, and project id. Used only as a case library
+          during AI Generate.
+        </p>
+        <div className="text-xs">
+          Status:{' '}
+          {orgQuery.data?.testrailConfigured ? (
+            <span className="text-success">Connected</span>
+          ) : (
+            <span className="text-muted">Not connected</span>
+          )}
+        </div>
+        {caps.canManageMembers ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Input
+              placeholder="https://your-instance.testrail.io"
+              value={testrailBaseUrl}
+              onChange={(e) => setTestrailBaseUrl(e.target.value)}
+              autoComplete="off"
+            />
+            <Input
+              placeholder="Email"
+              value={testrailEmail}
+              onChange={(e) => setTestrailEmail(e.target.value)}
+              autoComplete="off"
+            />
+            <Input
+              type="password"
+              placeholder="API key"
+              value={testrailApiKey}
+              onChange={(e) => setTestrailApiKey(e.target.value)}
+              autoComplete="off"
+            />
+            <Input
+              placeholder="Project id"
+              value={testrailProjectId}
+              onChange={(e) => setTestrailProjectId(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+        ) : (
+          <p className="text-xs text-muted">
+            Administrators can connect TestRail.
+          </p>
+        )}
+        {testrailError ? (
+          <p className="text-sm text-danger">{testrailError}</p>
+        ) : null}
+        {caps.canManageMembers ? (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              disabled={
+                saveTestrail.isPending ||
+                !testrailBaseUrl.trim() ||
+                !testrailEmail.trim() ||
+                !testrailApiKey.trim() ||
+                !testrailProjectId.trim()
+              }
+              onClick={() => saveTestrail.mutate()}
+            >
+              {saveTestrail.isPending ? 'Connecting…' : 'Connect TestRail'}
+            </Button>
+            {orgQuery.data?.testrailConfigured ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={clearTestrail.isPending}
+                onClick={() => clearTestrail.mutate()}
+              >
+                {clearTestrail.isPending ? 'Disconnecting…' : 'Disconnect'}
               </Button>
             ) : null}
           </div>

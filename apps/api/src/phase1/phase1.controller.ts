@@ -237,6 +237,64 @@ export class Phase1Controller {
     );
   }
 
+  @Post('orgs/:orgId/projects/:projectId/ai-generate/runs')
+  startAiGenerateRun(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    return this.phase1.startAiGenerateRun(user.id, orgId, projectId, body);
+  }
+
+  @Get('orgs/:orgId/projects/:projectId/ai-generate/runs/:runId')
+  getAiGenerateRun(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('runId') runId: string,
+  ) {
+    return this.phase1.getAiGenerateRun(user.id, orgId, projectId, runId);
+  }
+
+  @Patch(
+    'orgs/:orgId/projects/:projectId/ai-generate/runs/:runId/suggestions/:suggestionId',
+  )
+  patchAiSuggestion(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('runId') runId: string,
+    @Param('suggestionId') suggestionId: string,
+    @Body() body: unknown,
+  ) {
+    return this.phase1.patchAiSuggestion(
+      user.id,
+      orgId,
+      projectId,
+      runId,
+      suggestionId,
+      body,
+    );
+  }
+
+  @Post('orgs/:orgId/projects/:projectId/ai-generate/runs/:runId/apply')
+  applyAiGenerateRun(
+    @CurrentUser() user: SessionUser,
+    @Param('orgId') orgId: string,
+    @Param('projectId') projectId: string,
+    @Param('runId') runId: string,
+    @Body() body: unknown,
+  ) {
+    return this.phase1.applyAiGenerateRun(
+      user.id,
+      orgId,
+      projectId,
+      runId,
+      body,
+    );
+  }
+
   @Post('orgs/:orgId/projects/:projectId/test-cases/bulk-create')
   bulkCreateTestCases(
     @CurrentUser() user: SessionUser,

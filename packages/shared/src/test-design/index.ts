@@ -10,3 +10,5 @@ export * from './import-cases.js';
 export * from './review-app.js';
 export * from './execution-creds.js';
 export * from './case-fingerprint.js';
+export * from './embeddings.js';
+export * from './ai-orchestrate.js';
