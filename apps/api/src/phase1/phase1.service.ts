@@ -28,6 +28,7 @@ import {
   jiraTicketListSchema,
   jiraImportRequirementsSchema,
   generateTestCasesSchema,
+  classifyAgainstExisting,
   credsFromCases,
   extractAppUrlFromText,
   reviewApplicationByFetch,
@@ -3689,6 +3690,21 @@ export class Phase1Service {
       ).trim();
       documentName = file.originalname;
     }
+    const jiraEpicKey = input.jiraEpicKey?.trim() || '';
+    const jiraKeys = (input.jiraKeys ?? []).map((k) => k.trim()).filter(Boolean);
+    const jiraRequirements =
+      jiraEpicKey || jiraKeys.length
+        ? await this.jiraTicketsAsLlmRequirements(orgId, userId, {
+            epicKey: jiraEpicKey || undefined,
+            keys: jiraKeys,
+          })
+        : [];
+    if (jiraRequirements.length && !sourceText) {
+      sourceText = jiraRequirements
+        .map((r) => `${r.requirementKey}: ${r.title}\n${r.description}`)
+        .join('\n\n');
+      documentName = jiraEpicKey || jiraKeys[0] || 'jira';
+    }
     const project = await prisma.project.findUnique({
       where: { id: projectId },
       select: {
@@ -3699,7 +3715,9 @@ export class Phase1Service {
         requirementText: true,
       },
     });
-    const includeReqs = input.includeProjectRequirements !== false;
+    const includeReqs = jiraRequirements.length
+      ? input.includeProjectRequirements === true
+      : input.includeProjectRequirements !== false;
     const storedRequirements = includeReqs
       ? (
           await prisma.requirement.findMany({
@@ -3733,6 +3751,14 @@ export class Phase1Service {
         description: project.requirementText.trim(),
         acceptanceCriteria: [],
       });
+    }
+    if (jiraRequirements.length) {
+      const seen = new Set(storedRequirements.map((r) => r.requirementKey));
+      for (const row of jiraRequirements) {
+        if (seen.has(row.requirementKey)) continue;
+        seen.add(row.requirementKey);
+        storedRequirements.unshift(row);
+      }
     }
     let username: string | undefined;
     let password: string | undefined;
@@ -3790,9 +3816,57 @@ export class Phase1Service {
       storedRequirements,
       pageMap,
     });
+    let cases = generated.cases;
+    let skippedDuplicates = 0;
+    if (input.gapOnly) {
+      const existing = await prisma.testCase.findMany({
+        where: { projectId, deletedAt: null },
+        select: {
+          id: true,
+          scenario: true,
+          module: true,
+          designTechnique: true,
+          requirementKey: true,
+          steps: true,
+          expected: true,
+        },
+      });
+      const mappedExisting = existing.map((row) => ({
+        id: row.id,
+        scenario: row.scenario,
+        module: row.module,
+        designTechnique: row.designTechnique,
+        requirementKey: row.requirementKey,
+        steps: Array.isArray(row.steps) ? row.steps.map(String) : [],
+        expected: row.expected,
+      }));
+      const usedIds = new Set<string>();
+      const kept: typeof cases = [];
+      for (const c of cases) {
+        const verdict = classifyAgainstExisting({
+          candidate: {
+            scenario: c.scenario,
+            module: c.module,
+            designTechnique: c.designTechnique,
+            requirementKey: c.requirementKey,
+            steps: c.steps,
+            expected: c.expected,
+          },
+          existing: mappedExisting,
+          usedIds,
+        });
+        if (verdict.disposition === 'new') {
+          kept.push(c);
+        } else {
+          skippedDuplicates += 1;
+          if (verdict.matchId) usedIds.add(verdict.matchId);
+        }
+      }
+      cases = kept;
+    }
     await this.planUsage.recordUsage(orgId, 'AI_GENERATE', 1, {
       projectId,
-      caseCount: generated.cases.length,
+      caseCount: cases.length,
     });
     const promptText = sourceText.trim();
     if (promptText) {
@@ -3802,15 +3876,50 @@ export class Phase1Service {
           userId,
           prompt: promptText.slice(0, 100_000),
           source: 'GENERATE',
-          caseCount: generated.cases.length,
+          caseCount: cases.length,
         },
       });
     }
     return {
       ...generated,
+      cases,
+      skippedDuplicates,
       folderId: input.folderId ?? null,
       pageMap,
     };
+  }
+
+  private async jiraTicketsAsLlmRequirements(
+    orgId: string,
+    userId: string,
+    opts: { epicKey?: string; keys?: string[] },
+  ) {
+    await this.planUsage.assertFeature(orgId, 'jira', userId);
+    const config = await this.orgs.readJiraConfig(orgId);
+    if (!config) {
+      throw new BadRequestException(
+        'Connect Jira in Settings before generating from a Jira epic.',
+      );
+    }
+    const tickets = await listJiraTicketCandidates(config, {
+      mode: opts.epicKey ? 'EPIC' : 'KEYS',
+      epicKey: opts.epicKey,
+      keys: opts.keys,
+    });
+    const rows = tickets
+      .filter((t) => !t.isBug)
+      .map((t) => ({
+        requirementKey: t.key,
+        title: t.summary,
+        description: t.description || t.summary,
+        acceptanceCriteria: [] as string[],
+      }));
+    if (!rows.length) {
+      throw new BadRequestException(
+        'No Jira stories found for that epic/key. Use an epic like KAN-1, not a Bug.',
+      );
+    }
+    return rows;
   }
 
   async listAiPrompts(userId: string, orgId: string, projectId: string) {
@@ -4792,6 +4901,15 @@ function coerceGenerateBody(body: unknown): unknown {
         .map((s) => s.trim())
         .filter(Boolean);
     }
+  }
+  if (typeof raw.gapOnly === 'string') {
+    raw.gapOnly = raw.gapOnly === '1' || raw.gapOnly === 'true';
+  }
+  if (typeof raw.jiraKeys === 'string') {
+    raw.jiraKeys = raw.jiraKeys
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
   return raw;
 }

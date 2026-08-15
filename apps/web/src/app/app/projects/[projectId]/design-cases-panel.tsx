@@ -811,9 +811,23 @@ export function DesignCasesPanel({
                   type="button"
                   size="sm"
                   variant="secondary"
-                  onClick={() => setJiraImportOpen(true)}
+                  onClick={() => {
+                    setAiDefaults({ intent: 'generate' });
+                    setAiOpen(true);
+                  }}
                 >
-                  Import from Jira
+                  AI Generate
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setAiDefaults({ intent: 'gap' });
+                    setAiOpen(true);
+                  }}
+                >
+                  AI Gap
                 </Button>
                 <Button
                   type="button"
@@ -822,17 +836,6 @@ export function DesignCasesPanel({
                   onClick={() => setAgentOpen(true)}
                 >
                   AI QA Engineer
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => {
-                    setAiDefaults(null);
-                    setAiOpen(true);
-                  }}
-                >
-                  AI
                 </Button>
                 <Button type="button" size="sm" onClick={startAdd}>
                   Add case
@@ -859,6 +862,10 @@ export function DesignCasesPanel({
                 },
                 ...(canEdit
                   ? [
+                      {
+                        label: 'Import from Jira',
+                        onClick: () => setJiraImportOpen(true),
+                      },
                       {
                         label: 'Import',
                         onClick: () => setImportOpen(true),

@@ -376,6 +376,9 @@ export const generateTestCasesSchema = z.object({
   folderId: z.string().min(1).nullable().optional(),
   includeProjectRequirements: z.boolean().optional(),
   reviewApplication: z.boolean().optional(),
+  jiraEpicKey: z.string().trim().max(40).optional(),
+  jiraKeys: z.array(z.string().trim().min(1).max(40)).max(50).optional(),
+  gapOnly: z.boolean().optional(),
   techniques: z
     .array(
       z.enum([

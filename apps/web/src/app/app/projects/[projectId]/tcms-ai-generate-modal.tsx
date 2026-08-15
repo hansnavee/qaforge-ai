@@ -37,6 +37,7 @@ type GenerateResponse = {
   };
   tokensUsed: number;
   requirementCount: number;
+  skippedDuplicates?: number;
   pageMap?: {
     url: string;
     title: string;
@@ -62,6 +63,8 @@ export type AiGenerateModalDefaults = {
   reviewApplication?: boolean;
   source?: 'GENERATE' | 'UPDATE' | 'ENV_REFRESH';
   caseIds?: string[];
+  intent?: 'generate' | 'gap';
+  jiraEpicKey?: string;
 };
 
 export function TcmsAiGenerateModal({
@@ -91,6 +94,8 @@ export function TcmsAiGenerateModal({
   const [folderId, setFolderId] = useState(defaultFolderId);
   const [includeReqs, setIncludeReqs] = useState(true);
   const [reviewApp, setReviewApp] = useState(true);
+  const [jiraEpicKey, setJiraEpicKey] = useState('');
+  const [intent, setIntent] = useState<'generate' | 'gap'>('generate');
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -131,6 +136,9 @@ export function TcmsAiGenerateModal({
     setApplyMode(defaults?.applyMode ?? 'create');
     setPrompt(defaults?.prompt ?? '');
     setReviewApp(defaults?.reviewApplication ?? true);
+    setIntent(defaults?.intent ?? 'generate');
+    setJiraEpicKey(defaults?.jiraEpicKey ?? '');
+    setIncludeReqs(!defaults?.jiraEpicKey && defaults?.intent !== 'gap');
     setApplySource(defaults?.source ?? (defaults?.applyMode === 'update' ? 'UPDATE' : 'GENERATE'));
     setTargetCaseIds(defaults?.caseIds ?? []);
     setStep('form');
@@ -168,8 +176,8 @@ export function TcmsAiGenerateModal({
 
   async function generate() {
     setError(null);
-    if (mode === 'prompt' && !prompt.trim() && !includeReqs && !reviewApp) {
-      setError('Paste requirements, or include project requirements / review the app URL');
+    if (mode === 'prompt' && !prompt.trim() && !includeReqs && !reviewApp && !jiraEpicKey.trim()) {
+      setError('Enter a Jira epic (e.g. KAN-1), paste requirements, or include project requirements');
       return;
     }
     if (mode === 'upload' && !file) {
@@ -186,6 +194,8 @@ export function TcmsAiGenerateModal({
         form.append('folderId', folderId);
         form.append('includeProjectRequirements', includeReqs ? 'true' : 'false');
         form.append('reviewApplication', reviewApp ? 'true' : 'false');
+        if (jiraEpicKey.trim()) form.append('jiraEpicKey', jiraEpicKey.trim());
+        form.append('gapOnly', intent === 'gap' ? 'true' : 'false');
         data = await apiForm<GenerateResponse>(
           `/api/v1/orgs/${orgId}/projects/${projectId}/test-cases/generate`,
           form,
@@ -200,6 +210,8 @@ export function TcmsAiGenerateModal({
               folderId: folderId || null,
               includeProjectRequirements: includeReqs,
               reviewApplication: reviewApp,
+              jiraEpicKey: jiraEpicKey.trim() || undefined,
+              gapOnly: intent === 'gap',
             }),
           },
         );
@@ -280,9 +292,11 @@ export function TcmsAiGenerateModal({
       open={open}
       title={
         step === 'form'
-          ? applyMode === 'update'
-            ? 'Update cases with AI'
-            : 'Generate cases with AI'
+          ? intent === 'gap'
+            ? 'AI Gap'
+            : applyMode === 'update'
+              ? 'Update cases with AI'
+              : 'AI Generate'
           : applyMode === 'update'
             ? 'Select cases to update'
             : 'Select cases to add'
@@ -339,11 +353,17 @@ export function TcmsAiGenerateModal({
         <div className="grid gap-4 md:grid-cols-[1fr_220px]">
           <div className="space-y-3">
           <p className="text-xs text-muted">
-            Describe what to test, include the app URL, and ask for coverage
-            (e.g. Welcome + Login, 100% coverage). We review the live page when
-            possible and return modules, techniques, and many executable cases —
-            not one canned login row.
+            {intent === 'gap'
+              ? 'Reads the Jira epic live, then shows only cases that are not already in this project.'
+              : 'Reads the Jira epic live and generates cases. You do not need Import from Jira first.'}
           </p>
+          <input
+            className={fieldClass}
+            placeholder="Jira epic or story key (e.g. KAN-1)"
+            value={jiraEpicKey}
+            onChange={(e) => setJiraEpicKey(e.target.value)}
+            autoComplete="off"
+          />
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
@@ -513,8 +533,8 @@ export function TcmsAiGenerateModal({
                   {preview?.coverage?.requirementCount
                     ? ` · ${preview.coverage.requirementCount} requirements`
                     : ''}
-                  {preview?.pageMap?.url
-                    ? ` · reviewed ${preview.pageMap.url}`
+                  {preview?.skippedDuplicates
+                    ? ` · skipped ${preview.skippedDuplicates} already in this project`
                     : ''}
                 </p>
                 {modules.size > 0 ? (
