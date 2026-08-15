@@ -8,24 +8,12 @@ import {
   parseJsonFromLlm,
   requirementsFromSource,
   resolveGenerateTechniques,
-  wantsFullCoverage,
   type AppPageMap,
   type DesignTechnique,
   type GeneratedCasePreview,
   type StoredRequirementForLlm,
   type TechniqueCoverageReport,
 } from '@qaforge/shared';
-
-function chunkTechniques(
-  techniques: DesignTechnique[],
-  size = 2,
-): DesignTechnique[][] {
-  const chunks: DesignTechnique[][] = [];
-  for (let i = 0; i < techniques.length; i += size) {
-    chunks.push(techniques.slice(i, i + size));
-  }
-  return chunks.length ? chunks : [[]];
-}
 
 @Injectable()
 export class AiGenerateCasesService {
@@ -60,7 +48,6 @@ export class AiGenerateCasesService {
       sourceText,
       opts.techniques?.length ? opts.techniques : null,
     );
-    const fullCoverage = wantsFullCoverage(sourceText);
     const combinedSource = [
       sourceText,
       ...stored.map((r) => `${r.requirementKey}: ${r.title}\n${r.description}`),
@@ -78,8 +65,8 @@ export class AiGenerateCasesService {
       );
     }
 
-    // Chunk techniques so free models return smaller, reliable JSON batches.
-    const chunks = chunkTechniques(techniques, fullCoverage ? 2 : 3);
+    // One batch, fast model: Railway HTTP dies if we wait on several 90s free-model calls.
+    const chunks = [techniques];
     const mergedRaw: unknown[] = [];
     let tokensUsed = 0;
     const errors: string[] = [];
@@ -100,7 +87,7 @@ export class AiGenerateCasesService {
         loginUrl: opts.loginUrl,
         username: opts.username,
         password: opts.password,
-        storedRequirements: stored,
+        storedRequirements: stored.slice(0, 20),
         pageMap: opts.pageMap,
         techniques: chunk.length ? chunk : techniques,
       });
@@ -110,9 +97,11 @@ export class AiGenerateCasesService {
           system: SENIOR_QA_GENERATE_SYSTEM,
           prompt: userPrompt,
           json: true,
-          model: 'reasoning',
-          maxTokens: fullCoverage ? 8_000 : 6_000,
+          model: 'fast',
+          maxTokens: 3_500,
           temperature: 0.2,
+          timeoutMs: 20_000,
+          maxAttempts: 2,
         });
         tokensUsed += result.tokensUsed;
         const parsed = parseJsonFromLlm(result.text) as {
@@ -130,13 +119,6 @@ export class AiGenerateCasesService {
       }
     }
 
-    if (!mergedRaw.length) {
-      throw new BadRequestException(
-        `AI generate timed out or failed (${errors.join('; ') || 'no cases'}). Try a shorter prompt, or retry.`,
-      );
-    }
-
-    // Deduplicate across chunks before assemble fillers run.
     const seen = new Set<string>();
     const dedupedRaw: unknown[] = [];
     for (const row of mergedRaw) {
@@ -160,11 +142,16 @@ export class AiGenerateCasesService {
       type: opts.type,
       priorityLabel: opts.priorityLabel,
       appUrl: opts.appUrl,
-      fillMissing: fullCoverage,
+      fillMissing: true,
     });
     if (!assembled.cases.length) {
       throw new BadRequestException(
-        'AI returned no valid test cases. Add more detail (URL, credentials, expected result) and retry.',
+        `AI generate timed out or failed (${errors.join('; ') || 'no cases'}). Try a shorter prompt, or retry.`,
+      );
+    }
+    if (errors.length) {
+      this.logger.warn(
+        `LLM generate incomplete (${errors.join('; ')}); returned ${assembled.cases.length} coverage-filled cases`,
       );
     }
     return {

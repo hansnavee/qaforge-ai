@@ -520,6 +520,8 @@ export class OpenRouterLlmClient implements LlmClient {
     model?: 'fast' | 'reasoning';
     maxTokens?: number;
     temperature?: number;
+    timeoutMs?: number;
+    maxAttempts?: number;
   }): Promise<{ text: string; tokensUsed: number }> {
     if (!this.apiKey) {
       return mockComplete(opts);
@@ -567,10 +569,16 @@ export class OpenRouterLlmClient implements LlmClient {
     let lastErr = '';
     let lastModel = '';
     const perAttemptMs = Math.max(
-      15_000,
-      Number(process.env.OPENROUTER_TIMEOUT_MS ?? 90_000) || 90_000,
+      10_000,
+      Number(opts.timeoutMs ?? process.env.OPENROUTER_TIMEOUT_MS ?? 90_000) ||
+        90_000,
     );
-    for (const model of candidates) {
+    const maxAttempts = Math.min(
+      Math.max(opts.maxAttempts ?? candidates.length, 1),
+      candidates.length,
+    );
+    const tryModels = candidates.slice(0, maxAttempts);
+    for (const model of tryModels) {
       lastModel = model;
       const body: Record<string, unknown> = {
         model,

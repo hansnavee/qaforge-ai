@@ -42,5 +42,7 @@ export interface LlmClient {
     model?: 'fast' | 'reasoning';
     maxTokens?: number;
     temperature?: number;
+    timeoutMs?: number;
+    maxAttempts?: number;
   }): Promise<{ text: string; tokensUsed: number }>;
 }
