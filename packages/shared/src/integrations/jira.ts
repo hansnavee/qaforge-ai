@@ -552,7 +552,7 @@ export async function createJiraIssue(
   return {
     key: data.key,
     id: data.id,
-    url: `${base}/browse/${data.key}`,
+    url: `${siteOrigin(config)}/browse/${data.key}`,
   };
 }
 
