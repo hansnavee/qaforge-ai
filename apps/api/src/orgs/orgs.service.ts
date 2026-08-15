@@ -296,6 +296,8 @@ export class OrgsService {
             apiToken: config.apiToken,
             projectKey: config.projectKey,
             issueType: config.issueType || 'Bug',
+            cloudId: config.cloudId,
+            authMode: config.authMode ?? 'basic',
           }),
         ),
       },

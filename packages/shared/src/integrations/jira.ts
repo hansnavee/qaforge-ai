@@ -3,6 +3,8 @@
  * TCMS remains canonical; Jira is an optional external provider.
  */
 
+export type JiraAuthMode = 'basic' | 'bearer';
+
 export type JiraConnectionConfig = {
   baseUrl: string;
   email: string;
@@ -10,6 +12,9 @@ export type JiraConnectionConfig = {
   projectKey: string;
   /** Defaults to Bug (for defect create) */
   issueType?: string;
+  /** Atlassian cloud id — required for scoped API tokens. */
+  cloudId?: string;
+  authMode?: JiraAuthMode;
 };
 
 export type JiraIssueInput = {
@@ -103,28 +108,129 @@ function authHeader(email: string, apiToken: string): string {
   return `Basic ${toBase64(`${email.trim()}:${normalizeJiraApiToken(apiToken)}`)}`;
 }
 
-function jiraHeaders(config: JiraConnectionConfig): Record<string, string> {
-  return {
-    Authorization: authHeader(config.email, config.apiToken),
+function restHeaders(
+  config: JiraConnectionConfig,
+  mode: JiraAuthMode,
+  withJsonBody: boolean,
+): Record<string, string> {
+  const token = normalizeJiraApiToken(config.apiToken);
+  const headers: Record<string, string> = {
+    Authorization:
+      mode === 'bearer'
+        ? `Bearer ${token}`
+        : authHeader(config.email, token),
     Accept: 'application/json',
-    'Content-Type': 'application/json',
     'User-Agent': 'QAForge-AI',
   };
+  if (withJsonBody) headers['Content-Type'] = 'application/json';
+  return headers;
+}
+
+function siteOrigin(config: JiraConnectionConfig): string {
+  return normalizeBaseUrl(config.baseUrl);
+}
+
+function gatewayOrigin(cloudId: string): string {
+  return `https://api.atlassian.com/ex/jira/${cloudId}`;
+}
+
+function restUrl(origin: string, path: string): string {
+  const p = path.startsWith('/') ? path : `/${path}`;
+  return `${origin}${p}`;
 }
 
 async function jiraAuthedFetch(
   url: string,
-  headers: Record<string, string>,
+  init: RequestInit,
 ): Promise<Response> {
   let current = url;
   for (let hop = 0; hop < 5; hop += 1) {
-    const res = await fetch(current, { headers, redirect: 'manual' });
+    const res = await fetch(current, { ...init, redirect: 'manual' });
     if (res.status < 300 || res.status >= 400) return res;
     const loc = res.headers.get('location');
     if (!loc) return res;
     current = new URL(loc, current).toString();
   }
-  return fetch(url, { headers });
+  return fetch(url, init);
+}
+
+export async function resolveJiraCloudId(
+  site: string,
+): Promise<string | null> {
+  const res = await fetch(`${site}/_edge/tenant_info`, {
+    headers: { Accept: 'application/json', 'User-Agent': 'QAForge-AI' },
+  });
+  if (!res.ok) return null;
+  const data = (await res.json().catch(() => null)) as {
+    cloudId?: unknown;
+  } | null;
+  return typeof data?.cloudId === 'string' && data.cloudId.trim()
+    ? data.cloudId.trim()
+    : null;
+}
+
+function isAuthFailure(res: Response): boolean {
+  return res.status === 401 || res.status === 403;
+}
+
+async function jiraApiFetch(
+  config: JiraConnectionConfig,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const withJsonBody = Boolean(init.body);
+  const site = siteOrigin(config);
+  const method = init.method ?? 'GET';
+
+  const attempt = (origin: string, mode: JiraAuthMode) =>
+    jiraAuthedFetch(restUrl(origin, path), {
+      ...init,
+      method,
+      headers: {
+        ...restHeaders(config, mode, withJsonBody),
+        ...(init.headers as Record<string, string> | undefined),
+      },
+    });
+
+  const remember = (cloudId: string | undefined, mode: JiraAuthMode) => {
+    if (cloudId) config.cloudId = cloudId;
+    config.authMode = mode;
+  };
+
+  if (config.cloudId) {
+    const gw = gatewayOrigin(config.cloudId);
+    const preferred = config.authMode ?? 'basic';
+    const first = await attempt(gw, preferred);
+    if (first.ok || !isAuthFailure(first)) {
+      remember(config.cloudId, preferred);
+      return first;
+    }
+    const other: JiraAuthMode = preferred === 'bearer' ? 'basic' : 'bearer';
+    const second = await attempt(gw, other);
+    if (second.ok) remember(config.cloudId, other);
+    return second;
+  }
+
+  const siteRes = await attempt(site, 'basic');
+  if (siteRes.ok) {
+    remember(undefined, 'basic');
+    return siteRes;
+  }
+  if (!isAuthFailure(siteRes)) return siteRes;
+
+  const cloudId = await resolveJiraCloudId(site);
+  if (!cloudId) return siteRes;
+  const gw = gatewayOrigin(cloudId);
+  const basicGw = await attempt(gw, 'basic');
+  if (basicGw.ok) {
+    remember(cloudId, 'basic');
+    return basicGw;
+  }
+  const bearerGw = await attempt(gw, 'bearer');
+  if (bearerGw.ok) remember(cloudId, 'bearer');
+  else if (!isAuthFailure(basicGw)) return basicGw;
+  else remember(cloudId, 'bearer');
+  return bearerGw;
 }
 
 function severityLabel(severity?: string): string {
@@ -197,6 +303,12 @@ export function parseJiraConnectionConfig(
     typeof o.issueType === 'string' && o.issueType.trim()
       ? o.issueType.trim()
       : 'Bug';
+  const cloudId =
+    typeof o.cloudId === 'string' && o.cloudId.trim()
+      ? o.cloudId.trim()
+      : undefined;
+  const authMode: JiraAuthMode | undefined =
+    o.authMode === 'bearer' || o.authMode === 'basic' ? o.authMode : undefined;
   if (!baseUrl || !email || !apiToken || !projectKey) return null;
   return {
     baseUrl,
@@ -204,6 +316,8 @@ export function parseJiraConnectionConfig(
     apiToken,
     projectKey,
     issueType,
+    cloudId,
+    authMode,
   };
 }
 
@@ -263,10 +377,8 @@ async function jiraSearch(
   jql: string,
   maxResults = 50,
 ): Promise<JiraTicketCandidate[]> {
-  const base = normalizeBaseUrl(config.baseUrl);
-  const res = await fetch(`${base}/rest/api/3/search`, {
+  const res = await jiraApiFetch(config, '/rest/api/3/search', {
     method: 'POST',
-    headers: jiraHeaders(config),
     body: JSON.stringify({
       jql,
       maxResults: Math.min(Math.max(maxResults, 1), 50),
@@ -402,10 +514,8 @@ export async function createJiraIssue(
   config: JiraConnectionConfig,
   input: JiraIssueInput,
 ): Promise<JiraIssueResult> {
-  const base = normalizeBaseUrl(config.baseUrl);
-  const res = await fetch(`${base}/rest/api/3/issue`, {
+  const res = await jiraApiFetch(config, '/rest/api/3/issue', {
     method: 'POST',
-    headers: jiraHeaders(config),
     body: JSON.stringify({
       fields: {
         project: { key: config.projectKey },
@@ -448,27 +558,26 @@ export async function createJiraIssue(
 
 export async function verifyJiraConnection(
   config: JiraConnectionConfig,
-): Promise<{ ok: true; accountId?: string }> {
-  const base = normalizeBaseUrl(config.baseUrl);
-  const headers = {
-    Authorization: authHeader(config.email, config.apiToken),
-    Accept: 'application/json',
-    'User-Agent': 'QAForge-AI',
-  };
-  const me = await jiraAuthedFetch(`${base}/rest/api/3/myself`, headers);
+): Promise<{
+  ok: true;
+  accountId?: string;
+  cloudId?: string;
+  authMode: JiraAuthMode;
+}> {
+  const me = await jiraApiFetch(config, '/rest/api/3/myself');
   if (!me.ok) {
-    if (me.status === 401 || me.status === 403) {
+    if (isAuthFailure(me)) {
       throw new Error(
-        'Jira rejected the email and API token. Use the Atlassian account email for this site, and an API token from https://id.atlassian.com/manage-profile/security/api-tokens (not your Jira password). Create a new token, paste it once, and retry.',
+        'Jira rejected the token on the site URL and on api.atlassian.com. Create a classic API token, or a scoped token with read:jira-user and read:jira-work, at https://id.atlassian.com/manage-profile/security/api-tokens. Use the Atlassian account email and the project key (e.g. KAN), not an issue key (KAN-1).',
       );
     }
     const text = await me.text().catch(() => '');
     throw new Error(`Jira auth failed (${me.status}): ${text.slice(0, 160)}`);
   }
   const meJson = (await me.json()) as { accountId?: string };
-  const project = await jiraAuthedFetch(
-    `${base}/rest/api/3/project/${encodeURIComponent(config.projectKey)}`,
-    headers,
+  const project = await jiraApiFetch(
+    config,
+    `/rest/api/3/project/${encodeURIComponent(config.projectKey)}`,
   );
   if (!project.ok) {
     const text = await project.text().catch(() => '');
@@ -476,5 +585,10 @@ export async function verifyJiraConnection(
       `Jira project ${config.projectKey} not found (${project.status}): ${text.slice(0, 160)}`,
     );
   }
-  return { ok: true, accountId: meJson.accountId };
+  return {
+    ok: true,
+    accountId: meJson.accountId,
+    cloudId: config.cloudId,
+    authMode: config.authMode ?? 'basic',
+  };
 }

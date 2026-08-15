@@ -402,7 +402,8 @@ export default function SettingsPage() {
           Dual-write defects to Jira Cloud. QAForge TCMS stays the canonical
           record; connected Jira projects receive matching issues. Use the
           site host (your-domain.atlassian.net), the Atlassian account email,
-          an API token from id.atlassian.com (not your Jira password), and the
+          an API token from id.atlassian.com (classic, or scoped with
+          read:jira-user and read:jira-work — not your Jira password), and the
           project key (QA), not an issue key like QA-12.
         </p>
         <div className="text-xs">
